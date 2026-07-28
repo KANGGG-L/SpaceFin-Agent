@@ -20,5 +20,7 @@ jobs:
           node-version: '20'
       - name: Install pre-commit
         run: pip install pre-commit
+      - name: Install Node dependencies
+        run: npm ci
       - name: Run pre-commit on all files
         run: pre-commit run --all-files --show-diff-on-failure
