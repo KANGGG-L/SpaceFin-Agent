@@ -1,0 +1,6 @@
+dimension,value,loan_count,balance_total
+risk_class,关注,23,52149.49
+risk_class,可疑,2,2731.21
+risk_class,损失,3,5556.46
+risk_class,次级,10,30778.91
+risk_class,正常,162,360274.22

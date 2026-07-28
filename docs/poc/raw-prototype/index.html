@@ -1,0 +1,839 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SpaceFin Agent · 资产质量监控平台 — 交互原型</title>
+<style>
+  :root{
+    --bg:#F4F7FA; --surface:#FFFFFF; --surface-2:#F7FAFC;
+    --primary:#1A365D; --primary-600:#234876; --primary-700:#16304f;
+    --text:#1A2A38; --muted:#71808F; --border:#E4EAF1; --border-strong:#D3DCE6;
+    --info:#3B82F6;
+    /* status */
+    --ok:#2BB673;   --ok-bg:#E6F4EA;   --ok-bd:#38A169;
+    --warn:#E0A22E; --warn-bg:#FEF3C7;  --warn-bd:#DD9526;
+    --sub:#ED8934;  --sub-bg:#FEEBC8;   --sub-bd:#C05621;
+    --susp:#E53E3E; --susp-bg:#FED7D7;  --susp-bd:#E53E3E;
+    --loss:#C53030; --loss-bg:#F8CBC6;  --loss-bd:#9B2D20;
+    --low:#1A365D;  --low-bg:#EBF4FF;   --low-bd:#1A365D;
+    --shadow:0 1px 2px rgba(16,32,56,.04),0 4px 16px rgba(16,32,56,.06);
+    --radius:12px;
+    --font:"PingFang SC","Microsoft YaHei","Hiragino Sans GB","Source Han Sans SC",sans-serif;
+    --mono:"JetBrains Mono","SF Mono",ui-monospace,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  .num{font-family:var(--mono);font-feature-settings:"tnum";font-variant-numeric:tabular-nums}
+
+  /* ---------- App shell ---------- */
+  .app{min-height:100vh;display:flex;flex-direction:column}
+  .topbar{height:60px;background:var(--surface);border-bottom:1px solid var(--border);
+    display:flex;align-items:center;padding:0 24px;gap:24px;position:sticky;top:0;z-index:50}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;color:var(--primary);font-size:16px;min-width:170px}
+  .brand .logo{width:28px;height:28px;border-radius:8px;background:linear-gradient(135deg,var(--primary),#2c5a8f);
+    display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800}
+  .nav{display:flex;align-items:center;gap:6px}
+  .navitem{padding:8px 16px;border-radius:8px;color:var(--muted);cursor:pointer;position:relative;font-weight:500;
+    display:flex;align-items:center;gap:8px;transition:.15s}
+  .navitem:hover{background:var(--surface-2);color:var(--text)}
+  .navitem.active{background:var(--surface-2);color:var(--primary);font-weight:600}
+  .navitem .badge{background:var(--susp);color:#fff;font-size:11px;font-weight:700;border-radius:9px;
+    min-width:18px;height:18px;padding:0 5px;display:flex;align-items:center;justify-content:center}
+  .spacer{flex:1}
+  .user{display:flex;align-items:center;gap:14px}
+  .bell{width:22px;height:22px;color:var(--muted)}
+  .avatar{width:32px;height:32px;border-radius:50%;background:var(--primary);color:#fff;display:flex;
+    align-items:center;justify-content:center;font-weight:600;font-size:13px}
+
+  /* ---------- Pages ---------- */
+  .page{display:none;padding:24px;max-width:1440px;margin:0 auto;width:100%}
+  .page.active{display:block;animation:fade .25s ease}
+  @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+
+  .panel{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow)}
+  .section-head{display:flex;align-items:center;justify-content:space-between;padding:18px 20px 0}
+  .section-title{font-size:15px;font-weight:700;color:var(--text)}
+  .section-sub{font-size:12px;color:var(--muted)}
+  .link{color:var(--primary);font-size:13px;cursor:pointer;font-weight:600}
+  .link:hover{text-decoration:underline}
+
+  /* ---------- Dashboard ---------- */
+  .updatebar{display:flex;align-items:center;gap:8px;background:var(--surface-2);padding:8px 16px;border-radius:8px;
+    margin-bottom:20px;font-size:12px;color:var(--muted)}
+  .dot-live{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(43,182,115,.18)}
+  .kpi-row{display:grid;grid-template-columns:repeat(4,1fr);gap:24px;margin-bottom:24px}
+  .kpi{padding:20px;border-radius:var(--radius);background:var(--surface);border:1px solid var(--border);box-shadow:var(--shadow);cursor:pointer;transition:.15s}
+  .kpi:hover{border-color:var(--primary-600);transform:translateY(-2px)}
+  .kpi .k-head{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px}
+  .kpi .k-ico{width:16px;height:16px;color:var(--primary-600)}
+  .kpi .k-val{font-size:30px;font-weight:600;color:var(--text);margin:8px 0 2px;display:flex;align-items:baseline;gap:6px}
+  .kpi .k-unit{font-size:14px;color:var(--muted);font-weight:500}
+  .kpi .k-delta{font-size:13px;font-weight:600;display:flex;align-items:center;gap:4px}
+  .delta-up{color:var(--susp)} .delta-down{color:var(--ok)}
+  .bento{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:24px}
+  .card{padding:20px;border-radius:var(--radius);background:var(--surface);border:1px solid var(--border);box-shadow:var(--shadow)}
+  .card h3{font-size:15px;font-weight:700;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between}
+
+  /* matrix table */
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{padding:10px 8px;text-align:center}
+  thead th{color:var(--muted);font-weight:600;font-size:12px;background:var(--surface-2);border-bottom:1px solid var(--border)}
+  tbody tr{border-bottom:1px solid var(--surface-2)}
+  tbody tr:nth-child(even){background:var(--surface-2)}
+  td.val{font-family:var(--mono)}
+  .status-pill{display:inline-flex;align-items:center;justify-content:center;min-width:64px;height:28px;padding:0 12px;border-radius:6px;
+    font-size:13px;font-weight:600;border:1px solid}
+  .pill-ok{background:var(--ok-bg);border-color:var(--ok-bd);color:#1f7a4d}
+  .pill-warn{background:var(--warn-bg);border-color:var(--warn-bd);color:#9a6a12}
+  .pill-sub{background:var(--sub-bg);border-color:var(--sub-bd);color:#a8531a}
+  .pill-susp{background:var(--susp-bg);border-color:var(--susp-bd);color:#c0392b}
+  .pill-loss{background:var(--loss-bg);border-color:var(--loss-bd);color:#8e2420}
+  .rate-up{color:var(--ok)} .rate-mid{color:var(--warn)} .rate-high{color:var(--susp)} .rate-crit{color:var(--loss)}
+
+  /* heatmap */
+  .heat td.cell{color:#fff;font-weight:600;font-family:var(--mono)}
+  .heat .prov{text-align:left;font-weight:600;color:var(--text);background:transparent!important}
+  .hint{font-size:12px;color:var(--muted);margin-top:12px}
+
+  /* bottom action bar */
+  .actionbar{display:flex;align-items:center;justify-content:space-between;background:var(--surface);
+    border:1px solid var(--border);border-radius:var(--radius);padding:16px 20px;box-shadow:var(--shadow)}
+  .actionbar .note{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:8px}
+  .actions{display:flex;gap:12px;align-items:center}
+  .btn{display:inline-flex;align-items:center;gap:6px;padding:0 16px;height:38px;border-radius:8px;border:1px solid transparent;
+    font-size:13px;font-weight:600;cursor:pointer;transition:.15s}
+  .btn-primary{background:var(--primary);color:#fff}
+  .btn-primary:hover{background:var(--primary-700)}
+  .btn-ghost{background:var(--surface-2);color:var(--text);border-color:var(--border)}
+  .btn-ghost:hover{border-color:var(--primary-600)}
+
+  /* ---------- LTV page ---------- */
+  .filterbar{display:flex;gap:16px;margin-bottom:20px;flex-wrap:wrap}
+  .f-card{flex:1;min-width:520px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+    padding:16px 20px;box-shadow:var(--shadow)}
+  .f-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .search{flex:0 0 220px;height:40px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2);
+    display:flex;align-items:center;gap:8px;padding:0 12px}
+  .search input{border:none;background:transparent;outline:none;font-size:13px;flex:1;color:var(--text);font-family:var(--font)}
+  .thresh-label{font-size:13px;color:var(--text);font-weight:500}
+  .thresh{display:flex;gap:4px}
+  .thr{padding:6px 10px;border-radius:8px;border:1px solid var(--border);background:var(--surface-2);font-size:13px;
+    font-family:var(--mono);cursor:pointer;color:var(--muted)}
+  .thr:hover{border-color:var(--primary-600)}
+  .thr.active{background:var(--primary);color:#fff;border-color:var(--primary)}
+  .chip-row{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+  .chip{padding:6px 12px;border-radius:12px;border:1px solid var(--border);background:var(--surface-2);font-size:12px;
+    cursor:pointer;color:var(--muted);transition:.15s}
+  .chip:hover{border-color:var(--primary-600)}
+  .chip.active{background:var(--primary);color:#fff;border-color:var(--primary)}
+
+  .summary{flex:0 0 500px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+    padding:18px 20px;display:flex;gap:14px;align-items:center;box-shadow:var(--shadow)}
+  .stat{display:flex;flex-direction:column}
+  .stat .v{font-size:24px;font-weight:700;font-family:var(--mono)}
+  .stat .l{font-size:12px;color:var(--muted)}
+  .stat-red .v{color:var(--susp)} .stat-orange .v{color:var(--sub)}
+  .stat-gray .v{color:var(--muted)} .stat-blue .v{color:var(--primary)}
+  .vline{width:1px;align-self:stretch;background:var(--border);margin:6px 0}
+
+  .table-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);overflow:hidden}
+  .t-head{display:flex;align-items:center;gap:8px;padding:16px 20px}
+  .t-head .ic{width:18px;height:18px;color:var(--susp)}
+  .t-head h3{font-size:15px;font-weight:700}
+  .t-head .count{margin-left:8px;font-size:12px;color:var(--muted)}
+  .grid-table{width:100%}
+  .grid-table .gthead,.grid-table .grow{display:grid;grid-template-columns:180px 220px 200px 160px 200px 180px 196px;align-items:center}
+  .gthead{background:var(--surface-2);border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+  .gthead div{padding:12px 12px;font-size:12px;color:var(--muted);font-weight:600}
+  .grow{border-bottom:1px solid var(--surface-2);cursor:pointer;transition:.12s}
+  .grow:hover{background:var(--surface-2)}
+  .grow > div{padding:10px 12px;font-size:13px}
+  .grow .c-id{font-family:var(--mono);font-weight:600;color:var(--primary)}
+  .grow .c-num{font-family:var(--mono)}
+  .grow .c-ltv{font-family:var(--mono);font-weight:600}
+  .ltv-red{color:var(--susp)} .ltv-amber{color:var(--warn)} .ltv-gray{color:var(--muted)}
+  .sev-pill{display:inline-flex;align-items:center;justify-content:center;min-width:120px;height:30px;padding:0 12px;border-radius:6px;
+    font-size:12px;font-weight:600;border:1px solid}
+  .c-op a{color:var(--primary);font-weight:600;cursor:pointer}
+  .detail{background:#F0F5FA;border-top:1px dashed var(--border)}
+  .detail-inner{padding:18px 20px;display:grid;grid-template-columns:repeat(2,1fr);gap:10px 40px}
+  .kv{display:flex;gap:10px;font-size:13px}
+  .kv .k{color:var(--muted);min-width:96px}
+  .kv .val{color:var(--text);font-weight:500}
+  .muted-note{font-size:12px;color:var(--muted);grid-column:1/-1;margin-top:4px}
+
+  /* ---------- Map page ---------- */
+  .map-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+  .map-head .title{font-size:18px;font-weight:700}
+  .map-head .sub{font-size:13px;color:var(--muted)}
+  .back{display:inline-flex;align-items:center;gap:6px;color:var(--primary);font-weight:600;cursor:pointer;font-size:13px}
+  .toolbar{display:flex;align-items:center;justify-content:space-between;background:var(--surface);border:1px solid var(--border);
+    border-radius:var(--radius);padding:12px 20px;margin-bottom:20px;box-shadow:var(--shadow);flex-wrap:wrap;gap:12px}
+  .seg{display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+  .seg button{border:none;background:var(--surface-2);padding:7px 14px;font-size:13px;cursor:pointer;color:var(--muted);border-right:1px solid var(--border)}
+  .seg button:last-child{border-right:none}
+  .seg button.active{background:var(--surface);color:var(--primary);font-weight:600}
+  .toolbar .status-filter{display:flex;align-items:center;gap:8px}
+  .s-chip{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:999px;background:var(--surface-2);
+    border:1px solid var(--border);font-size:12px;cursor:pointer;color:var(--muted)}
+  .s-chip .d{width:8px;height:8px;border-radius:50%}
+  .s-chip.active{background:var(--primary);color:#fff;border-color:var(--primary)}
+  .s-chip.active .d{box-shadow:0 0 0 2px rgba(255,255,255,.6)}
+
+  .map-layout{display:grid;grid-template-columns:1fr 320px;gap:20px}
+  .map-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow)}
+  .map-card .mh{display:flex;align-items:baseline;gap:12px;margin-bottom:12px}
+  .map-card .mh .t{font-size:15px;font-weight:700}
+  .map-card .mh .s{font-size:12px;color:var(--muted)}
+  .mapwrap{position:relative;border-radius:8px;overflow:hidden;background:#fff;aspect-ratio:1020/700}
+  .mapwrap .mapbase{position:absolute;inset:0;width:100%;height:100%;display:block}
+  .mapwrap svg{position:absolute;inset:0;width:100%;height:100%}
+  .city-dot{cursor:pointer;transition:.15s}
+  .city-dot:hover{opacity:.85}
+  .city-label{font-size:11px;fill:var(--text);font-family:var(--font);pointer-events:none}
+  .legend-float{position:absolute;background:rgba(255,255,255,.95);border:1px solid var(--border);border-radius:8px;padding:10px;font-size:12px;box-shadow:var(--shadow)}
+  .legend-float .lt{font-weight:700;margin-bottom:6px;font-size:12px}
+  .legend-float .li{display:flex;align-items:center;gap:6px;margin:3px 0}
+  .shp{display:inline-block;width:12px;height:12px}
+  .map-foot{display:flex;align-items:center;gap:16px;margin-top:12px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+  .map-foot .lg{display:flex;align-items:center;gap:6px}
+  .map-foot .d{width:10px;height:10px;border-radius:50%}
+  /* floating loan-status legend — compact, collapsible, sits over ocean (top-right) so it never blocks the province */
+  .status-legend{position:absolute;top:12px;right:12px;z-index:6;background:rgba(255,255,255,.92);border:1px solid var(--border);
+    border-radius:8px;box-shadow:var(--shadow);font-size:12px;backdrop-filter:blur(2px);max-width:148px;overflow:hidden}
+  .status-legend .sl-head{display:flex;align-items:center;justify-content:space-between;padding:7px 10px;font-weight:700;font-size:12px;border-bottom:1px solid var(--border)}
+  .status-legend .sl-toggle{width:18px;height:18px;border:none;background:var(--surface-2);border-radius:4px;cursor:pointer;color:var(--muted);
+    font-size:14px;line-height:1;display:flex;align-items:center;justify-content:center;flex:none}
+  .status-legend .sl-toggle:hover{border-color:var(--primary-600)}
+  .status-legend .sl-body{padding:6px 10px}
+  .status-legend .li{display:flex;align-items:center;gap:7px;margin:3px 0}
+  .status-legend .d{width:10px;height:10px;border-radius:50%;flex:none}
+  .status-legend .sl-note{margin-top:6px;padding-top:6px;border-top:1px dashed var(--border);color:var(--muted);font-size:11px;line-height:1.45}
+  .status-legend.collapsed .sl-body{display:none}
+  .status-legend.collapsed{border-bottom:none}
+
+  .side .panel{padding:16px;margin-bottom:16px;border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow)}
+  .side h4{font-size:14px;font-weight:700;margin-bottom:12px}
+  .ov{display:flex;align-items:center;justify-content:space-between;padding:7px 0;font-size:13px}
+  .ov .k{color:var(--muted)} .ov .v{font-weight:600;font-family:var(--mono);color:var(--text)}
+  .ov .v.danger{color:var(--susp)}
+  .lt-row{display:flex;align-items:center;justify-content:space-between;padding:7px 0;font-size:13px}
+  .lt-row .l{display:flex;align-items:center;gap:10px}
+  .rc{display:flex;align-items:center;justify-content:space-between;font-size:13px;margin-bottom:2px}
+  .rc .r{color:var(--text)} .rc .p{font-family:var(--mono);font-weight:600}
+  .barbg{height:6px;border-radius:3px;background:var(--surface-2);overflow:hidden;margin-bottom:10px}
+  .bar{height:100%;border-radius:3px}
+
+  .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--primary);color:#fff;
+    padding:12px 20px;border-radius:10px;font-size:13px;font-weight:600;opacity:0;pointer-events:none;transition:.25s;z-index:100;box-shadow:var(--shadow)}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+  .mtip{position:absolute;background:#0f1b2d;color:#fff;font-size:12px;padding:8px 10px;border-radius:8px;pointer-events:none;
+    transform:translate(-50%,-115%);white-space:nowrap;display:none;z-index:5;box-shadow:0 6px 18px rgba(0,0,0,.25)}
+  .mtip b{color:#7dd3fc}
+
+  /* ---------- 政策参数配置 ---------- */
+  .cfg-group{padding:20px;border-radius:var(--radius);background:var(--surface);border:1px solid var(--border);box-shadow:var(--shadow);margin-bottom:24px}
+  .cfg-head{display:flex;align-items:center;gap:10px;margin-bottom:16px}
+  .cfg-head .h-ic{width:18px;height:18px;color:var(--primary-600);flex:none}
+  .cfg-head .h-t{font-size:15px;font-weight:700;color:var(--text)}
+  .cfg-head .h-s{font-size:12px;color:var(--muted)}
+  .rule{display:flex;align-items:center;gap:14px;padding:14px 16px;border-radius:8px;margin-bottom:12px}
+  .rule:last-child{margin-bottom:0}
+  .rule.r-susp{background:var(--susp-bg)} .rule.r-sub{background:var(--sub-bg)} .rule.r-warn{background:var(--warn-bg)} .rule.r-gray{background:#EDF1F5} .rule.r-ok{background:var(--ok-bg)}
+  .thr-tag{flex:none;min-width:96px;height:40px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;color:#fff;font-family:var(--mono);padding:0 10px}
+  .tag-susp{background:var(--susp)} .tag-sub{background:var(--sub)} .tag-warn{background:var(--warn)} .tag-gray{background:var(--muted)} .tag-ok{background:var(--ok)}
+  .rule .arrow{color:var(--muted);font-size:14px;font-family:var(--mono);flex:none}
+  .rule .res{font-weight:700;font-size:13px;width:128px;flex:none}
+  .rt-susp{color:var(--susp)} .rt-sub{color:var(--sub)} .rt-warn{color:#b07d12} .rt-gray{color:var(--muted)} .rt-ok{color:var(--ok-bd)}
+  .toggle{flex:none;width:62px;height:32px;border-radius:16px;display:flex;align-items:center;justify-content:space-between;padding:0 8px;cursor:pointer;font-family:var(--mono);font-size:11px;font-weight:700;transition:.2s;user-select:none}
+  .toggle.on{background:var(--primary);color:#fff}
+  .toggle.off{background:#DCE3EC;color:var(--muted);flex-direction:row-reverse}
+  .toggle::after{content:'';width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.25);flex:none}
+  .rule .act{color:var(--muted);font-size:12px;flex:1}
+  .bar{padding:16px 20px;border-radius:var(--radius);background:var(--surface);border:1px solid var(--border);box-shadow:var(--shadow);margin-bottom:24px}
+  .bar.save{display:flex;align-items:center;justify-content:space-between}
+  .changelog{padding:20px;border-radius:var(--radius);background:var(--surface);border:1px solid var(--border);box-shadow:var(--shadow)}
+  .cl-tbl{width:100%;border-collapse:collapse;margin-top:12px;font-size:12px}
+  .cl-tbl th{text-align:left;color:var(--muted);font-weight:600;padding:10px 12px;background:var(--surface-2);border-radius:6px}
+  .cl-tbl td{padding:10px 12px;border-top:1px solid var(--border);color:var(--text)}
+  .cl-tbl .mono{font-family:var(--mono)}
+  .cl-type{font-weight:700}
+  .cl-type.primary{color:var(--primary)} .cl-type.ok{color:var(--ok-bd)} .cl-type.susp{color:var(--susp)} .cl-type.sub{color:var(--sub-bd)}
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- Top bar -->
+  <div class="topbar">
+    <div class="brand"><span class="logo">S</span>SpaceFin Agent</div>
+    <nav class="nav" id="nav">
+      <div class="navitem active" data-page="dash"><span>监控驾驶舱</span></div>
+      <div class="navitem" data-page="ltv"><span>LTV 爆仓预警</span><span class="badge">12</span></div>
+      <div class="navitem" data-page="map"><span>区域贷款分布</span></div>
+      <div class="navitem" data-page="config"><span>政策参数配置</span></div>
+    </nav>
+    <div class="spacer"></div>
+    <div class="user">
+      <svg class="bell" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
+      <div class="avatar">管</div>
+    </div>
+  </div>
+
+  <!-- ============ DASHBOARD ============ -->
+  <section class="page active" id="page-dash">
+    <div class="updatebar"><span class="dot-live"></span>数据更新时间：2026-07-27 23:45 · T+1 日终批处理已完成</div>
+
+    <div class="kpi-row" id="kpiRow"></div>
+
+    <div class="bento">
+      <div class="card">
+        <h3><span>五级分类迁徙矩阵</span><span class="section-sub">期初 → 期末（笔）</span></h3>
+        <table id="matrixTbl"></table>
+        <div class="hint">迁徙路径：正常 → 关注（4 笔） · 关注 → 次级（9 笔）</div>
+      </div>
+      <div class="card">
+        <h3><span>区域风险热力图</span><span class="link" data-go="map">查看分布地图 →</span></h3>
+        <table class="heat" id="heatTbl"></table>
+        <div class="hint">颜色 = 贷款五级分类状态；数值为该省对应分类笔数。</div>
+      </div>
+    </div>
+
+    <div class="actionbar">
+      <div class="note"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>口径说明：本数据截至 2026-07-25 18:00，含表内贷款</div>
+      <div class="actions">
+        <span class="section-sub" style="margin-right:8px">刷新时间：2026-07-27 23:45</span>
+        <button class="btn btn-primary" data-export="PDF">导出 PDF</button>
+        <button class="btn btn-ghost" data-export="Excel">导出 Excel</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ LTV ============ -->
+  <section class="page" id="page-ltv">
+    <div class="filterbar">
+      <div class="f-card">
+        <div class="f-row">
+          <div class="search">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#71808F" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+            <input id="ltvSearch" placeholder="搜索抵押物 ID / 地址" />
+          </div>
+          <span class="thresh-label">LTV 阈值：</span>
+          <div class="thresh" id="threshRow"></div>
+          <button class="btn btn-primary" id="applyFilter">筛选</button>
+          <button class="btn btn-ghost" id="resetFilter">重置</button>
+        </div>
+        <div class="chip-row" id="chipRow"></div>
+      </div>
+      <div class="summary" id="summary"></div>
+    </div>
+
+    <div class="table-card">
+      <div class="t-head">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/></svg>
+        <h3>LTV 爆仓预警列表</h3><span class="count" id="rowCount"></span>
+      </div>
+      <div class="grid-table">
+        <div class="gthead">
+          <div>抵押物 ID</div><div>AVM 估值</div><div>贷款余额</div><div>LTV 比率</div><div>严重程度</div><div>处置状态</div><div>操作</div>
+        </div>
+        <div id="ltvBody"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ MAP ============ -->
+  <section class="page" id="page-map">
+    <div class="map-head">
+      <div>
+        <div class="title">区域贷款分布地图</div>
+        <div class="sub">点击城市可下钻 · 真实地理边界广东地图</div>
+      </div>
+      <div class="back" data-go="dash">← 返回驾驶舱</div>
+    </div>
+
+    <div class="toolbar">
+      <div class="seg" id="regionSeg">
+        <button class="active">全国</button>
+        <button>广东省</button>
+        <button>广州市</button>
+      </div>
+      <div class="status-filter" id="statusFilter">
+        <span style="font-size:13px;color:var(--muted)">贷款状态</span>
+      </div>
+    </div>
+
+    <div class="map-layout">
+      <div class="map-card">
+        <div class="mh"><span class="t" id="mapTitle">广东省 · 贷款分布图</span><span class="s">颜色 = 贷款五级分类状态</span></div>
+        <div class="mapwrap" id="mapwrap">
+          <svg class="mapbase" viewBox="0 0 1020 700" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg"><path d="M470 437 L491 468 L527 444 L524 428 L539 401 L527 404 L547 389 L542 365 L565 400 L625 381 L638 400 L653 393 L644 384 L650 375 L639 374 L662 359 L667 383 L683 388 L703 360 L720 355 L765 375 L769 363 L761 363 L771 350 L786 353 L793 366 L851 340 L875 342 L882 318 L911 309 L908 297 L921 273 L956 267 L929 232 L925 204 L933 194 L905 151 L910 135 L878 144 L862 112 L845 122 L838 112 L826 116 L803 105 L786 127 L796 149 L778 151 L745 122 L711 137 L687 137 L681 149 L667 143 L662 153 L657 146 L629 158 L598 134 L618 127 L628 100 L665 83 L659 74 L666 65 L642 48 L583 67 L578 45 L565 45 L556 58 L529 61 L497 45 L496 36 L478 39 L463 56 L442 58 L444 68 L464 73 L456 80 L461 104 L445 109 L434 109 L420 81 L364 76 L356 101 L362 113 L333 141 L349 172 L327 188 L334 217 L320 226 L319 238 L301 235 L302 251 L281 260 L270 278 L264 302 L274 330 L266 347 L249 364 L230 366 L230 376 L195 384 L192 397 L186 396 L198 418 L182 424 L185 432 L146 429 L151 465 L103 467 L93 494 L77 492 L79 517 L93 520 L76 530 L64 582 L75 616 L92 634 L94 663 L143 659 L169 638 L160 609 L151 608 L151 592 L126 582 L130 564 L155 548 L179 545 L196 527 L230 518 L257 513 L254 522 L270 511 L300 510 L313 498 L325 505 L344 496 L336 487 L358 477 L373 489 L393 476 L417 481 L436 461 L453 471 L469 439 Z M951 280 L927 284 L948 288 L951 281 Z M433 504 L445 479 L425 488 L434 491 L432 503 Z M404 502 L420 496 L420 486 L404 501 Z M655 384 L654 385 Z M584 442 L582 441 Z M606 450 L616 445 L605 450 Z M544 451 L543 451 Z M169 561 L180 546 L156 549 L168 560 Z M393 492 L395 491 Z M166 561 L141 560 L129 578 L158 572 L167 581 L167 562 Z M557 452 L558 453 Z M579 470 L579 468 Z M363 506 L363 505 Z M556 434 L554 433 Z M578 447 L579 447 Z M653 399 L652 397 Z M550 457 L550 456 Z M582 466 L583 465 Z M545 462 L546 460 Z M569 448 L569 447 Z M477 472 L484 468 L476 471 Z M245 527 L245 525 Z M564 438 L564 439 Z M557 405 L555 405 Z M558 438 L557 438 Z M601 454 L600 454 Z M479 458 L480 458 Z M596 455 L595 455 Z M476 462 L476 461 Z M422 488 L422 487 Z M650 373 L651 373 Z M539 448 L539 447 Z M906 598 L920 608 L904 618 L917 619 L925 603 L912 597 Z M541 460 L540 458 Z M678 392 L678 391 Z M358 499 L359 498 Z M446 500 L444 500 Z M463 470 L462 470 Z M355 496 L355 495 Z M419 500 L419 499 Z M655 372 L656 374 Z M567 439 L565 439 Z M664 384 L663 384 Z M544 435 L545 436 Z M654 401 L656 400 Z M411 501 L410 501 Z M153 609 L152 607 Z M709 361 L709 360 Z M579 449 L580 448 Z M902 607 L900 606 Z M543 440 L544 441 Z M421 498 L420 498 Z M181 578 L170 586 L181 580 Z M719 365 L720 364 Z M171 650 L173 648 Z M593 457 L595 456 Z M154 552 L155 551 Z M560 392 L560 391 Z M436 504 L435 503 Z M528 427 L530 428 Z M151 558 L154 557 Z M808 559 L823 566 L809 558 Z M806 573 L815 580 L807 572 Z M559 393 L560 393 Z" fill="#DCE3EC" fill-rule="evenodd" stroke="#8A97A8" stroke-width="1.6" stroke-linejoin="round"/></svg>
+          <div class="mtip" id="mtip"></div>
+          <svg id="mapSvg" viewBox="0 0 1020 700" preserveAspectRatio="xMidYMid meet"></svg>
+          <div class="status-legend" id="statusLegend">
+            <div class="sl-head"><span>贷款状态</span><button class="sl-toggle" id="slToggle" aria-label="收起/展开图例" title="收起 / 展开">−</button></div>
+            <div class="sl-body" id="slBody">
+              <div class="li"><span class="d" style="background:#2BB673"></span>正常</div>
+              <div class="li"><span class="d" style="background:#E0A22E"></span>关注</div>
+              <div class="li"><span class="d" style="background:#ED8934"></span>次级</div>
+              <div class="li"><span class="d" style="background:#F56565"></span>可疑</div>
+              <div class="li"><span class="d" style="background:#C53030"></span>损失</div>
+              <div class="sl-note">颜色 = 贷款状态<br>形状 = 贷款类型</div>
+            </div>
+          </div>
+        </div>
+        <div class="map-foot">
+          <span class="lg"><span class="d" style="background:#2BB673"></span>正常</span>
+          <span class="lg"><span class="d" style="background:#E0A22E"></span>关注</span>
+          <span class="lg"><span class="d" style="background:#ED8934"></span>次级</span>
+          <span class="lg"><span class="d" style="background:#F56565"></span>可疑</span>
+          <span class="lg"><span class="d" style="background:#C53030"></span>损失</span>
+          <span style="margin-left:auto">颜色 = 贷款五级分类状态；筛选将实时隐藏非选中状态</span>
+        </div>
+      </div>
+
+      <div class="side">
+        <div class="panel">
+          <h4 id="sideTitle">概览指标 · 广东省</h4>
+          <div class="ov"><span class="k">区域总余额</span><span class="v">¥3,842 亿</span></div>
+          <div class="ov"><span class="k">贷款笔数</span><span class="v">128,940 笔</span></div>
+          <div class="ov"><span class="k">不良率</span><span class="v danger">2.37%</span></div>
+        </div>
+        <div class="panel">
+          <h4>贷款类型（地图标记形状）</h4>
+          <div class="lt-row"><span class="l"><span class="shp" style="border-radius:50%;background:#27AE60"></span>个人经营贷</span><span class="num">34%</span></div>
+          <div class="lt-row"><span class="l"><span class="shp" style="width:0;height:0;border-left:7px solid transparent;border-right:7px solid transparent;border-bottom:12px solid #E0A22E"></span>住房按揭贷</span><span class="num">28%</span></div>
+          <div class="lt-row"><span class="l"><span class="shp" style="background:#ED8934"></span>消费金融贷</span><span class="num">19%</span></div>
+          <div class="lt-row"><span class="l"><span class="shp" style="transform:rotate(45deg);background:#F56565"></span>小微企业贷</span><span class="num">12%</span></div>
+          <div class="lt-row"><span class="l"><span class="shp" style="background:#C53030;clip-path:polygon(50% 0,61% 35%,98% 35%,68% 57%,79% 91%,50% 70%,21% 91%,32% 57%,2% 35%,39% 35%)"></span>供应链金融</span><span class="num">7%</span></div>
+        </div>
+        <div class="panel">
+          <h4>风险城市 Top 5（不良率）</h4>
+          <div id="riskList"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ CONFIG ============ -->
+  <section class="page" id="page-config">
+    <div class="updatebar"><span class="dot-live"></span>政策参数配置 · 最后同步 2026-07-27 23:40 · 修改后需点击「保存」生效</div>
+    <div id="cfgWrap"></div>
+  </section>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ---------------- Data (from Ardot prototype) ---------------- */
+const STATUS = {
+  ok:  {name:'正常', color:'#2BB673'}, warn:{name:'关注', color:'#E0A22E'},
+  sub: {name:'次级', color:'#ED8934'}, susp:{name:'可疑', color:'#F56565'},
+  loss:{name:'损失', color:'#C53030'}
+};
+
+const KPIS = [
+  {k:'在贷余额', v:'¥12.8', u:'亿元', d:'+2.3%', dir:'up', sub:'环比上月', go:'dash'},
+  {k:'不良率 NPL', v:'3.2', u:'%', d:'+0.1pp', dir:'up', sub:'环比上月'},
+  {k:'拨备覆盖率', v:'185', u:'%', d:'-5pp', dir:'down', sub:'环比上月'},
+  {k:'LTV > 70% 占比', v:'8.7', u:'%', d:'+0.4pp', dir:'up', sub:'环比上月', go:'ltv'},
+];
+
+const MATRIX = [
+  {c:'正常',pill:'pill-ok', init:160, add:12, in:0,  out:4,  end:168, rate:'2.1%', rc:'rate-up'},
+  {c:'关注',pill:'pill-warn',init:35,  add:8,  in:4,  out:9,  end:38,  rate:'5.7%', rc:'rate-mid'},
+  {c:'次级',pill:'pill-sub', init:14,  add:5,  in:9,  out:3,  end:25,  rate:'8.3%', rc:'rate-mid'},
+  {c:'可疑',pill:'pill-susp',init:7,   add:3,  in:3,  out:2,  end:11,  rate:'18.2%',rc:'rate-high'},
+  {c:'损失',pill:'pill-loss',init:2,   add:1,  in:2,  out:0,  end:5,   rate:'40.0%',rc:'rate-crit'},
+];
+
+const HEAT = [
+  {p:'广东', ok:420, warn:38, sub:12, susp:4,  loss:2},
+  {p:'浙江', ok:380, warn:25, sub:8,  susp:2,  loss:1},
+  {p:'江苏', ok:350, warn:30, sub:9,  susp:3,  loss:1},
+  {p:'湖北', ok:180, warn:22, sub:11, susp:4,  loss:2},
+  {p:'四川', ok:210, warn:28, sub:14, susp:6,  loss:3},
+  {p:'河北', ok:160, warn:19, sub:10, susp:5,  loss:3},
+];
+
+const LTV = [
+  {id:'M0001',avm:'¥428.5 万',loan:'¥320.0 万',ltv:87.3,sev:'high',st:'待处置',addr:'上海市浦东新区世纪大道 100 号商业综合体',method:'机器学习回归模型（R²=0.82，高置信度）',owner:'张明',reval:'2026-07-20'},
+  {id:'M0003',avm:'¥356.2 万',loan:'¥268.0 万',ltv:75.2,sev:'watch',st:'处置中'},
+  {id:'M0007',avm:'¥512.8 万',loan:'¥380.0 万',ltv:74.1,sev:'watch',st:'待处置'},
+  {id:'M0012',avm:'¥289.4 万',loan:'¥215.0 万',ltv:86.5,sev:'high',st:'待处置'},
+  {id:'M0018',avm:'¥445.1 万',loan:'¥310.0 万',ltv:69.7,sev:'low',st:'已处置'},
+  {id:'M0023',avm:'¥398.7 万',loan:'¥295.0 万',ltv:74.0,sev:'watch',st:'待处置'},
+  {id:'M0034',avm:'¥267.3 万',loan:'¥198.0 万',ltv:85.8,sev:'high',st:'处置中'},
+  {id:'M0041',avm:'¥534.6 万',loan:'¥420.0 万',ltv:78.6,sev:'watch',st:'待处置'},
+  {id:'M0056',avm:'¥312.8 万',loan:'¥230.0 万',ltv:73.5,sev:'watch',st:'已结清'},
+  {id:'M0072',avm:'¥478.9 万',loan:'¥355.0 万',ltv:88.2,sev:'high',st:'待处置'},
+  {id:'M0089',avm:'¥356.4 万',loan:'¥258.0 万',ltv:72.4,sev:'watch',st:'待处置'},
+  {id:'M0105',avm:'¥298.1 万',loan:'¥220.0 万',ltv:73.8,sev:'watch',st:'处置中'},
+];
+const SEV = {
+  high:  {label:'● 爆仓风险高', pill:'pill-susp',  cls:'sev-pill', bg:'#FED7D7', bd:'#E53E3E', fg:'#C0392B'},
+  watch: {label:'△ 需关注',    pill:'pill-warn',  cls:'sev-pill', bg:'#FEF3C7', bd:'#DD9526', fg:'#9A6A12'},
+  low:   {label:'○ 低置信度',  pill:'pill-low',   cls:'sev-pill', bg:'#EBF4FF', bd:'#1A365D', fg:'#71808F'},
+};
+const CHIPS = [
+  {k:'all',  t:'全部'}, {k:'high', t:'预警'}, {k:'low', t:'低置信'},
+  {k:'risk', t:'高危区'}, {k:'npl', t:'NPL'},
+];
+const THRESH = [50,60,70,80,90,100];
+const RISK = [
+  {c:'汕头',r:5.8,bar:200,color:'#C53030'},
+  {c:'湛江',r:4.9,bar:170,color:'#C53030'},
+  {c:'韶关',r:4.2,bar:145,color:'#E0A22E'},
+  {c:'清远',r:3.7,bar:128,color:'#E0A22E'},
+  {c:'梅州',r:3.3,bar:114,color:'#E0A22E'},
+];
+/* cities on map (x,y within 1216x832; status + loan type) — anchored to the AI-generated Guangdong outline */
+const CITIES = [
+  {n:'韶关',x:531,y:120,s:'ok',  t:'biz', bal:'¥182 亿'},
+  {n:'广州',x:491,y:319,s:'warn',t:'mort',bal:'¥620 亿'},
+  {n:'佛山',x:474,y:332,s:'sub', t:'cons',bal:'¥410 亿'},
+  {n:'东莞',x:549,y:332,s:'warn',t:'sme', bal:'¥298 亿'},
+  {n:'深圳',x:585,y:387,s:'loss',t:'sup', bal:'¥540 亿'},
+  {n:'中山',x:506,y:391,s:'sub', t:'biz', bal:'¥176 亿'},
+  {n:'珠海',x:525,y:420,s:'susp',t:'mort',bal:'¥158 亿'},
+  {n:'江门',x:469,y:384,s:'ok',  t:'cons',bal:'¥143 亿'},
+  {n:'惠州',x:628,y:321,s:'warn',t:'sme', bal:'¥205 亿'},
+  {n:'汕头',x:895,y:292,s:'susp',t:'sup', bal:'¥132 亿'},
+];
+/* loan type → marker shape (SpaceFin encoding: 形状 = 贷款类型, 颜色 = 贷款状态) */
+const TYPES = {
+  biz:  {name:'个人经营贷', shape:'circle'},
+  mort: {name:'住房按揭贷', shape:'triangle'},
+  cons: {name:'消费金融贷', shape:'square'},
+  sme:  {name:'小微企业贷', shape:'diamond'},
+  sup:  {name:'供应链金融', shape:'star'},
+};
+
+/* ---------------- Render: Dashboard ---------------- */
+function renderKPI(){
+  document.getElementById('kpiRow').innerHTML = KPIS.map(k=>`
+    <div class="kpi" ${k.go?`data-go="${k.go}"`:''}>
+      <div class="k-head"><svg class="k-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="m7 14 3-3 3 3 5-6"/></svg>${k.k}</div>
+      <div class="k-val num">${k.v}<span class="k-unit">${k.u}</span></div>
+      <div class="k-delta ${k.dir==='up'?'delta-up':'delta-down'}">${k.dir==='up'?'▲':'▼'} ${k.d} <span style="color:var(--muted);font-weight:500">${k.sub}</span></div>
+    </div>`).join('');
+}
+function renderMatrix(){
+  const head = `<thead><tr><th>分类</th><th>期初</th><th>本期新增</th><th>迁入</th><th>迁出</th><th>期末</th><th>迁徙率</th></tr></thead>`;
+  const body = MATRIX.map(m=>`
+    <tr>
+      <td><span class="status-pill ${m.pill}">${m.c}</span></td>
+      <td class="val">${m.init}</td><td class="val">${m.add}</td><td class="val">${m.in}</td>
+      <td class="val">${m.out}</td><td class="val">${m.end}</td>
+      <td class="val ${m.rc}">${m.rate}</td>
+    </tr>`).join('');
+  document.getElementById('matrixTbl').innerHTML = head+'<tbody>'+body+'</tbody>';
+}
+function renderHeat(){
+  const cols = ['ok','warn','sub','susp','loss'];
+  const head = `<thead><tr><th style="text-align:left;padding-left:12px">省份</th>${cols.map(c=>`<th>${STATUS[c].name}</th>`).join('')}</tr></thead>`;
+  const body = HEAT.map(h=>{
+    const cells = cols.map(c=>`<td class="cell" style="background:${STATUS[c].color}">${h[c]}</td>`).join('');
+    return `<tr><td class="prov" style="padding-left:12px">${h.p}</td>${cells}</tr>`;
+  }).join('');
+  document.getElementById('heatTbl').innerHTML = head+'<tbody>'+body+'</tbody>';
+}
+
+/* ---------------- Render: LTV ---------------- */
+let state = {chip:'all', thr:null, q:''};
+function ltvMatch(r){
+  if(state.q && !r.id.toLowerCase().includes(state.q.toLowerCase())) return false;
+  if(state.thr && r.ltv < state.thr) return false;
+  if(state.chip==='all') return true;
+  if(state.chip==='high') return r.sev==='high';
+  if(state.chip==='low')  return r.sev==='low';
+  if(state.chip==='risk') return r.ltv>=85;
+  if(state.chip==='npl')  return r.st==='待处置'||r.st==='处置中';
+  return true;
+}
+function renderChips(){
+  document.getElementById('chipRow').innerHTML = CHIPS.map(c=>
+    `<span class="chip ${state.chip===c.k?'active':''}" data-chip="${c.k}">${c.t}</span>`).join('');
+}
+function renderThresh(){
+  document.getElementById('threshRow').innerHTML = THRESH.map(t=>
+    `<span class="thr ${state.thr===t?'active':''}" data-thr="${t}">${t}%</span>`).join('');
+}
+function renderLTV(){
+  const rows = LTV.filter(ltvMatch);
+  const body = rows.map(r=>{
+    const s = SEV[r.sev];
+    const ltvCls = r.ltv>=85?'ltv-red':(r.ltv>=70?'ltv-amber':'ltv-gray');
+    return `
+    <div class="grow" data-id="${r.id}">
+      <div class="c-id">${r.id}</div>
+      <div class="c-num">${r.avm}</div>
+      <div class="c-num">${r.loan}</div>
+      <div class="c-ltv ${ltvCls}">${r.ltv.toFixed(1)}%</div>
+      <div><span class="sev-pill" style="background:${s.bg};border-color:${s.bd};color:${s.fg}">${s.label}</span></div>
+      <div>${r.st}</div>
+      <div class="c-op"><a>查看 →</a></div>
+    </div>`;
+  }).join('');
+  document.getElementById('ltvBody').innerHTML = body;
+  // summary
+  const red = rows.filter(r=>r.sev==='high').length;
+  const orange = rows.filter(r=>r.sev==='watch').length;
+  const gray = rows.filter(r=>r.sev==='low').length;
+  const avg = rows.length? (rows.reduce((a,r)=>a+r.ltv,0)/rows.length).toFixed(1):'—';
+  const max = rows.length? Math.max(...rows.map(r=>r.ltv)):'—';
+  document.getElementById('summary').innerHTML = `
+    <div class="stat"><div class="v num">${rows.length}</div><div class="l">总预警数</div></div>
+    <div class="stat stat-red"><div class="v num">${red}</div><div class="l">红色预警</div></div>
+    <div class="stat stat-orange"><div class="v num">${orange}</div><div class="l">橙色预警</div></div>
+    <div class="stat stat-gray"><div class="v num">${gray}</div><div class="l">低置信度</div></div>
+    <div class="vline"></div>
+    <div class="stat stat-blue"><div class="v num">${avg}%</div><div class="l">平均 LTV</div></div>
+    <div class="stat stat-red"><div class="v num">${max!=='—'?max.toFixed(1)+'%':'—'}</div><div class="l">最高 LTV</div></div>`;
+  document.getElementById('rowCount').textContent = `共 ${rows.length} 条`;
+  // expand handlers
+  document.querySelectorAll('#ltvBody .grow[data-id]').forEach(el=>{
+    el.addEventListener('click',()=>toggleDetail(el));
+  });
+}
+function toggleDetail(el){
+  const id = el.getAttribute('data-id');
+  const next = el.nextElementSibling;
+  if(next && next.classList.contains('detail')){ next.remove(); return; }
+  // close any open
+  document.querySelectorAll('#ltvBody .detail').forEach(d=>d.remove());
+  const r = LTV.find(x=>x.id===id);
+  const s = SEV[r.sev];
+  const detail = document.createElement('div');
+  detail.className='detail';
+  detail.innerHTML = `<div class="detail-inner">
+    <div style="grid-column:1/-1;font-weight:700;color:var(--primary)">抵押物 ${id} · 展开详情</div>
+    <div class="kv"><span class="k">抵押物地址</span><span class="val">${r.addr||'—'}</span></div>
+    <div class="kv"><span class="k">AVM 估值方法</span><span class="val">${r.method||'机器学习回归模型'}</span></div>
+    <div class="kv"><span class="k">处置责任人</span><span class="val">${r.owner||'—'}</span></div>
+    <div class="kv"><span class="k">最近一次重估</span><span class="val num">2026-07-20</span></div>
+    <div class="kv"><span class="k">LTV 比率</span><span class="val num ${r.ltv>=85?'ltv-red':(r.ltv>=70?'ltv-amber':'ltv-gray')}">${r.ltv.toFixed(1)}%</span></div>
+    <div class="kv"><span class="k">严重程度</span><span class="val"><span class="sev-pill" style="background:${s.bg};border-color:${s.bd};color:${s.fg}">${s.label}</span></span></div>
+    <div class="kv"><span class="k">处置状态</span><span class="val">${r.st}</span></div>
+    <div class="muted-note">点击其他预警行可展开 / 收起详情（示意）</div>
+  </div>`;
+  el.after(detail);
+}
+
+/* ---------------- Render: Map ---------------- */
+function starPoints(cx,cy,outer,inner){
+  let pts=[];
+  for(let i=0;i<10;i++){
+    const r = i%2===0?outer:inner;
+    const a = -Math.PI/2 + i*Math.PI/5;
+    pts.push((cx+r*Math.cos(a)).toFixed(1)+','+(cy+r*Math.sin(a)).toFixed(1));
+  }
+  return pts.join(' ');
+}
+/* marker shape per loan type, filled with the loan-status color + white outline (keeps both axes readable) */
+function markerShape(t,cx,cy,fill){
+  const sw=2, st='#fff';
+  switch(t){
+    case 'biz':  return `<circle cx="${cx}" cy="${cy}" r="9" fill="${fill}" stroke="${st}" stroke-width="${sw}"/>`;
+    case 'mort': return `<polygon points="${cx},${cy-11} ${cx+10},${cy+8} ${cx-10},${cy+8}" fill="${fill}" stroke="${st}" stroke-width="${sw}" stroke-linejoin="round"/>`;
+    case 'cons': return `<rect x="${cx-8}" y="${cy-8}" width="16" height="16" rx="2" fill="${fill}" stroke="${st}" stroke-width="${sw}"/>`;
+    case 'sme':  return `<polygon points="${cx},${cy-12} ${cx+12},${cy} ${cx},${cy+12} ${cx-12},${cy}" fill="${fill}" stroke="${st}" stroke-width="${sw}" stroke-linejoin="round"/>`;
+    case 'sup':  return `<polygon points="${starPoints(cx,cy,12,5)}" fill="${fill}" stroke="${st}" stroke-width="${sw}" stroke-linejoin="round"/>`;
+    default:     return `<circle cx="${cx}" cy="${cy}" r="9" fill="${fill}" stroke="${st}" stroke-width="${sw}"/>`;
+  }
+}
+function renderMap(){
+  const svg = document.getElementById('mapSvg');
+  let html = '';
+  CITIES.forEach((c,i)=>{
+    const col = STATUS[c.s].color;
+    html += `<g class="city-dot" data-i="${i}">
+      ${markerShape(c.t,c.x,c.y,col)}
+      <text class="city-label" x="${c.x}" y="${c.y-17}" text-anchor="middle">${c.n}</text>
+    </g>`;
+  });
+  svg.innerHTML = html;
+  // interactions
+  const tip = document.getElementById('mtip');
+  svg.querySelectorAll('.city-dot').forEach(g=>{
+    g.addEventListener('mouseenter',e=>{
+      const c = CITIES[+g.dataset.i];
+      tip.innerHTML = `<b>${c.n}</b> · ${TYPES[c.t].name}<br>${STATUS[c.s].name} · 余额 ${c.bal}`;
+      const rect = svg.getBoundingClientRect();
+      const px = (c.x/1020)*rect.width, py=(c.y/700)*rect.height;
+      tip.style.left = px+'px'; tip.style.top = py+'px'; tip.style.display='block';
+    });
+    g.addEventListener('mouseleave',()=>tip.style.display='none');
+    g.addEventListener('click',()=>showToast(`已下钻：${CITIES[+g.dataset.i].n}（示意）`));
+  });
+}
+function renderRisk(){
+  document.getElementById('riskList').innerHTML = RISK.map(r=>`
+    <div>
+      <div class="rc"><span class="r">${r.c}</span><span class="p" style="color:${r.color}">${r.r.toFixed(1)}%</span></div>
+      <div class="barbg"><div class="bar" style="width:${(r.bar/288*100).toFixed(0)}%;background:${r.color}"></div></div>
+    </div>`).join('');
+}
+function renderStatusFilter(){
+  const wrap = document.getElementById('statusFilter');
+  ['all',...Object.keys(STATUS)].forEach(k=>{
+    const label = k==='all'?'全部':STATUS[k].name;
+    const dot = k==='all'?'':`<span class="d" style="background:${STATUS[k].color}"></span>`;
+    const el = document.createElement('span');
+    el.className='s-chip'+(k==='all'?' active':'');
+    el.dataset.s=k; el.innerHTML = dot+label;
+    el.addEventListener('click',()=>{
+      document.querySelectorAll('#statusFilter .s-chip').forEach(x=>x.classList.remove('active'));
+      el.classList.add('active');
+      const sel = el.dataset.s;
+      document.querySelectorAll('#mapSvg .city-dot').forEach(g=>{
+        const c = CITIES[+g.dataset.i];
+        g.style.opacity = (sel==='all'||c.s===sel)?1:0.12;
+      });
+    });
+    wrap.appendChild(el);
+  });
+}
+
+/* ---------------- Navigation & wiring ---------------- */
+function showPage(p){
+  document.querySelectorAll('.page').forEach(s=>s.classList.remove('active'));
+  document.getElementById('page-'+p).classList.add('active');
+  document.querySelectorAll('#nav .navitem').forEach(n=>n.classList.toggle('active',n.dataset.page===p));
+  document.getElementById('mapTitle').textContent = p==='map'?'广东省 · 贷款分布图':'广东省 · 贷款分布图';
+}
+function showToast(msg){
+  const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show');
+  clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove('show'),2200);
+}
+
+document.getElementById('nav').addEventListener('click',e=>{
+  const it=e.target.closest('.navitem'); if(it) showPage(it.dataset.page);
+});
+document.body.addEventListener('click',e=>{
+  const go=e.target.closest('[data-go]'); if(go){ showPage(go.dataset.go); }
+  const chip=e.target.closest('.chip'); if(chip){ state.chip=chip.dataset.chip; renderChips(); renderLTV(); }
+  const thr=e.target.closest('.thr'); if(thr){ const v=+thr.dataset.thr; state.thr=(state.thr===v?null:v); renderThresh(); renderLTV(); }
+  const ex=e.target.closest('[data-export]'); if(ex){ showToast(`已生成 ${ex.dataset.export}（示意）`); }
+});
+document.getElementById('applyFilter').addEventListener('click',renderLTV);
+document.getElementById('resetFilter').addEventListener('click',()=>{
+  state={chip:'all',thr:null,q:''}; document.getElementById('ltvSearch').value='';
+  renderChips(); renderThresh(); renderLTV(); showToast('已重置筛选条件');
+});
+document.getElementById('ltvSearch').addEventListener('input',e=>{ state.q=e.target.value.trim(); renderLTV(); });
+document.getElementById('regionSeg').addEventListener('click',e=>{
+  const b=e.target.closest('button'); if(!b)return;
+  document.querySelectorAll('#regionSeg button').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active');
+  const map={0:'全国',1:'广东省',2:'广州市'}[[...b.parentElement.children].indexOf(b)];
+  document.getElementById('mapTitle').textContent = (map==='全国'?'全国 · 贷款分布图':map+' · 贷款分布图');
+  document.getElementById('sideTitle').textContent = '概览指标 · '+map;
+  showToast('已切换区域：'+map+'（示意）');
+});
+
+/* ---------------- Map: status legend toggle ---------------- */
+document.getElementById('slToggle').addEventListener('click',()=>{
+  const el = document.getElementById('statusLegend');
+  const collapsed = el.classList.toggle('collapsed');
+  document.getElementById('slToggle').textContent = collapsed ? '+' : '−';
+});
+
+/* ---------------- 政策参数配置 ---------------- */
+const ICON_CFG = '<svg class="h-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/><circle cx="4" cy="12" r="2"/><circle cx="12" cy="6" r="2"/><circle cx="20" cy="16" r="2"/></svg>';
+const CFG_LTV = [
+  {thr:'≥ 85%',   cls:'susp', res:'● 爆仓风险高', resCls:'susp', on:true,  act:'24h 内必须处置'},
+  {thr:'75%~85%', cls:'sub',  res:'△ 需关注',   resCls:'sub',  on:true,  act:'72h 内应启动处置'},
+  {thr:'65%~75%', cls:'warn', res:'○ 黄色关注', resCls:'warn', on:true,  act:'纳入周报跟踪'},
+  {thr:'< 65%',   cls:'gray', res:'✓ 正常',     resCls:'gray', on:false, act:'无需处置动作'},
+];
+const CFG_CONF = [
+  {thr:'R² ≥ 0.8', cls:'ok',   res:'高置信度', resCls:'ok',   on:true,  act:'直接采用 AVM 估值'},
+  {thr:'0.6~0.8',  cls:'warn', res:'中置信度', resCls:'warn', on:true,  act:'参考置信区间 ±10%'},
+  {thr:'R² < 0.6', cls:'susp', res:'低置信度', resCls:'susp', on:false, act:'标记需人工复核'},
+];
+const CFG_GRADE = [
+  {thr:'红色预警', cls:'susp', res:'● 立即处置',   resCls:'susp', on:true,  act:'24h 内必须上报并启动处置'},
+  {thr:'橙色预警', cls:'sub',  res:'△ 重点跟踪',   resCls:'sub',  on:true,  act:'72h 内应启动处置流程'},
+  {thr:'灰色观察', cls:'gray', res:'○ 持续监控',   resCls:'gray', on:false, act:'纳入周报跟踪，不触发工单'},
+];
+const CHANGELOG = [
+  {t:'2026-07-27 23:40', who:'张明', param:'LTV 红线 · ≥ 85%',   diff:'85% → 90%',        type:'修改参数', typeCls:'primary'},
+  {t:'2026-07-27 21:15', who:'李华', param:'估值置信度 · R²',     diff:'0.75 → 0.80',      type:'修改参数', typeCls:'primary'},
+  {t:'2026-07-26 16:30', who:'王芳', param:'预警分级 · 红色',     diff:'关闭 → 开启',      type:'启用规则', typeCls:'ok'},
+  {t:'2026-07-26 10:05', who:'张明', param:'预警分级 · 灰色',     diff:'开启 → 关闭',      type:'禁用规则', typeCls:'susp'},
+  {t:'2026-07-25 14:20', who:'系统', param:'全部参数',           diff:'默认 → 当前',      type:'重置默认', typeCls:'sub'},
+];
+function cfgGroup(title, sub, rules){
+  const rows = rules.map(r=>`
+    <div class="rule r-${r.cls}">
+      <div class="thr-tag tag-${r.cls}">${r.thr}</div>
+      <div class="arrow">→</div>
+      <div class="res rt-${r.resCls}">${r.res}</div>
+      <div class="toggle ${r.on?'on':'off'}" data-on="${r.on}">${r.on?'ON':'OFF'}</div>
+      <div class="act">${r.act}</div>
+    </div>`).join('');
+  return `<div class="cfg-group">
+    <div class="cfg-head">${ICON_CFG}<span class="h-t">${title}</span><span class="h-s">${sub}</span></div>
+    ${rows}
+  </div>`;
+}
+function renderConfig(){
+  const wrap = document.getElementById('cfgWrap');
+  const g1 = cfgGroup('LTV 红线配置','4 条阈值规则', CFG_LTV);
+  const g2 = cfgGroup('估值置信度阈值','3 档 AVM 方法置信区间', CFG_CONF);
+  const g3 = cfgGroup('预警分级规则','自动分级 + 时限要求', CFG_GRADE);
+  const batch = `<div class="bar batch" style="display:flex;align-items:center;justify-content:space-between">
+      <div style="font-weight:700;color:var(--text)">批量操作</div>
+      <div style="display:flex;gap:10px">
+        <button class="btn btn-primary" id="cfgAll">全选</button>
+        <button class="btn btn-ghost" id="cfgNone">全不选</button>
+        <button class="btn" style="background:var(--ok);color:#fff" id="cfgOn">批量启用</button>
+        <button class="btn" style="background:var(--susp);color:#fff" id="cfgOff">批量禁用</button>
+        <button class="btn btn-ghost" id="cfgResetDef">重置默认</button>
+      </div>
+    </div>`;
+  const save = `<div class="bar save">
+      <div style="display:flex;gap:12px">
+        <button class="btn btn-primary" id="cfgSave">保存</button>
+        <button class="btn btn-ghost" id="cfgDiscard">放弃更改</button>
+      </div>
+      <div style="color:var(--muted);font-size:12px">最近编辑：张明 · 2026-07-27 23:40</div>
+    </div>`;
+  const cl = `<div class="changelog">
+      <div class="cfg-head">${ICON_CFG}<span class="h-t">变更日志</span><span class="h-s">最近 5 条操作记录</span></div>
+      <table class="cl-tbl">
+        <thead><tr><th>时间</th><th>操作人</th><th>变更参数</th><th>旧值 → 新值</th><th>操作类型</th></tr></thead>
+        <tbody>
+          ${CHANGELOG.map(c=>`<tr><td class="mono">${c.t}</td><td>${c.who}</td><td>${c.param}</td><td class="mono">${c.diff}</td><td class="cl-type ${c.typeCls}">${c.type}</td></tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+  wrap.innerHTML = g1+g2+g3+batch+save+cl;
+  wireConfig();
+}
+function wireConfig(){
+  const all = (state)=>document.querySelectorAll('#cfgWrap .toggle').forEach(t=>{
+    t.classList.toggle('on',state); t.classList.toggle('off',!state); t.textContent=state?'ON':'OFF'; t.dataset.on=state;
+  });
+  document.querySelectorAll('#cfgWrap .toggle').forEach(t=>{
+    t.addEventListener('click',()=>{ const on=t.classList.toggle('on'); t.classList.toggle('off',!on); t.textContent=on?'ON':'OFF'; t.dataset.on=on; });
+  });
+  document.getElementById('cfgAll').onclick   = ()=>{ all(true);  showToast('已全选所有规则'); };
+  document.getElementById('cfgNone').onclick  = ()=>{ all(false); showToast('已取消全选'); };
+  document.getElementById('cfgOn').onclick    = ()=>{ all(true);  showToast('已批量启用所选规则'); };
+  document.getElementById('cfgOff').onclick   = ()=>{ all(false); showToast('已批量禁用所选规则'); };
+  document.getElementById('cfgResetDef').onclick=()=> showToast('已恢复默认参数（示意）');
+  document.getElementById('cfgSave').onclick  = ()=> showToast('参数已保存');
+  document.getElementById('cfgDiscard').onclick=()=> showToast('已放弃未保存的更改');
+}
+
+/* ---------------- Init ---------------- */
+renderKPI(); renderMatrix(); renderHeat();
+renderChips(); renderThresh(); renderLTV();
+renderRisk(); renderStatusFilter(); renderMap(); renderConfig();
+</script>
+</body>
+</html>

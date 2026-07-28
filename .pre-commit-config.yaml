@@ -1,0 +1,52 @@
+# SpaceFin Agent — pre-commit 配置
+# 安装：pip install pre-commit && pre-commit install
+# 提交信息钩子需要本地有 commitlint：npm install
+repos:
+  # --- 通用钩子（语言无关，开箱即用）---
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+        args: ['--maxkb=2000']
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+      - id: check-case-conflict
+
+  # --- 提交信息规范（Conventional Commits，本地提交前拦截）---
+  # 依赖本地 `npm install` 安装的 @commitlint/cli
+  - repo: local
+    hooks:
+      - id: commitlint
+        name: commitlint
+        entry: npx --no-install commitlint --edit
+        language: system
+        stages: [commit-msg]
+        pass_filenames: false
+
+  # --- Python（数据 / 算法 / 后端）---
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  # --- Node / TypeScript（前端，调用系统 Node）---
+  # 依赖本地 `npm install` 安装的 eslint / prettier
+  - repo: local
+    hooks:
+      - id: eslint
+        name: eslint
+        entry: npx --no-install eslint --fix
+        language: system
+        types_or: [javascript, jsx, ts, tsx]
+        pass_filenames: true
+      - id: prettier
+        name: prettier
+        entry: npx --no-install prettier --check
+        language: system
+        types_or: [javascript, jsx, ts, tsx, json, css]
+        pass_filenames: true

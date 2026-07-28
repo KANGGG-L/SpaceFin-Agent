@@ -1,0 +1,66 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.env
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- Node / TypeScript ----
+node_modules/
+dist/
+build/
+coverage/
+npm-debug.log*
+yarn-error.log*
+.eslintcache
+*.tsbuildinfo
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+
+# ---- Editor ----
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ---- Secrets / local env ----
+.env.local
+.env.*
+!.env.example
+*.key
+*.pem
+
+# ---- Jupyter / Notebooks ----
+.ipynb_checkpoints/
+
+# ---- Logs & temp ----
+*.log
+*.tmp
+*.bak
+.cache/
+
+# ---- Test / coverage ----
+.coverage*
+htmlcov/
+coverage.xml
+
+# ---- Spark / Hive 本地产物（spark42 环境常见）----
+spark-warehouse/
+spark-events/
+.sparkStaging/
+metastore_db/
+derby.log
+*.hivehistory
+
+# ---- 打包 / merge 碎片 ----
+pip-wheel-metadata/
+*.orig
+*.rej
+*~
