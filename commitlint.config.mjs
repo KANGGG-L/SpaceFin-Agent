@@ -1,4 +1,4 @@
-module.exports = {
+export default {
   extends: ["@commitlint/config-conventional"],
   rules: {
     // 允许的提交类型（与项目阶段/职责对应）

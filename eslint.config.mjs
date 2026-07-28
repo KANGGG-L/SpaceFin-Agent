@@ -3,7 +3,7 @@ import js from "@eslint/js";
 export default [
   js.configs.recommended,
   {
-    ignores: ["commitlint.config.js", "eslint.config.mjs"],
+    ignores: ["commitlint.config.mjs", "eslint.config.mjs"],
   },
   {
     rules: {
