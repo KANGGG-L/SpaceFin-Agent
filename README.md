@@ -52,6 +52,38 @@
 └── 阶段 6 ⏳ 上线复盘（规划中）
 ```
 
+## 工程实现（按需接入，循序渐进）
+
+产品决策文档之外，本平台的可运行工程实现按 **Sprint 自底向上、按需接入**推进：每个组件在其业务需要出现时才引入，并同步补充[组件技术说明](docs/tech/components/)与下表登记。当前正按真实容器栈逐层落地（L0→L5）。
+
+### 已接入组件
+
+| 组件 | 层级 | 状态 | 引入 Sprint | 技术说明 |
+|------|------|------|------------|---------|
+| MySQL 业务源库 | L0 数据源头 | ✅ 已接入 | Sprint 0 | [mysql-source.md](docs/tech/components/mysql-source.md) |
+| 安居客采集器 | L0 公开数据获取 | ✅ 已接入 | 数据源探索 | [anjuke-crawler.md](docs/tech/components/anjuke-crawler.md) |
+| └ Redis 任务队列 | 采集中间件 | ✅ 代码集成 | 数据源探索 | [redis-task-queue.md](docs/tech/components/redis-task-queue.md) |
+| └ jhao104/proxy_pool 代理池 | 采集反爬（IP 轮换） | ✅ 客户端集成 | 数据源探索 | [proxy-pool.md](docs/tech/components/proxy-pool.md) |
+| └ Kubernetes 分布式集群 | 采集横向扩展 | ⏸ 清单齐备（待集群） | 数据源探索 | [k8s-crawler-cluster.md](docs/tech/components/k8s-crawler-cluster.md) |
+| Doris + MinIO 湖仓 | L0 分层 | ⏳ 待接入 | Sprint 1 | — |
+| Kafka + Flink 实时 | L1 | ⏳ 待接入 | Sprint 2 | — |
+| AVM（MGWR+GBDT） | L3 | ⏳ 待接入 | Sprint 3 | — |
+| Sedona 空间计算 | L2 | ⏳ 待接入 | Sprint 4 | — |
+| 倒排索引 / Superset 看板 | L5 | ⏳ 待接入 | Sprint 6 | — |
+
+### 本地运行
+
+前置：本机可用 Docker。
+
+```bash
+cp .env.example .env   # .env 已被 gitignore，勿提交真实密码
+make up                # 启动 MySQL 业务源库（首次自动建表 + 灌入合成 seed）
+make sql               # 进入 MySQL 交互终端（spacefin 库）
+make down              # 停止
+```
+
+更多入口见根目录 `Makefile`（`make help`）。合成 seed 由 `seed/generate_seed.py` 生成（确定性、可复现），说明见 [seed/README.md](seed/README.md)。
+
 ## 合规与数据
 
 - 项目涉及金融业务数据，严格执行合规脱敏流程处理，不涉及个人信息出境。
@@ -66,11 +98,11 @@
 
 ## 开发环境与版本
 
-> 规范化开发依赖的固定版本，供团队复现环境（conda 环境名：`spark42`）。
+> 规范化开发依赖的固定版本，供团队复现环境（conda 环境名：`spark`）。
 
 | 工具 | 版本 | 用途 |
 | --- | --- | --- |
-| Python（conda 环境 `spark42`） | 3.10.18 | 本地钩子运行环境 |
+| Python（conda 环境 `spark`） | 3.10.18 | 本地钩子运行环境 |
 | pre-commit | 4.6.1 | 提交前 / 提交信息钩子 |
 | Node.js | v24.16.0 | commitlint 运行环境 |
 | npm | 11.13.0 | 依赖安装 |
@@ -80,7 +112,7 @@
 初始化（在仓库根目录执行）：
 
 ```bash
-conda activate spark42
+conda activate spark
 pip install pre-commit
 pre-commit install
 pre-commit install --hook-type commit-msg   # 启用提交信息校验
