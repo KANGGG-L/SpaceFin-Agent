@@ -44,3 +44,7 @@ python mvp_prototype.py
 - AVM 模型为 GWR-lite（简化带宽），非完整 MGWR 多尺度校准
 - 不包含 UI/看板/驾驶舱交互（属阶段 4 设计评审范畴）
 - 不包含实时反欺诈闭环（PRD 已明确排除）
+
+## 关于输出文件（可复现性）
+
+`ods_loans.csv / dwd_enriched.csv / dws_risk_class.csv / ads_1104_g11.csv / ads_ltv_alerts.csv` 为脚本生成的参考输出并已入库。脚本使用固定随机种子，数据本身可复现；但 AVM 估值依赖的数学函数（`sin` / `cos` / `exp`）在不同平台 / Python 构建间可能存在末位（ULP）差异，故在其它环境重跑，产物可能与入库版本有细微数值差别——**属预期现象，不影响 8/8 验收结论**。如需干净复现，以本机运行时的输出为准。
