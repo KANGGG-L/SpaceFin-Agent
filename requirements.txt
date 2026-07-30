@@ -1,0 +1,19 @@
+# 依赖清单：在 conda env `spark` 中安装
+#
+#   conda create -n spark python=3.10 -y
+#   conda activate spark
+#   conda install -n spark openjdk=17 -y     # PySpark 运行期需系统 Java 17
+#   pip install -r requirements.txt
+#
+# 版本依据桌面参考文档《spark42_环境版本汇总.md》：
+#   Conda env 仅列 Python 3.10.18 + PySpark 4.2.0（pip 来源）。
+
+# —— 参考配置指定 ——
+pyspark==4.2.0
+
+# —— 本仓库运行 / 工具链所需 ——
+aiohttp
+beautifulsoup4
+selenium
+pre-commit==4.6.1
+pytest
