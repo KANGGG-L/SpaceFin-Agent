@@ -113,3 +113,139 @@ class LocalGeocoder:
                 return coords
 
         return None, None
+
+
+class DbGeocoder:
+    """数据库版 geocoder：坐标词典存 MySQL community_coords 表。
+
+    与 LocalGeocoder 的区别：
+    - 键为 (city, community) 复合主键，隔离跨城重名（如"东城"在 12 城是不同位置）
+    - 状态机：pending=待查 / hit=已解析 / miss=查无
+    - 单小区只调一次外部 API：geocode() 命中 hit 即返回并累计 query_count；
+      miss 不重查（除非超 7 天）；无记录则 INSERT pending 交给 geocode_fill.py 处理
+    - 内存缓存 _cache 避免重复 SQL（每次 run 只查一次表）
+    """
+
+    def __init__(self, conn, city_names: dict):
+        self.conn = conn
+        self.city_names = city_names or {}
+        self._cache = {}  # (city, community) -> (lat, lng)
+        self._by_city = {}  # city -> [(community, (lat, lng))]，包含匹配只扫本城
+        self._match_memo = {}  # (city, community) -> 命中的词典键 / None（run 内 memoize）
+        self._known = set()  # (city, community) 已在库中（hit/pending/miss 均记录，防重复登记）
+        self._pending_buf = set()  # 待 INSERT 的 pending 键（批量 flush）
+        self._touch_buf = {}  # (city, community) -> 命中次数（批量 flush）
+        self._loaded = False
+
+    # ---- 加载 ----
+    def load_all(self):
+        """全量加载词典到内存（表小，一次 SELECT 即可）。"""
+        if self._loaded:
+            return
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT city, community, lat, lng, status FROM community_coords")
+            for city, community, lat, lng, status in cur.fetchall():
+                key = (city, community)
+                self._known.add(key)
+                if status == "hit":
+                    coords = (float(lat), float(lng))
+                    self._cache[key] = coords
+                    self._by_city.setdefault(city, []).append((community, coords))
+        self._loaded = True
+
+    def flush(self):
+        """批量提交累积的 pending 登记与 hit 命中计数。"""
+        if self._pending_buf:
+            self._flush_pending()
+        if self._touch_buf:
+            with self.conn.cursor() as cur:
+                for (city, community), n in self._touch_buf.items():
+                    cur.execute(
+                        "UPDATE community_coords SET query_count = query_count + %s "
+                        "WHERE city=%s AND community=%s AND status='hit'",
+                        (n, city, community),
+                    )
+            self._touch_buf.clear()
+        self.conn.commit()
+
+    def _flush_pending(self, chunk=500):
+        """pending 登记用多值 INSERT 分块提交（pymysql executemany 是逐条循环，34k 条会 ~170s）。"""
+        buf = list(self._pending_buf)
+        with self.conn.cursor() as cur:
+            for i in range(0, len(buf), chunk):
+                batch = buf[i : i + chunk]
+                values = ",".join(["(%s, %s, 'pending')"] * len(batch))
+                flat = [v for pair in batch for v in pair]
+                cur.execute(
+                    f"INSERT IGNORE INTO community_coords (city, community, status) "
+                    f"VALUES {values}",
+                    flat,
+                )
+        self._pending_buf.clear()
+
+    # ---- 主查询 ----
+    def geocode(self, community_name, full_text="", city=None):
+        """按 (city, community) 查词典。city 缺失时退化为不带城匹配（兼容旧调用）。"""
+        if not community_name:
+            return None, None
+        comm_clean = community_name.strip()
+        if not comm_clean:
+            return None, None
+
+        # 防御：city 必须是已知城市代码，否则视为脏数据不登记 pending
+        valid_city = city is not None and city in self.city_names
+        if city is not None and not valid_city:
+            return None, None
+
+        self.load_all()
+
+        # memo：run 内同一 (city, community) 只扫一次词典，命中计数照常累积
+        memo_key = (city, comm_clean)
+        if memo_key in self._match_memo:
+            hit_key = self._match_memo[memo_key]
+            if hit_key is not None:
+                self._bump_hit(hit_key)
+                return self._cache[hit_key]
+        # 1) 带城市精确命中
+        elif city:
+            if memo_key in self._cache:
+                self._match_memo[memo_key] = memo_key
+                self._bump_hit(memo_key)
+                return self._cache[memo_key]
+            # 双向包含（小区名带板块前缀）；只扫本城桶，保持跨城隔离
+            for name, coords in self._by_city.get(city, ()):
+                if name in comm_clean or comm_clean in name:
+                    hit_key = (city, name)
+                    self._match_memo[memo_key] = hit_key
+                    self._bump_hit(hit_key)
+                    return coords
+            self._match_memo[memo_key] = None
+
+        # 2) 不带城退化：全库匹配（仅当调用方未提供 city）
+        else:
+            for (c, name), coords in self._cache.items():
+                if name == comm_clean:
+                    self._match_memo[memo_key] = (c, name)
+                    self._bump_hit((c, name))
+                    return coords
+            for (c, name), coords in self._cache.items():
+                if name in comm_clean or comm_clean in name:
+                    self._match_memo[memo_key] = (c, name)
+                    self._bump_hit((c, name))
+                    return coords
+            self._match_memo[memo_key] = None
+
+        # 3) 未命中：登记 pending（若库中无该 (city,community) 记录），交 geocode_fill 处理
+        if city:
+            key = (city, comm_clean)
+            if key not in self._known:
+                self._known.add(key)
+                self._pending_buf.add(key)
+        return None, None
+
+    # ---- 内部 ----
+    def _bump_hit(self, key):
+        """命中 hit：累积 query_count（批量 flush，上限防无限增长）。"""
+        if key[0] is None:
+            return
+        self._touch_buf[key] = self._touch_buf.get(key, 0) + 1
