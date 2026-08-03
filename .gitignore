@@ -94,3 +94,6 @@ data_lake/
 
 # ---- 面试准备 / 架构决策文档（用户要求不入库）----
 docs/tech/components/crawler-etl-architecture-decision.md
+
+# ---- 面试准备 / 开发踩坑实录（用户要求不入库）----
+docs/tech/components/crawler-etl-dev-notes.md
