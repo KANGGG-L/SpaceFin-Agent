@@ -1,0 +1,154 @@
+# ==============================================================================
+# SpaceFin 安居客采集容器编排（master 主备 + 泛化 worker）
+# ------------------------------------------------------------------------------
+# 架构：
+#   master-primary / master-standby  主备 master：Redis 抢锁选主，standby 心跳
+#       超时自动接管（避免单点）。leader 负责任务排队、代理巡查、进度监控。
+#   worker-1 .. worker-5             泛化 worker：不绑定城市/类型，从任务队列领任务
+#       {city, type, pages, target, round}，从 master/Redis 拿 https proxy 抓取。
+# 任务模型：42 任务 = 21 城 × sale(出售)/fangyuan(出租)，循环派单 MAX_ROUNDS 轮，
+#           阶段化执行：先 sale 后 fangyuan；停止条件=青果消耗达 QG_BUDGET 转免费池
+#           + 全部任务达 MAX_ROUNDS。关键参数：LEADER_TTL=60、POOL_SIZE_MIN=60、
+#           PAGES_SALE=100、PAGES_RENT=53（fangyuan 每城页数上限）。
+# 通信：
+#   - master 把可用代理写入 Redis 双池：spacefin:proxy_pool:qg/:free
+#   - master 把任务写入队列 spacefin:tasks；worker LPOP 领取
+#   - worker 通过 HTTP GET http://master-primary:5100/proxy/qg|/free 分配代理
+# 依赖：
+#   - 已有 spacefin-net 网络上的 spacefin-redis（对外 6379）
+#
+# 启动：
+#   docker compose --env-file .env -f tools/orchestrator/docker-compose.yml build
+#   docker compose --env-file .env -f tools/orchestrator/docker-compose.yml up -d
+# 注意：青果代理凭据（QG_*）从项目根 .env 读取（.env 已 gitignore），勿写入源码。
+# ==============================================================================
+
+x-worker-env: &worker-env
+  MASTER_URL: http://master-primary:5100
+  REDIS_HOST: spacefin-redis
+  REDIS_PORT: "6379"
+  # DrissionPage 渲染 fangyuan 必需（ANJUKE_PROFILE_DIR 由 start.sh 按 WORKER_ID 设为私有副本）
+  SPACEFIN_CHROME_BIN: /usr/bin/google-chrome
+  # fangyuan 单页渲染硬超时（秒）：本机负载高时单页渲染可达数分钟，给足余量防误杀
+  RENDER_TIMEOUT: "240"
+
+x-worker: &worker
+  build:
+    context: ../..
+    dockerfile: tools/orchestrator/Dockerfile
+  networks:
+    - spacefin-net
+  environment:
+    <<: *worker-env
+  env_file:
+    - ../../.env
+  # Chrome 渲染需要足够的 /dev/shm（默认 64M 太小，Chrome 会因共享内存不足启动失败）
+  shm_size: "256mb"
+  volumes:
+    - ../../output/guangdong:/output
+    # B1 并行化 fangyuan：只读挂载已验证 chrome_profile 作为源，start.sh 拷贝到每 worker 私有目录
+    - ../../tools/anjuke_crawler/chrome_profile:/app/anjuke_crawler/chrome_profile_src:ro
+  restart: unless-stopped
+
+services:
+  # ---------- master 主备 ----------
+  master-primary:
+    build:
+      context: ../..
+      dockerfile: tools/orchestrator/Dockerfile
+    command: ["master.py"]
+    container_name: spacefin-crawler-master-primary
+    hostname: master-primary
+    networks:
+      - spacefin-net
+    environment:
+      REDIS_HOST: spacefin-redis
+      REDIS_PORT: "6379"
+      MASTER_PORT: "5100"
+      # 5 worker 并行渲染后代理消耗 ~5x，提高池水位与空池容忍轮数，防止瞬时空池误触发 STOP
+      POOL_SIZE_MIN: "60"
+      EMPTY_STALL_CYCLES: "8"
+      REFRESH_INTERVAL: "30"
+      LEADER_TTL: "60"
+      WORKER_TTL: "120"
+      WORKER_HB_TTL: "120"
+      QG_TARGET: "25"
+      QG_BUDGET: "1000"
+      QG_SALE_BUDGET: "600"
+      MAX_ROUNDS: "3"
+      PAGES_SALE: "100"
+      PAGES_RENT: "53"
+      TARGET: "999999"
+    env_file:
+      - ../../.env
+    ports:
+      - "5100:5100"
+    restart: unless-stopped
+
+  master-standby:
+    build:
+      context: ../..
+      dockerfile: tools/orchestrator/Dockerfile
+    command: ["master.py"]
+    container_name: spacefin-crawler-master-standby
+    hostname: master-standby
+    networks:
+      - spacefin-net
+    environment:
+      REDIS_HOST: spacefin-redis
+      REDIS_PORT: "6379"
+      MASTER_PORT: "5101"
+      POOL_SIZE_MIN: "60"
+      EMPTY_STALL_CYCLES: "8"
+      REFRESH_INTERVAL: "30"
+      LEADER_TTL: "60"
+      WORKER_TTL: "120"
+      WORKER_HB_TTL: "120"
+      QG_TARGET: "25"
+      QG_BUDGET: "1000"
+      QG_SALE_BUDGET: "600"
+      MAX_ROUNDS: "3"
+      PAGES_SALE: "100"
+      PAGES_RENT: "53"
+      TARGET: "999999"
+    env_file:
+      - ../../.env
+    ports:
+      - "5101:5101"
+    restart: unless-stopped
+
+  # ---------- 泛化 worker ×5 ----------
+  worker-1:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      WORKER_ID: "worker-1"
+    command: ["worker.py"]
+  worker-2:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      WORKER_ID: "worker-2"
+    command: ["worker.py"]
+  worker-3:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      WORKER_ID: "worker-3"
+    command: ["worker.py"]
+  worker-4:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      WORKER_ID: "worker-4"
+    command: ["worker.py"]
+  worker-5:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      WORKER_ID: "worker-5"
+    command: ["worker.py"]
+
+networks:
+  spacefin-net:
+    external: true

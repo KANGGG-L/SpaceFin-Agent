@@ -78,3 +78,14 @@ skills-lock.json
 tools/anjuke_crawler/output/
 tools/anjuke_crawler/chrome_profile/
 anjuke_*.csv
+
+# ---- SpaceFin orchestrator ----
+tools/orchestrator/.venv/
+# launchd 托管配置：硬编码本机绝对路径，不入库（Linux 迁移用 systemd unit 替代）
+tools/orchestrator/com.spacefin.host-render.plist
+# 一次性诊断探针脚本（验证码率/渲染冒烟），非生产代码
+tools/orchestrator/probe_captcha.py
+tools/orchestrator/probe_followup.py
+# 交接文档（给接手人的说明，不入库）
+tools/orchestrator/HANDOFF_*.md
+output/
