@@ -89,3 +89,8 @@ tools/orchestrator/probe_followup.py
 # 交接文档（给接手人的说明，不入库）
 tools/orchestrator/HANDOFF_*.md
 output/
+# ODS 数据湖产物（本地 Parquet 分区，不入库）
+data_lake/
+
+# ---- 面试准备 / 架构决策文档（用户要求不入库）----
+docs/tech/components/crawler-etl-architecture-decision.md
