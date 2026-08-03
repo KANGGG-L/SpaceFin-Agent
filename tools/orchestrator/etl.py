@@ -8,7 +8,7 @@ ETL 脚本：采集 raw JSONL → 清洗 → url_key 去重 → geocode → MySQ
 - backfill：--backfill 全量扫（与 --date 互斥），first_seen=last_seen=运行日，同样写 etl_processed.json
 - 去重键：url_key（URL 规范化房源 ID，见 url_key.py），MySQL 唯一主键 + COALESCE 只更新非空/非零字段
 - 留存：first_seen_date 保留、last_seen_date 更新、days_on_market = last_seen - first_seen
-- 输出：spacefin_crawler 库两张 DWD 表 + data_lake/housing/dt=.. 每日观测集 Parquet + etl_report.json + geocode_miss
+- 输出：spacefin_crawler 库两张 DWD 表 + data_lake/housing/dt=.. 每日观测集 Parquet + etl_report.json
 - 无 CSV 输出（单一数据出口）
 
 用法：
@@ -131,6 +131,23 @@ def _root_params(env: dict) -> dict:
     }
 
 
+def _ensure_geocode_status(conn) -> None:
+    """幂等守卫：若两 DWD 表缺 geocode_status 列则 ALTER 补（存量/部分恢复环境收敛）。"""
+    for tbl in ("crawl_housing_sale", "crawl_housing_rent"):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM information_schema.columns "
+                "WHERE table_schema=%s AND table_name=%s AND column_name='geocode_status'",
+                (CRAWL_DB, tbl),
+            )
+            if cur.fetchone()[0] == 0:
+                cur.execute(
+                    f"ALTER TABLE {CRAWL_DB}.{tbl} ADD COLUMN geocode_status VARCHAR(16) NULL "
+                    f"COMMENT '坐标补全状态 pending/hit/miss'"
+                )
+    conn.commit()
+
+
 def init_db(env: dict) -> None:
     """root 仅用于初始化：建库/建表/建专用账号（幂等）。密码占位符替换为 .env 的 app 密码。"""
     root = dict(_root_params(env))
@@ -154,6 +171,7 @@ def init_db(env: dict) -> None:
                 with conn.cursor() as cur:
                     cur.execute(stmt)
         print("[etl] init_db: schema/账号就绪")
+        _ensure_geocode_status(conn)
     finally:
         conn.close()
 
@@ -440,6 +458,30 @@ def dwd_retention_buckets(conn, typ: str) -> dict:
     return buckets
 
 
+def dwd_city_counts(conn, typ: str) -> dict:
+    """按 district（=城市代码）统计各表行数，返回 {city: n}。"""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT district, COUNT(*) FROM {_TABLE[typ]} GROUP BY district")
+        return {row[0]: row[1] for row in cur.fetchall()}
+
+
+def dwd_days_stats(conn, typ: str) -> dict:
+    """days_on_market 均值与中位数。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT days_on_market FROM {_TABLE[typ]} "
+            f"WHERE days_on_market IS NOT NULL ORDER BY days_on_market"
+        )
+        vals = [r[0] for r in cur.fetchall()]
+    if not vals:
+        return {"mean": 0, "median": 0}
+    mean = round(sum(vals) / len(vals), 2)
+    n = len(vals)
+    mid = n // 2
+    median = vals[mid] if n % 2 else round((vals[mid - 1] + vals[mid]) / 2, 2)
+    return {"mean": mean, "median": median}
+
+
 def _record_miss(miss: dict, city: str, community: str) -> None:
     key = (city, community)
     miss[key] = miss.get(key, 0) + 1
@@ -690,6 +732,8 @@ def main():
     # ---- 累计/留存/报告 ----
     counts = {t: dwd_counts(conn, t) for t in ("sale", "rent")}
     retention = {t: dwd_retention_buckets(conn, t) for t in ("sale", "rent")}
+    city_dist = {t: dwd_city_counts(conn, t) for t in ("sale", "rent")}
+    days_stats = {t: dwd_days_stats(conn, t) for t in ("sale", "rent")}
 
     elapsed = time.time() - t0
     report = {
@@ -708,8 +752,13 @@ def main():
             "total_inserted": inc["sale"]["inserted"] + inc["rent"]["inserted"],
             "total_updated": inc["sale"]["updated"] + inc["rent"]["updated"],
         },
-        "stock": {"sale_total": counts["sale"], "rent_total": counts["rent"]},
+        "stock": {
+            "sale_total": counts["sale"],
+            "rent_total": counts["rent"],
+            "city_distribution": city_dist,
+        },
         "retention": retention,
+        "days_on_market_stats": days_stats,
         "geocode": {
             "attempted": geocode_attempted,
             "hit": geocode_hit,
@@ -729,15 +778,6 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     with open(os.path.join(args.out_dir, "etl_report.json"), "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
-    if miss:
-        miss_sorted = [
-            {"city": c, "community": comm, "count": n}
-            for (c, comm), n in sorted(miss.items(), key=lambda x: -x[1])
-        ]
-        with open(
-            os.path.join(args.out_dir, f"geocode_miss_{date}.json"), "w", encoding="utf-8"
-        ) as f:
-            json.dump(miss_sorted, f, ensure_ascii=False, indent=2)
 
     conn.close()
     print("=" * 60)

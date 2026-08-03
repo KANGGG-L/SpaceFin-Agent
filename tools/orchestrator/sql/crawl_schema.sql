@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS crawl_housing_rent (
   first_seen_date  DATE            NOT NULL COMMENT '首次爬取日期（保留不覆盖）',
   last_seen_date   DATE            NOT NULL COMMENT '最近爬取日期（每次更新）',
   days_on_market   INT             NOT NULL COMMENT '市场留存天数=last_seen-first_seen',
+  geocode_status   VARCHAR(16)     NULL     COMMENT '坐标补全状态 pending/hit/miss（补全从 ETL 解耦）',
   source           VARCHAR(16)     NULL     COMMENT '数据源 qg/free/render',
   etl_ts           TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'ETL写入时间',
   PRIMARY KEY (url_key)
