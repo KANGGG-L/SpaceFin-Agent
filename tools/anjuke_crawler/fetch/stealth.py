@@ -50,6 +50,11 @@ def _is_blocked(page) -> bool:
 def make_stealth_browser(proxy=None, headless=False):
     """构造带持久化 profile + 反检测的 ChromiumPage。proxy 形如 'http://ip:port'。"""
     from DrissionPage import ChromiumOptions, ChromiumPage
+    from DrissionPage._functions.settings import Settings as _DpSettings
+
+    # 容器内 Chrome 在 VM 负载下启动常超 30s，默认 browser_connect_timeout=30 会误报
+    # BrowserConnectError，调大到 120s 给足慢启动余量。
+    _DpSettings.set_browser_connect_timeout(120)
 
     os.makedirs(PROFILE_DIR, exist_ok=True)
     co = ChromiumOptions()
@@ -67,7 +72,18 @@ def make_stealth_browser(proxy=None, headless=False):
         co.set_proxy(proxy)
 
     page = ChromiumPage(co)
-    page.run_js(STEALTH_JS)
+    # run_js 偶发 "The js runtime environment is faulty"（JS runtime 尚未就绪）→ 拉长重试窗口
+    last_err = None
+    for _ in range(5):
+        try:
+            page.run_js(STEALTH_JS)
+            last_err = None
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            time.sleep(5)
+    if last_err is not None:
+        raise last_err
     return page
 
 
@@ -118,6 +134,38 @@ def scrape_listing(
                 proxy_client.delete_proxy(proxy)  # 用坏即扔
             return html2
     return html  # 无代理可用，返回拦截页 HTML（调用方自行判断）
+
+
+def scrape_rent_listing(
+    city_code: str,
+    page_no: int = 1,
+    headless: bool = False,
+    captcha_wait: int = 15,
+) -> str:
+    """抓取出租列表页 HTML（独立子域 `{city}.zu.anjuke.com/fangyuan/p{n}/`）。
+
+    依赖持久化 chrome_profile 会话（首次需人工过一次 58 反爬验证码）。
+    页面为 JS 动态渲染，需浏览器执行；返回渲染后 HTML（被拦返回拦截页）。
+    """
+    home = f"https://{city_code}.zu.anjuke.com/"
+    target = f"https://{city_code}.zu.anjuke.com/fangyuan/p{page_no}/"
+
+    page = make_stealth_browser(proxy=None, headless=headless)
+    try:
+        # 被 58 反爬"页面刷新中"墙卡住时，导航超时快速失败（否则挂满 RENDER_TIMEOUT 才被 kill）
+        page.get(home, timeout=20)
+        time.sleep(3)
+        page.get(target, timeout=20)
+        time.sleep(3)
+        if _is_blocked(page) or "请输入验证码" in page.title:
+            start = time.time()
+            while (
+                _is_blocked(page) or "请输入验证码" in page.title
+            ) and time.time() - start < captcha_wait:
+                time.sleep(2)
+        return page.html
+    finally:
+        page.quit()
 
 
 def scrape_listing_to_records(city_code: str, page_no: int = 1, **kwargs):

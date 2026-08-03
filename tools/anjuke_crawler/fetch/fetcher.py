@@ -22,11 +22,29 @@ from curl_cffi import requests
 from .proxy import ProxyClient
 
 CITY_SUBDOMAIN = {
-    "gz": "guangzhou",
-    "sz": "shenzhen",
-    "fs": "foshan",
-    "dg": "dongguan",
-    "zh": "zhuhai",
+    # ---- 广东省 21 个地级市 ----
+    "gz": "guangzhou",  # 广州
+    "sz": "shenzhen",  # 深圳
+    "zh": "zhuhai",  # 珠海
+    "st": "shantou",  # 汕头
+    "fs": "foshan",  # 佛山
+    "sg": "shaoguan",  # 韶关
+    "zj": "zhanjiang",  # 湛江
+    "zq": "zhaoqing",  # 肇庆
+    "jm": "jiangmen",  # 江门
+    "mm": "maoming",  # 茂名
+    "hui": "huizhou",  # 惠州
+    "mz": "meizhou",  # 梅州
+    "sw": "shanwei",  # 汕尾
+    "hy": "heyuan",  # 河源
+    "yj": "yangjiang",  # 阳江
+    "qy": "qingyuan",  # 清远
+    "dg": "dongguan",  # 东莞
+    "zs": "zhongshan",  # 中山
+    "cz": "chaozhou",  # 潮州
+    "jy": "jieyang",  # 揭阳
+    "yf": "yunfu",  # 云浮
+    # ---- 其他已接入城市 ----
     "bj": "beijing",
     "sh": "shanghai",
     "hz": "hangzhou",

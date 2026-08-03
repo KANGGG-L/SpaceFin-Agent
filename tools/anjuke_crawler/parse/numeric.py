@@ -22,6 +22,16 @@ from ..geocoder import LocalGeocoder
 CURRENT_YEAR = datetime.now().year
 default_geocoder = LocalGeocoder()
 
+
+class _NoopGeocoder:
+    """拉取阶段跳过地理编码的桩：geocode 返回 (None, None)，ETL 阶段再补。"""
+
+    def geocode(self, community_name, full_text=""):
+        return None, None
+
+
+NOOP_GEOCODER = _NoopGeocoder()
+
 SCHEMA_HEADERS = [
     "title",
     "community",
