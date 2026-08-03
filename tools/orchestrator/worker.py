@@ -11,8 +11,11 @@ worker 容器（泛化版）：不绑定城市/类型，由 master 分配任务�
    curl_cffi 伪装抓取；代理复用（一个代理连抓多页直到被拦才换）。
 4. 轻量解析（跳过 geocode，ETL 后置）：sale→numeric schema，fangyuan→rent schema；
    按 URL set 去重（跨轮权威），每页写入 raw JSONL（含重复）+ stats JSONL（每页一行）。
-5. 完成判定：空页早停（连续 EMPTY_LIMIT 页无卡片）或达 pages 上限，先到先完成；
-   完成后 round+=1 报 master，master 按 MAX_ROUNDS 决定是否重新入队。
+5. 完成判定：空页早停（连续 EMPTY_LIMIT 页无卡片）、达 pages 上限、达 target、站点 404、
+   该城 qg 预算耗尽、长期取不到代理，先到先完成；终态统一经 finish_task 写
+   finished=1 + finish_reason（Airflow 依据 master /crawl_status 判断本 run 是否跑完）。
+6. 增量续爬：任务开始时读 `spacefin:crawl_progress:{city}:{type}`，先回扫头部 p1..HEAD_REWIND
+   （新增/置顶房源在列表头部），再从断点续爬深部页，页内幂等靠 URL set；每城每 run 只跑一轮。
 
 泛化：worker 无城市/类型概念，可横向扩展，master 负责派单。
 
@@ -31,7 +34,7 @@ import sys
 import threading
 import time
 import urllib.request
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import redis
 from curl_cffi import requests as creq
@@ -64,6 +67,19 @@ FAIL_BUDGET_RENDER = int(os.getenv("FAIL_BUDGET_RENDER", 15))
 # 但「页码没越界、本城确实没房源」与「出口 IP 被降级返回无结果页」两者无法从
 # HTML 上区分，只能靠换 IP 复核：连续 N 个不同 IP 都 0 卡片才认定真空页。
 ZERO_CARD_RETRY = int(os.getenv("ZERO_CARD_RETRY", 3))
+# 断点续爬：从上次完成页向前回扫 HEAD_REWIND 页重扫（抓新插入/置顶房源），
+# 页内幂等靠 crawled_urls set。RESUME_ENABLED=0 则每次从第 1 页开始。
+HEAD_REWIND = int(os.getenv("HEAD_REWIND", 2))
+RESUME_ENABLED = os.getenv("RESUME_ENABLED", "1") != "0"
+# 连续多少个「取不到代理」周期后放弃该任务：防止代理池整体枯竭时 worker 无限 pause，
+# 任务永远不写终态、Airflow Sensor 永远等不到本 run 完成。
+NO_PROXY_MAX_CYCLES = int(os.getenv("NO_PROXY_MAX_CYCLES", 5))
+# 单个任务在一次 run 内允许被重新入队的次数上限（收敛保证，与 master 侧同名同默认）。
+# 连续失败超 FAIL_BUDGET 中止时 HINCRBY requeue_count；超限即写终态 fail_budget 不再
+# 入队——否则任务在 pending/running/中止间无限乒乓，/crawl_status.all_done 永远凑不齐
+# 42 个 finished，Airflow Sensor 会烧完 6h 超时、ETL 永不执行。计数存在 task Hash、
+# 不随队列 JSON 传递（队列元素仍只含 {city,type,pages,target,round}）。
+MAX_REQUEUE = int(os.getenv("MAX_REQUEUE", 3))
 # 青果短效代理认证（可选，经 .env 注入；代理池中青果代理需带认证使用）
 QG_USER = os.getenv("QG_USER", "")
 QG_PWD = os.getenv("QG_PWD", "")
@@ -122,15 +138,31 @@ def _hb_loop(rdb):
 
 
 # ---------------- 代理获取 ----------------
-def get_proxy_from_master(source=None):
-    """从 master 分配代理；source 可选 'qg'/'free'，默认随机（master 内部青果优先）。"""
+def get_proxy_from_master(source=None, city=None, typ=None):
+    """从 master 分配代理；source 可选 'qg'/'free'，默认随机（master 内部青果优先）。
+
+    带 city/type 时 master 按该城该类型的 qg 预算计数/拒绝（缺省则不计预算，向后兼容）。
+    master 恒返回 HTTP 200：池空或预算耗尽时 proxy=null 且带 error/budget_exhausted。
+    返回 (proxy, source, budget_exhausted)——budget_exhausted 必须透传给调用方，
+    否则无法区分「暂时没代理」与「该城青果预算已用尽」，任务就无法优雅收尾。
+    """
     path = "/proxy/random" if source is None else f"/proxy/{source}"
+    params = {}
+    if city:
+        params["city"] = city
+    if typ:
+        params["type"] = typ
+    url = f"{MASTER_URL}{path}"
+    if params:
+        url = f"{url}?{urlencode(params)}"
     try:
-        with urllib.request.urlopen(f"{MASTER_URL}{path}", timeout=5) as r:
+        with urllib.request.urlopen(url, timeout=5) as r:
             data = json.load(r)
-            return data.get("proxy")
+            proxy = data.get("proxy")
+            src = data.get("source") or (source or "")
+            return proxy, (src if proxy else ""), bool(data.get("budget_exhausted"))
     except Exception:
-        return None
+        return None, "", False
 
 
 def get_proxy_from_redis(rdb):
@@ -142,29 +174,26 @@ def get_proxy_from_redis(rdb):
         return None
 
 
-def get_proxy(rdb):
-    """池优先级：青果池 → 免费池 → Redis proxy list。"""
-    p = get_proxy_from_master("qg")
+def get_proxy(rdb, city=None, typ=None):
+    """池优先级：青果池 → 免费池 → Redis proxy list，返回 (proxy, source, budget_exhausted)。"""
+    p, src, exhausted = get_proxy_from_master("qg", city, typ)
     if p:
-        return p
-    p = get_proxy_from_master("free")
+        return p, src or "qg", exhausted
+    p, src, ex_free = get_proxy_from_master("free", city, typ)
+    exhausted = exhausted or ex_free
     if p:
-        return p
-    return get_proxy_from_redis(rdb)
+        return p, src or "free", exhausted
+    p = get_proxy_from_redis(rdb)
+    return p, ("redis" if p else ""), exhausted
 
 
-def get_proxy_with_source(rdb):
-    """取代理并返回 (proxy, source)：master /proxy/random 青果优先、免费兜底。
+def get_proxy_with_source(rdb, city=None, typ=None):
+    """取代理并返回 (proxy, source, budget_exhausted)：/proxy/random 青果优先、免费兜底。
 
     fangyuan 渲染需要知道 source，以决定是否向渲染服务传 auth=1（青果需注入
-    Basic 认证，免费代理不需要）。
+    Basic 认证，免费代理不需要）；budget_exhausted 用于预算耗尽时优雅收尾。
     """
-    try:
-        with urllib.request.urlopen(f"{MASTER_URL}/proxy/random", timeout=5) as r:
-            data = json.load(r)
-            return data.get("proxy"), data.get("source", "")
-    except Exception:
-        return None, ""
+    return get_proxy_from_master(None, city, typ)
 
 
 # fangyuan 渲染：调宿主机渲染服务（宿主 Chrome 150 已验证能拿 zu-itemmod；
@@ -353,9 +382,45 @@ def requeue_task(rdb, city, typ, pages, target, round_n):
         log(city, f"[{typ}] requeue error: {e} (master will re-add from state)")
 
 
+def finish_task(rdb, city, typ, reason, new_total, dup_total, blocked_total, pages_done):
+    """任务终态统一出口：写 status=done + finished=1 + finish_reason，释放任务锁。
+
+    所有终态（pages_exhausted / empty_pages / target_reached / not_found /
+    budget_exhausted / no_proxy）都经此函数，master 据 finished 判定本 run 是否跑完；
+    中止重排路径（fail budget 超限 → requeue_task）**不写 finished**，保持可被重排。
+    """
+    key = _task_key(city, typ)
+    try:
+        cur_round = int(rdb.hget(key, "round") or 0)
+        rdb.hset(
+            key,
+            mapping={
+                "status": "done",
+                "round": cur_round + 1,
+                "finished": "1",
+                "finish_reason": reason,
+                "count": new_total,
+                "new_count": new_total,
+                "dup_count": dup_total,
+                "blocked_count": blocked_total,
+                "pages_done": pages_done,
+                "worker": MY_ID,
+                "worker_hb": time.time(),
+            },
+        )
+    except Exception as e:  # noqa: BLE001
+        log(city, f"[{typ}] finish_task redis error: {repr(e)[:200]}")
+    release_lock(rdb, city, typ)
+    log(
+        city,
+        f"[{typ}] DONE reason={reason}: new={new_total} dup={dup_total} "
+        f"blocked={blocked_total} pages={pages_done}",
+    )
+
+
 # ---------------- 抓取主循环 ----------------
 def crawl(rdb, city, typ, pages, target, round_n, out_dir):
-    """抓取一个任务的一轮。代理复用：一个代理连抓多页直到被拦才换。"""
+    """抓取一个任务（每 run 每城一轮）。代理复用：一个代理连抓多页直到被拦才换。"""
     from anjuke_crawler.parse import save_numeric_schema_csv  # noqa: F401 (etl 用)
 
     raw_path = os.path.join(out_dir, "raw", f"{city}_{typ}_{MY_ID}.jsonl")
@@ -364,14 +429,33 @@ def crawl(rdb, city, typ, pages, target, round_n, out_dir):
     key = _task_key(city, typ)
     urls_key = URLSET_PREFIX + f"{city}:{typ}"
     progress_key = PROGRESS_PREFIX + f"{city}:{typ}"
-    # 断点按轮次重置：sale 分页足够深，每轮向后推进一个 pages 窗口（round 从 0 计）。
-    # fangyuan 例外：出租列表单城页深有限，轮次偏移会把 round2/3 的请求直接打到
-    # 空白页码区（PAGES_RENT=53 时 round2 从 p54 起）而必然空转，因此每轮都从 p1
-    # 重新扫，重复房源靠 URL set 去重（只有新 URL 计 new）。
-    page_offset = 0 if typ == "fangyuan" else pages * round_n
-    page = page_offset + 1
-    start_page = page
-    page_limit = page_offset + pages
+    # 增量续爬 = 头部回扫 + 断点续深：新房源出现在列表**头部**，所以每 run 先重扫
+    # p1..HEAD_REWIND 抓置顶/新增，再从断点 ckpt+1 往深处翻；页内幂等靠 crawled_urls set。
+    # 断点已到底（ckpt >= pages）时深部为空，但头部回扫仍要跑——否则跑到底的城市
+    # 此后每个 run 都零工作量，all_done 秒真、ETL 空转。
+    page_limit = pages
+    ckpt = 0
+    if RESUME_ENABLED:
+        try:
+            ckpt = int(rdb.get(progress_key) or 0)
+        except Exception:
+            ckpt = 0
+    if ckpt > 0:
+        head_end = min(HEAD_REWIND, page_limit)
+        plan = list(range(1, head_end + 1)) + list(
+            range(max(ckpt + 1, head_end + 1), page_limit + 1)
+        )
+        log(
+            city,
+            f"[{typ}] resume ckpt p{ckpt}: head p1-p{head_end} + "
+            f"deep {len(plan) - head_end} pages (limit p{page_limit})",
+        )
+    else:
+        plan = list(range(1, page_limit + 1))
+    plan_idx = 0
+    pages_done = 0
+    # 头部回扫不得把断点写回小页号，否则下个 run 会从头全量重爬（浪费 IP 配额）
+    progress_max = ckpt
     fail_budget = FAIL_BUDGET_RENDER if typ == "fangyuan" else FAIL_BUDGET
     fail_backoff = FAIL_BACKOFF_RENDER if typ == "fangyuan" else FAIL_BACKOFF
     proxy_str = None
@@ -381,8 +465,13 @@ def crawl(rdb, city, typ, pages, target, round_n, out_dir):
     zero_card_retry = 0
     new_total, dup_total = 0, 0
     blocked_total = 0
+    # 本任务是否见过 master 回报的 budget_exhausted（该城该类型青果预算已用尽）
+    budget_exhausted = False
+    no_proxy_cycles = 0
+    finish_reason = None
 
-    while page <= page_limit and new_total < target:
+    while plan_idx < len(plan) and new_total < target:
+        page = plan[plan_idx]
         # 每轮续期任务锁 + 心跳（防止被 master 判定 stale）
         rdb.expire(LOCK_PREFIX + f"{city}:{typ}", LOCK_TTL)
 
@@ -391,18 +480,31 @@ def crawl(rdb, city, typ, pages, target, round_n, out_dir):
             proxy_src = ""
             for _ in range(6):
                 if typ == "fangyuan":
-                    proxy_str, proxy_src = get_proxy_with_source(rdb)
+                    proxy_str, proxy_src, ex = get_proxy_with_source(rdb, city, typ)
                 else:
-                    proxy_str = get_proxy(rdb)
-                    proxy_src = "qg" if QG_USER else ""
+                    proxy_str, proxy_src, ex = get_proxy(rdb, city, typ)
+                budget_exhausted = budget_exhausted or ex
                 if proxy_str:
                     break
                 log(city, "no proxy, wait 15s")
                 time.sleep(15)
             if not proxy_str:
-                log(city, "no proxy available, pause")
+                # 拿不到代理 → 有限次容错后写终态（不再无限 pause，否则任务永不写
+                # 终态、Airflow Sensor 等不到本 run 完成）。budget_exhausted 只决定
+                # 终态原因、不缩短容错：qg 预算耗尽是 run 中期常态，此后 /proxy/free
+                # 仍如实回显 budget_exhausted=true，免费池一次空窗不应把该城腰斩。
+                no_proxy_cycles += 1
+                reason = "budget_exhausted" if budget_exhausted else "no_proxy"
+                log(
+                    city,
+                    f"[{typ}] no proxy ({reason}), pause {no_proxy_cycles}/{NO_PROXY_MAX_CYCLES}",
+                )
+                if no_proxy_cycles >= NO_PROXY_MAX_CYCLES:
+                    finish_reason = reason
+                    break
                 time.sleep(20)
                 continue
+            no_proxy_cycles = 0
             log(city, f"using new proxy {proxy_str} ({proxy_src})")
             # 注意：这里不重置 consecutive_fail，让连续失败预算跨代理累积，
             # 否则代理池整体失效时 worker 会无限换代理而永不中止。
@@ -433,12 +535,35 @@ def crawl(rdb, city, typ, pages, target, round_n, out_dir):
             )
             time.sleep(fail_backoff)  # 退避：宿主渲染服务挂掉时防止同页死循环
             if consecutive_fail >= fail_budget:
-                # 连续失败超预算 → 中止当前任务并回队重试（不丢弃、不占死 worker）
+                # 连续失败超预算 → 中止当前任务。先 HINCRBY requeue_count（存在 task
+                # Hash，不进队列 JSON）；n <= MAX_REQUEUE 照旧回队重试（不写 finished，
+                # 保持可被重排）；n > MAX_REQUEUE 走终态 fail_budget，保证收敛。
                 log(
                     city,
                     f"[{typ}] {consecutive_fail} consecutive fetch failures "
                     f">= FAIL_BUDGET({fail_budget}), abort task & requeue",
                 )
+                try:
+                    n = int(rdb.hincrby(key, "requeue_count", 1) or 0)
+                except Exception:
+                    n = MAX_REQUEUE + 1  # redis 抖动时保守走终态，避免无限乒乓
+                if n > MAX_REQUEUE:
+                    log(
+                        city,
+                        f"[{typ}] requeue_count {n} > MAX_REQUEUE({MAX_REQUEUE}), "
+                        f"finish fail_budget (no more requeue)",
+                    )
+                    finish_task(
+                        rdb,
+                        city,
+                        typ,
+                        "fail_budget",
+                        new_total,
+                        dup_total,
+                        blocked_total,
+                        pages_done,
+                    )
+                    return new_total
                 requeue_task(rdb, city, typ, pages, target, round_n)
                 release_lock(rdb, city, typ)
                 return new_total
@@ -462,6 +587,7 @@ def crawl(rdb, city, typ, pages, target, round_n, out_dir):
                     "ts": time.time(),
                 },
             )
+            finish_reason = "not_found"
             break
 
         # 真实安居客页面但 0 卡片：换 IP 复核，连续 N 个不同 IP 都 0 卡片才认真空页
@@ -538,14 +664,15 @@ def crawl(rdb, city, typ, pages, target, round_n, out_dir):
         # 每页一次 pipeline：进度 + 任务状态
         try:
             pipe = rdb.pipeline()
-            pipe.set(progress_key, page)
+            progress_max = max(progress_max, page)
+            pipe.set(progress_key, progress_max)
             pipe.hset(
                 key,
                 mapping={
                     "count": new_total,
                     "new_count": new_total,
                     "dup_count": dup_total,
-                    "pages_done": page - start_page + 1,
+                    "pages_done": pages_done + 1,
                     "status": "running",
                     "worker": MY_ID,
                     "worker_hb": time.time(),
@@ -557,7 +684,8 @@ def crawl(rdb, city, typ, pages, target, round_n, out_dir):
 
         log(city, f"p{page} [{typ}] new={len(new_rows)} dup={len(dup_rows)} cum_new={new_total}")
         consecutive_fail = 0
-        page += 1
+        plan_idx += 1
+        pages_done += 1
         time.sleep(1.0)
 
         # fangyuan 每页轮换代理：渲染经本地转发代理逐页消耗青果/免费池配额
@@ -567,30 +695,13 @@ def crawl(rdb, city, typ, pages, target, round_n, out_dir):
         # 空页早停：连续 EMPTY_LIMIT 页无卡片 → 该任务本轮抓完
         if empty_pages >= EMPTY_LIMIT:
             log(city, f"[{typ}] no cards for {empty_pages} pages, round done")
+            finish_reason = "empty_pages"
             break
 
-    # 本轮完成：round+1（由 master 重入队判定），释放锁
-    cur_round = int(rdb.hget(key, "round") or 0)
-    rdb.hset(
-        key,
-        mapping={
-            "status": "done",
-            "round": cur_round + 1,
-            "count": new_total,
-            "new_count": new_total,
-            "dup_count": dup_total,
-            "blocked_count": blocked_total,
-            "pages_done": page - start_page,
-            "worker": MY_ID,
-            "worker_hb": time.time(),
-        },
-    )
-    release_lock(rdb, city, typ)
-    log(
-        city,
-        f"[{typ}] DONE round {round_n}: new={new_total} dup={dup_total} "
-        f"blocked={blocked_total} pages={page - start_page}",
-    )
+    # 终态：未在循环内定下原因，则按退出条件判定（达 target / 跑到 pages 上限）
+    if finish_reason is None:
+        finish_reason = "target_reached" if new_total >= target else "pages_exhausted"
+    finish_task(rdb, city, typ, finish_reason, new_total, dup_total, blocked_total, pages_done)
     return new_total
 
 
