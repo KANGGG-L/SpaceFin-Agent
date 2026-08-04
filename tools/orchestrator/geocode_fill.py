@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import re
 import sys
 import time
 from urllib.parse import quote
@@ -81,6 +82,39 @@ def gcj02_to_wgs84(lng, lat):
     return lng - dlng, lat - dlat
 
 
+def clean_address(region: str, community: str, aggressive: bool = False) -> str:
+    """把 community_coords.community（常是整段房源标题）清洗成可地理编码的小区名。
+
+    community 字段实际存的是爬虫抓来的房源标题，腾讯 geocoder 对"城市+小区名"
+    能解析，但对以下情况报 348 参数错误：
+      - 整段营销标题（含 出售/四房/单价…）
+      - 重复城市前缀（region 已拼一次，community 里又带一次）
+      - '+' 等符号（还会让签名 MD5 不匹配 → 111）
+    aggressive=True 时进一步抽取标题前段并去掉营销/户型词，用于 348 的二次重试。
+    返回空串表示无法清洗（调用方应跳过重试）。
+    """
+    s = (community or "").strip()
+    s = re.sub(r"@\S*$", "", s)  # 去尾部 @xxx（防御）
+    # 去开头城市前缀：'茂名，' / '茂名!' / '茂名 ' 等
+    s = re.sub(rf"^[{re.escape(region)}]+[\s，,、！!。\.#@\-]*", "", s)
+    # 去会让签名/参数报错的非法符号
+    s = re.sub(r"[\+#%&*=@|\\/`~]+", "", s)
+    if aggressive:
+        # 小区名通常在标题最前，取首个分隔符前的片段
+        head = re.split(r"[，,、 　!！?？@]+", s)[0]
+        # 去常见营销/户型词，保留地名核心（不删 花园/小区/城/苑 等地名成分）
+        head = re.sub(
+            r"(出售|出租|急售|低价|笋盘|一口价|可谈|价格|总价|单价|万元|万|㎡|平米|平方|字头|"
+            r"包税|满五|唯一|精装|装修|简装|毛坯|电梯|楼梯|步梯|楼层|南北|南向|北向|望|送|带|"
+            r"含|近|旁|附近|门口|户型|房|室|厅|卫|栋|幢|层|楼|号|期|楼龄|年)",
+            "",
+            head,
+        )
+        s = head
+    s = re.sub(r"\s+", "", s)  # 折叠空白
+    return s
+
+
 def _http_get(url: str, timeout: int = 30, retries: int = 3):
     """HTTP GET，自动适配代理环境 + 重试。
 
@@ -132,7 +166,9 @@ def query_tencent(key: str, address: str, region: str, sk: str = ""):
         "output": "json",
     }
     if sk:
-        sorted_qs = "&".join(f"{k}={params[k]}" for k in sorted(params))
+        # 注意：签名必须与最终 URL 的编码一致——值须经 quote 编码后再参与 MD5，
+        # 否则 '+' 等特殊字符会让签名与服务端不一致 → status=111 签名验证失败
+        sorted_qs = "&".join(f"{k}={quote(str(params[k]))}" for k in sorted(params))
         params["sig"] = hashlib.md5(
             (GEOCODE_PATH + "?" + sorted_qs + sk).encode("utf-8")
         ).hexdigest()
@@ -233,6 +269,19 @@ def main():
             # geocoder 需"城市名+小区名"拼地址（纯小区名报 348）
             address = f"{region}{community}"
             lat, lng, level, status_code = query_tencent(key, address, region, sk=sk)
+            # 348 参数错误：多半是 community 为整段标题/含重复城市前缀/非法符号，
+            # 清洗后重试一次（不影响已 hit 的行——它们首查即成功，不会进这里）
+            if status_code == 348:
+                clean = clean_address(region, community)
+                if clean and clean != community:
+                    address = f"{region}{clean}"
+                    lat, lng, level, status_code = query_tencent(key, address, region, sk=sk)
+                # 仍 348：进一步抽取标题前段+去营销词再试一次
+                if status_code == 348:
+                    clean2 = clean_address(region, community, aggressive=True)
+                    if clean2 and clean2 != clean:
+                        address = f"{region}{clean2}"
+                        lat, lng, level, status_code = query_tencent(key, address, region, sk=sk)
         except Exception as e:
             # 网络/限流等异常：不中断整体，跳过待下次重跑（不写 miss、不更新 last_queried_at）
             err += 1
@@ -241,7 +290,21 @@ def main():
             time.sleep(1)
             continue
         if status_code != 0:
-            # 腾讯系统类错误（鉴权 110/111、限频 120、配额耗尽等）：
+            if status_code == 348:
+                # 清洗后仍 348 = 永久坏输入，记 miss 不再每日空耗配额（原逻辑会一直 pending 重试）
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE community_coords SET status='miss', "
+                        "query_count=query_count+1, last_queried_at=NOW() "
+                        "WHERE city=%s AND community=%s",
+                        (city, community),
+                    )
+                    conn.commit()
+                miss += 1
+                if miss <= 5 or miss % 50 == 0:
+                    print(f"[geocode_fill] 参数错误记 miss ({city},{community}) addr={address}")
+                continue
+            # 其它系统类错误（鉴权 110/111、限频 120、配额耗尽等）：
             # 不记 miss、不更新 last_queried_at，保留 pending 次日重跑，避免临时故障误判
             err += 1
             if err <= 5 or err % 50 == 0:
