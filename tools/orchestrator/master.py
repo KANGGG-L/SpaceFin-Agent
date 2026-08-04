@@ -47,6 +47,7 @@ LEADER_KEY = "spacefin:master:leader"  # current leader
 HB_KEY = "spacefin:master:heartbeat"  # leader heartbeat ts
 WORKER_HB_PREFIX = "spacefin:worker_hb:"  # worker 心跳 key 前缀
 QG_CONSUMED_KEY = "spacefin:qg_consumed"  # 青果提取侧计数（停止条件）
+QG_LAST_POP_KEY = "spacefin:qg_last_pop"  # 最近一次成功发放青果的时间戳（需求闸门）
 LOCK_PREFIX = "spacefin:task_lock:"  # 任务独占锁前缀
 PHASE_KEY = "spacefin:phase"  # 阶段：sale(先出售) / fangyuan(后出租)
 STOP_KEY = "spacefin:stop"  # 全局终止信号（fangyuan 提前结束/资源耗尽置位）
@@ -364,12 +365,16 @@ def _qg_connect_ok(proxy, timeout=6):
         return None
 
 
-def refill_qg(rdb):
+def refill_qg(rdb, on_demand=False):
     """青果池补拉（独立闸门，与免费池规模无关）。
 
     青果：存活1分钟、配额1000个、提取即消耗 → 池中青果代理不足 QG_TARGET 时按缺口补拉
     （num=deficit，缺多少拉多少，不浪费配额）；提取侧计数 `qg_consumed` 累计，
     达 QG_BUDGET 后停止补拉（跑满配额），worker 转免费池。
+
+    on_demand=True（HTTP 请求路径，存在即时需求）忽略需求闸门强制补拉；
+    维护线程补拉（on_demand=False）仅当近期有实际青果发放时才提取，避免
+    worker 空闲/掉进 free 失败循环时「提取→55s 过期」白白烧配额。
     """
     if not QG_ENABLED:
         return 0
@@ -377,6 +382,11 @@ def refill_qg(rdb):
     if consumed >= QG_BUDGET:
         log(f"qg budget exhausted ({consumed}/{QG_BUDGET}), stop qg extraction")
         return 0
+    if not on_demand:
+        last_pop = float(rdb.get(QG_LAST_POP_KEY) or 0)
+        if time.time() - last_pop > 120:
+            log("no recent qg demand, skip maintenance refill to avoid quota waste")
+            return 0
     qg_count = rdb.hlen(POOL_QG)
     deficit = max(0, QG_TARGET - qg_count)
     if deficit <= 0:
@@ -1194,10 +1204,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             p = pop_proxy(rdb, POOL_QG)
             if not p:
+                # 按需补拉：worker 正在请求就是需求，当场提取（受 QG_BUDGET 上限）
+                refill_qg(rdb, on_demand=True)
+                p = pop_proxy(rdb, POOL_QG)
+            if not p:
                 release_ip(rdb, city, typ)  # 未真正发放，回滚预扣
                 used, budget, exhausted = _budget_state(rdb, city, typ)
                 self._proxy_json(None, None, city, typ, used, budget, exhausted, "qg pool empty")
                 return
+            rdb.set(QG_LAST_POP_KEY, time.time())
             _remove_from_worker_lists(rdb, p)
             self._proxy_json(p, "qg", city, typ, used, budget, budget > 0 and used >= budget)
         elif path == "/proxy/free":
@@ -1216,7 +1231,11 @@ class Handler(BaseHTTPRequestHandler):
             allowed, used, budget = try_consume_ip(rdb, city, typ)
             if allowed:
                 p = pop_proxy(rdb, POOL_QG)
+                if not p:
+                    refill_qg(rdb, on_demand=True)  # 按需补拉，同 /proxy/qg
+                    p = pop_proxy(rdb, POOL_QG)
                 if p:
+                    rdb.set(QG_LAST_POP_KEY, time.time())
                     _remove_from_worker_lists(rdb, p)
                     self._proxy_json(
                         p, "qg", city, typ, used, budget, budget > 0 and used >= budget

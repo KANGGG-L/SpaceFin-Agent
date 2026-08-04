@@ -156,7 +156,7 @@ def get_proxy_from_master(source=None, city=None, typ=None):
     if params:
         url = f"{url}?{urlencode(params)}"
     try:
-        with urllib.request.urlopen(url, timeout=5) as r:
+        with urllib.request.urlopen(url, timeout=25) as r:
             data = json.load(r)
             proxy = data.get("proxy")
             src = data.get("source") or (source or "")
