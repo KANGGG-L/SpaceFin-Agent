@@ -78,6 +78,12 @@ DOC_MD = """
 5.5 `geocode_fill` — 跑 `geocode_fill.py --daily-limit 6000` 填 community_coords 词典
     （腾讯 geocoder 每日 6000 配额，跑满即停；pending 状态隔日续跑，断点由 status 驱动）。
 6. `geocode_backfill_finalize` — 跑 `geocode_backfill.py` 补 DWD 坐标（该脚本无 `--date` 参数）。
+7. `cdc_consume` — 跑 `tools/cdc/consumer.py --once`，消费 ODS 里积压的业务变更
+   （loan/collateral/customer），增量刷新 DWS/ADS。常驻服务 `spacefin-cdc-consumer` 已在做
+   实时消费，这里再跑一次是**批处理时点的对齐保证**：不依赖常驻进程是否健康，DAG 自证一致。
+8. `risk_recalc` — 跑 `tools/risk/main.py --write-db` 全量重算。必须排在 CDC 之后：CDC 只覆盖
+   「有变更的贷款」，而 ETL 刷新的行情（DWD）影响**全部**贷款的估值，只有全量过一遍 LTV
+   才跟得上新行情。两条路径共用 tools/risk/store 的写库语义，结果可互证。
 
 依赖的 Airflow Variable（均有默认值）：
 `spacefin_repo_root`、`spacefin_venv`、`spacefin_master_url`、`spacefin_render_url`、
@@ -270,6 +276,23 @@ with DAG(
         cwd=REPO_ROOT,
     )
 
+    # --batch 大于常驻消费者：DAG 这一趟要能把整夜积压一次吃完，不留尾巴给下一个调度周期。
+    cdc_consume = BashOperator(
+        task_id="cdc_consume",
+        bash_command=(
+            f'"{PYTHON_BIN}" tools/cdc/consumer.py --once --date {{{{ ds }}}} --batch 5000'
+        ),
+        cwd=REPO_ROOT,
+    )
+
+    risk_recalc = BashOperator(
+        task_id="risk_recalc",
+        bash_command=(
+            f'"{PYTHON_BIN}" tools/risk/main.py --date {{{{ ds }}}} --out-dir output/risk --write-db'
+        ),
+        cwd=REPO_ROOT,
+    )
+
     (
         render_smoke_test
         >> start_stack
@@ -278,4 +301,6 @@ with DAG(
         >> etl_finalize
         >> geocode_fill
         >> geocode_backfill_finalize
+        >> cdc_consume
+        >> risk_recalc
     )

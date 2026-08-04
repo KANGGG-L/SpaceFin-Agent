@@ -1,8 +1,22 @@
-"""风险引擎配置：DB 连接（复用仓库 .env）+ 可配置阈值。"""
+"""风险引擎配置：DB 连接（复用仓库 .env）+ 业务日期口径 + 可配置阈值。"""
 
 import os
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# 业务时区：所有 stat_date / alert_date 的口径基准。
+# 必须显式指定而非用 time.strftime（本地时区）——本机宿主是 UTC、MySQL 容器是 +08:00、
+# Airflow DAG 的 {{ ds }} 又按 Asia/Shanghai 生成，三者不一致。若用本地时区，每天
+# 16:00-24:00 UTC 这 8 小时内跑的批次会把「业务上的第二天」标成第一天，同一天的数据
+# 被拆进两个 stat_date，五级分类占比的分母随之错乱。
+BUSINESS_TZ = ZoneInfo(os.getenv("SPACEFIN_BUSINESS_TZ", "Asia/Shanghai"))
+
+
+def business_date() -> str:
+    """当前业务日期 YYYY-MM-DD（Asia/Shanghai）。CLI 的 --date 默认值统一走这里。"""
+    return datetime.now(BUSINESS_TZ).strftime("%Y-%m-%d")
 
 
 def load_env() -> dict:
@@ -23,6 +37,32 @@ def load_env() -> dict:
 # 业务库（spacefin）与房产库（spacefin_crawler）连接参数
 BUSINESS_DB = "spacefin"
 CRAWL_DB = "spacefin_crawler"
+
+# 广东 21 城：中文城市名/常用简称 → DWD 城市码（crawl_housing_sale.district 存的就是城市码）
+# 放在 config 而非 main：CDC 增量消费与全量重算都要用同一份映射，放入口脚本会导致两处漂移。
+CITY_MAP = {
+    "广州": "gz",
+    "深圳": "sz",
+    "佛山": "fs",
+    "东莞": "dg",
+    "珠海": "zh",
+    "中山": "zs",
+    "惠州": "hui",
+    "江门": "jm",
+    "肇庆": "zq",
+    "清远": "qy",
+    "韶关": "sg",
+    "汕头": "st",
+    "汕尾": "sw",
+    "揭阳": "jy",
+    "潮州": "cz",
+    "梅州": "mz",
+    "河源": "hy",
+    "阳江": "yj",
+    "茂名": "mm",
+    "湛江": "zj",
+    "云浮": "yf",
+}
 
 
 def business_params(env: dict) -> dict:

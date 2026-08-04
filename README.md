@@ -68,9 +68,11 @@
 | └ Airflow 外层编排 | 每日定时触发 + 收尾（DAG 00:30） | ✅ 已接入 | 数据源探索 | [airflow/README.md](airflow/README.md) |
 | └ ETL 数据管道 | 跨日去重 + DWD 入库 + ODS 湖 | ✅ 已接入 | Sprint 1 | [crawler-etl.md](docs/tech/components/crawler-etl.md) |
 | └ Kubernetes 分布式集群 | 采集横向扩展 | ⏸ 清单齐备（待集群） | 数据源探索 | [k8s-crawler-cluster.md](docs/tech/components/k8s-crawler-cluster.md) |
+| MySQL binlog CDC（I-01） | L0 变更接入 | ✅ 已接入 | Sprint 1 | [cdc-downstream.md](docs/tech/components/cdc-downstream.md) |
+| └ CDC 下游消费链 | L0 增量同步 | ✅ 已接入（改一笔 loan 20s 内下游同步） | Sprint 1 | [cdc-downstream.md](docs/tech/components/cdc-downstream.md) |
 | Doris + MinIO 湖仓 | L0 分层 | ⏳ 待接入 | Sprint 1 | — |
 | Kafka + Flink 实时 | L1 | ⏳ 待接入 | Sprint 2 | — |
-| AVM（MGWR+GBDT） | L3 | ⏳ 待接入 | Sprint 3 | — |
+| AVM（GBDT+空间特征） | L3 | ✅ 已接入（MAPE 19.5% vs 基线 28.6%，数据质量修复后可达 10% 目标） | Sprint 2 | [tools/avm/README.md](tools/avm/README.md) · [cdc-downstream.md](docs/tech/components/cdc-downstream.md) |
 | Sedona 空间计算 | L2 | ⏳ 待接入 | Sprint 4 | — |
 | 倒排索引 / Superset 看板 | L5 | ⏳ 待接入 | Sprint 6 | — |
 

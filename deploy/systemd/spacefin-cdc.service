@@ -11,7 +11,7 @@
 
 [Unit]
 Description=SpaceFin MySQL binlog CDC -> ODS (I-01)
-Documentation=file:tools/cdc/main.py
+# 不设 Documentation=：file: URI 必须是绝对路径，相对路径 systemd 报 Invalid URL 并忽略。
 After=network-online.target
 Wants=network-online.target
 
