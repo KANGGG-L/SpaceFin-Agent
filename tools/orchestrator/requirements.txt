@@ -35,3 +35,6 @@ mysql-replication>=1.0.16
 numpy==2.2.6
 scikit-learn==1.7.2
 joblib==1.5.3
+
+# --- tools/spatial 空间特征（S3）：单机近似实现依赖，2026-08-05 追加 ---
+scipy==1.15.3
