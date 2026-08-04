@@ -12,7 +12,7 @@ DAG 的 Bash 任务要在**宿主**上执行 `start_all.sh`、`docker compose`�
 
 | 形态 | 能否直接跑宿主命令 | 额外要求 | 结论 |
 |---|---|---|---|
-| **宿主 systemd 直装**（推荐） | 能，天然同一台机器 | 宿主装 Python 3.11 + Airflow venv | ✅ 采用 |
+| **宿主 systemd 直装**（推荐） | 能，天然同一台机器 | 宿主装 Python 3.10 + Airflow venv | ✅ 采用 |
 | 容器化（`docker-compose.airflow.yml`） | 不能，需打洞 | 挂 `/var/run/docker.sock`、挂仓库根、宿主网络可达 | ⚠️ 备选 |
 
 ### 1.1 推荐：宿主 systemd 直装
@@ -21,7 +21,7 @@ DAG 的 Bash 任务要在**宿主**上执行 `start_all.sh`、`docker compose`�
 sudo useradd -r -m -d /opt/airflow airflow && sudo -iu airflow
 python3 -m venv /opt/airflow/venv && /opt/airflow/venv/bin/pip install \
   "apache-airflow[postgres]==2.10.5" \
-  --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.10.5/constraints-3.11.txt"
+  --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.10.5/constraints-3.10.txt"
 export AIRFLOW_HOME=/opt/airflow
 ```
 
@@ -94,7 +94,7 @@ UI → Admin → Variables，或 `airflow variables set <k> <v>`。DAG 全部带
 | Variable | 默认值 | 说明 |
 |---|---|---|
 | `spacefin_repo_root` | DAG 所在仓库根（`__file__` 推导） | 仓库根，所有 Bash 任务的 cwd；自动推导，无需设置 |
-| `spacefin_venv` | `<repo_root>/tools/orchestrator/.venv` | 采集 venv 的**目录**（DAG 拼 `{venv}/bin/python`）；默认即真实 venv，无需设置 |
+| `spacefin_venv` | `<repo_root>/tools/orchestrator/.venv` | Python 环境**目录**（DAG 拼 `{venv}/bin/python`）；默认指向 `tools/orchestrator/.venv`（本机为 conda `spark` 的符号链接别名），一般无需设置 |
 | `spacefin_master_url` | `http://127.0.0.1:5100` | Sensor 轮询 `/crawl_status` |
 | `spacefin_render_url` | `http://127.0.0.1:8899` | 宿主渲染服务探活 |
 | `spacefin_crawl_timeout_hours` | `6` | `wait_crawl_done` 超时上限 |

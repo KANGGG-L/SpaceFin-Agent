@@ -9,7 +9,7 @@
 ## 1. 目标与优先级
 
 ETL 是采集系统（master/worker 容器编排）的收尾环节，由 Airflow DAG `guangdong_daily_crawl` 的
-Task5 触发（`BashOperator` 调宿主机 venv 里的 etl.py）。目标优先级（用户确认）：
+Task5 触发（`BashOperator` 调宿主机 Python 环境里的 etl.py——单一环境 conda `spark`，`tools/orchestrator/.venv` 是其别名）。目标优先级（用户确认）：
 
 1. **A · 数据资产化**：把 raw JSONL 沉淀为可查询、可追溯的结构化资产——MySQL DWD 主表存每房源最新状态，ODS 湖 Parquet 存每日观测快照。
 2. **B · 跨日去重 + 市场留存**：同一房源不重复，且能回答"房源在市场上挂了多久"（`days_on_market`）。
@@ -66,7 +66,7 @@ Task5 触发（`BashOperator` 调宿主机 venv 里的 etl.py）。目标优先�
 
 ### 2.6 运行环境与建库
 
-- **etl.py 宿主机 venv 直接跑**（不容器化），Airflow DAG 用 `BashOperator` 调 venv python
+- **etl.py 宿主机 Python 环境直接跑**（不容器化；单一环境 conda `spark`，`tools/orchestrator/.venv` 是其别名），Airflow DAG 用 `BashOperator` 调该环境的 python（`{spacefin_venv}/bin/python`）
 - **建库建表 = etl.py 内嵌 DDL 幂等自建**（`CREATE DATABASE IF NOT EXISTS spacefin_crawler` + `CREATE TABLE IF NOT EXISTS`，DDL 读自 `sql/crawl_schema.sql`）
 - **连接账号**：root 仅初始化（建库/建表/`CREATE USER IF NOT EXISTS 'spacefin_crawler_app'` 只授权 `spacefin_crawler.*`）；
   日常读写用专用账号；`.env` 新增 `MYSQL_APP_USER`/`MYSQL_APP_PASSWORD`
@@ -163,5 +163,5 @@ python etl.py --backfill --raw-dir output/guangdong/raw \
 | `sql/crawl_schema.sql` 新增 `community_coords` 表 | 坐标词典，复合主键 `(city, community)` 隔离跨城重名，状态机 `pending/hit/miss` |
 | `tools/anjuke_crawler/geocoder.py` 新增 `DbGeocoder` 类 | 数据库版词典（替代/补充文件版 `LocalGeocoder`），ETL 落库时查表补坐标 |
 | `.env` | 新增 `MYSQL_APP_USER`/`MYSQL_APP_PASSWORD` |
-| 依赖 | venv 装 pymysql + pyarrow |
+| 依赖 | 单一环境 conda `spark` 装 pymysql + pyarrow（见 `tools/orchestrator/requirements.txt`） |
 | Airflow DAG（后续） | Task5 `BashOperator` 调 etl.py |
