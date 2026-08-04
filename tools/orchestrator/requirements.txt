@@ -30,3 +30,8 @@ tldextract==5.3.1
 urllib3==2.7.0
 websocket-client==1.9.0
 mysql-replication>=1.0.16
+
+# --- tools/avm 自动估值模型（S2）：训练/预测依赖，2026-08-04 追加 ---
+numpy==2.2.6
+scikit-learn==1.7.2
+joblib==1.5.3
