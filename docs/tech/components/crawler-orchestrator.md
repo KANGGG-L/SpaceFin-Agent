@@ -50,8 +50,13 @@
 - 抢锁：`SET spacefin:master:leader <id> NX EX 30`；leader 每 10s 续期；
 - standby 每 5s 检查 leader 心跳，超时（>60s）则 `try_become_leader` 接管；
 - leader 的 maintenance 线程：**双池巡检**——青果池（`spacefin:proxy_pool:qg`，
-  按需拉取，存活 1 分钟到期即清）、免费池（`spacefin:proxy_pool:free`，仅青果
-  为空时兜底填充）；为每个 worker 同步 proxy list；
+  存活 1 分钟到期即清；**按需补拉**：`/proxy/qg` 池空时当场提取（`refill_qg(on_demand=True)`），
+  维护线程补拉另加**需求闸门**——近 120s 无实际发放则跳过，避免「提取→55s 过期」烧配额）、
+  免费池（`spacefin:proxy_pool:free`，仅青果为空时兜底填充；**本轮发放总量上限
+  `FREE_BUDGET`（默认 1000）**，到限后本轮不再发免费代理）；为每个 worker 同步 proxy list；
+- **青果 IP 分配**：总量 `QG_BUDGET`=1000/天，sale 阶段 `QG_SALE_BUDGET`=500（青果 + 免费池兜底）、
+  fangyuan 阶段用剩余 500；每城预算按 `BUDGET_TOP_CITIES` 分档（广深各 ~15%，其余 19 城平分），
+  见 compose 的 `IP_BUDGET_SALE/FY_TOP`（75）与 `IP_BUDGET_SALE/FY_OTHER`（18）；
 - leader 初始化 21 城任务到 `spacefin:tasks` 队列，回收心跳超时任务。
 
 **worker（泛化，N 个）**
