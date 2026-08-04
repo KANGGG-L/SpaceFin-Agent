@@ -65,6 +65,8 @@
 | └ Redis 任务队列 | 采集中间件 | ✅ 代码集成 | 数据源探索 | [redis-task-queue.md](docs/tech/components/redis-task-queue.md) |
 | └ jhao104/proxy_pool 代理池 | 采集反爬（IP 轮换） | ✅ 客户端集成 | 数据源探索 | [proxy-pool.md](docs/tech/components/proxy-pool.md) |
 | └ 容器编排采集系统 | 分布式调度 + 宿主渲染 | ✅ 已接入（2026-08-03 全量跑通） | 数据源探索 | [crawler-orchestrator.md](docs/tech/components/crawler-orchestrator.md) |
+| └ Airflow 外层编排 | 每日定时触发 + 收尾（DAG 00:30） | ✅ 已接入 | 数据源探索 | [airflow/README.md](airflow/README.md) |
+| └ ETL 数据管道 | 跨日去重 + DWD 入库 + ODS 湖 | ✅ 已接入 | Sprint 1 | [crawler-etl.md](docs/tech/components/crawler-etl.md) |
 | └ Kubernetes 分布式集群 | 采集横向扩展 | ⏸ 清单齐备（待集群） | 数据源探索 | [k8s-crawler-cluster.md](docs/tech/components/k8s-crawler-cluster.md) |
 | Doris + MinIO 湖仓 | L0 分层 | ⏳ 待接入 | Sprint 1 | — |
 | Kafka + Flink 实时 | L1 | ⏳ 待接入 | Sprint 2 | — |
@@ -78,20 +80,24 @@
 
 - **调度架构**：master 主备（Redis 抢锁选主，standby 自动接管）+ 5 个泛化 worker + 宿主渲染服务，无第三方调度框架依赖。
 - **代理体系**：双代理池（青果 qg 短效 1000 配额优先 + 免费池兜底），按缺口小批量补拉；全程强制走 IP 池，渲染服务对无代理请求返回 403，杜绝直连宿主 IP。
+- **外层编排**：已接入 Airflow（DAG `guangdong_daily_crawl`，每天 00:30 触发），只做「拉起 + 盯完成 + 收尾」，不替换 Redis 实时派单。
+- **ETL 管道**：已落地（DWD 入库 + ODS 数据湖 Parquet + geocode 异步最终一致补全，跨日去重与市场留存指标）。
 - **全量运行结果**：sale（出售）21 城 186,635 行 / 出数页率 99.2%；fangyuan（出租）链路修复后出数页率提升 11.8 倍（2.82%→33.33%），页均产出 18.27 行。
 - **空转根因修复（7 项全落地）**：fangyuan 分页越界、验证码误判空页、Chrome 空壳页识别（66 样本零错判）、探针自伤 pkill、fd 上限、补池重试、渲染槽并发。
-- **当前瓶颈**：青果 1000 配额已耗尽，免费池通过率实测 0%（出口 IP 被反爬验证码墙标记）——采集能力就绪，待新代理配额或新机器。
+- **当前瓶颈**：青果 1000 配额已耗尽，免费池通过率实测 0%（出口 IP 被反爬验证码墙标记）——采集能力就绪，待新代理配额或 Linux 新机迁移后全量重跑。
 
-## 下一步规划（采集系统）
+## 落地与迁移（采集系统）
 
-| 项 | 决策 |
+采集系统主体（调度 / 每城 IP 预算 / 增量断点续爬 / ETL / Airflow 编排）已实现并合入 develop；剩余为 Linux 迁移与验收：
+
+| 项 | 状态 |
 |----|------|
-| 定时触发 | 接入 **Airflow**，每天 00:30 自动触发（DAG `guangdong_daily_crawl`，只做「拉起+盯完成+收尾」，不替换实时派单） |
-| ETL 处理 | **ETL 与 Airflow 一并接入**：DAG 收尾阶段跑 etl.py 完成跨日去重、补 geocode、入库与数仓/数据湖落盘 |
-| 轮次策略 | 取消 MAX_ROUNDS=3 循环，每城每轮读完即终止（预算耗尽标记该城完成） |
-| IP 预算 | 1000 青果按城市配额：广深各 15%，其余 19 城均分；sale 从 600 分配，fangyuan 从 400+免费池分配 |
-| 增量采集 | 断点续爬（读 crawl_progress）+ 回扫头部 2-3 页抓新增；爬取层不做跨日比对 |
-| 部署形态 | 整套迁移至 **Linux 新机**（master/worker/redis/渲染服务/Airflow 同机），launchd → systemd |
+| 定时触发（Airflow DAG `guangdong_daily_crawl`，00:30） | ✅ 已实现并合入 develop |
+| ETL 跨日去重 / 入库 / 数据湖落盘（DAG 收尾自动执行） | ✅ 已实现 |
+| 轮次策略（取消 MAX_ROUNDS=3，读完/预算耗尽即终态） | ✅ 已实现 |
+| 每城 IP 预算（sale 600 / fangyuan 400+免费池，广深 15%） | ✅ 已实现 |
+| 增量断点续爬 + 回扫头部 2-3 页 | ✅ 已实现 |
+| Linux 新机部署（launchd → systemd、Airflow 同机、venv 装依赖） | ⏳ 待执行 |
 
 > 🔴 **最大风险**：fangyuan 渲染依赖宿主 Chrome。容器 Chrome（Linux/headless）已被反爬按指纹软拦截，Linux 宿主 Chrome 预期可行但**未实测**——新机部署第一步必须做渲染冒烟测试（`/render` 拿 zu-itemmod），失败则需决策降级方案。
 
