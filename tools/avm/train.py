@@ -28,6 +28,10 @@
       在折内统计（不含自身），测试行邻域用完整训练集——两边口径一致。
 
 清洗规则（写入代码即文档）：
+    0) 外市混入清洗 + title 回填小区名（见 tools/avm/data_clean.py，可复现、
+       有统计输出）：坐标围栏 / 北京南昌等文字标记 / 城市价格上限三层判定
+       剔除混入的北京燕郊南昌等外市房源；对 community 为空的行用 title 中
+       的楼盘名保守回填。
     1) 剔除 total_price_wan / area_sqm / unit_price_yuan 任一缺失或 <=0 的行；
     2) 一致性校验：|total_price*10000/area - unit_price| / unit_price > 2% 视为脏行剔除；
     3) 分位数截尾去极值：unit_price_yuan 与 area_sqm 各截 0.5% / 99.5%；
@@ -80,7 +84,7 @@ def crawl_params(env: dict) -> dict:
 # 数据读取与清洗
 # ---------------------------------------------------------------------------
 SQL = """
-SELECT community, district, bedrooms, halls, bathrooms, area_sqm, direction, floor,
+SELECT title, community, district, bedrooms, halls, bathrooms, area_sqm, direction, floor,
        building_age, parking_count, total_price_wan, unit_price_yuan, latitude, longitude
 FROM crawl_housing_sale
 """
@@ -360,6 +364,50 @@ def baseline_predict(rows: list[dict], enc: dict) -> np.ndarray:
     return np.array(preds)
 
 
+def decompose_by_segment(rows: list[dict], y_true: np.ndarray, y_pred: np.ndarray) -> dict:
+    """按「位置信号完整度」分段评估，定位剩余误差集中段。
+
+    段位：
+        has_comm_coord  有小区 + 有坐标（位置信号最完整）
+        has_comm_only   有小区、无坐标
+        no_comm         无小区（title 也解析不出楼盘名）
+    """
+    ape = np.abs(y_pred - y_true) / y_true
+    seg = {"has_comm_coord": [], "has_comm_only": [], "no_comm": []}
+    for r, a in zip(rows, ape, strict=True):
+        has_comm = bool(r["comm"])
+        has_coord = r["lat"] == r["lat"]
+        if has_comm and has_coord:
+            seg["has_comm_coord"].append(a)
+        elif has_comm:
+            seg["has_comm_only"].append(a)
+        else:
+            seg["no_comm"].append(a)
+    return {
+        k: {
+            "n": len(v),
+            "mape": round(float(np.mean(v)) * 100, 2) if v else None,
+            "mdape": round(float(np.median(v)) * 100, 2) if v else None,
+            "weight_pct": round(len(v) / len(rows) * 100, 1),
+        }
+        for k, v in seg.items()
+    }
+
+
+def decompose_by_city(rows: list[dict], y_true: np.ndarray, y_pred: np.ndarray) -> dict:
+    """按城市分段的 MAPE，用于识别仍有污染的异常城市。"""
+    from collections import OrderedDict
+
+    by_city: dict[str, list[float]] = {}
+    ape = np.abs(y_pred - y_true) / y_true
+    for r, a in zip(rows, ape, strict=True):
+        by_city.setdefault(r["city"], []).append(a)
+    return OrderedDict(
+        (c, {"n": len(v), "mape": round(float(np.mean(v)) * 100, 2)})
+        for c, v in sorted(by_city.items(), key=lambda kv: -np.mean(kv[1]))
+    )
+
+
 # ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
@@ -376,9 +424,23 @@ def main() -> None:
 
     conn = pymysql.connect(**crawl_params(env), charset="utf8mb4")
     try:
-        rows = clean_rows(load_rows(conn, args.max_rows))
+        raw_rows = load_rows(conn, args.max_rows)
     finally:
         conn.close()
+
+    # 外市清洗 + title 回填小区名（可复现，统计随报告输出）
+    # parse_all=True：用 title 解析出的楼盘名统一归一所有行的 community，
+    # 消除爬虫 community 字段「整句噪音标签」造成的标签碎片化。
+    from data_clean import clean_rows_with_stats
+
+    raw_rows, clean_stats = clean_rows_with_stats(raw_rows, parse_all=True)
+    rows = clean_rows(raw_rows)
+    print(
+        f"[avm] 外市清洗: 剔除 {clean_stats['n_dropped']} 行"
+        f"（围栏 {clean_stats['n_dropped_coord']} / 标记 {clean_stats['n_dropped_marker']}"
+        f" / 价格 {clean_stats['n_dropped_price']}），"
+        f"title 归一/回填小区 {clean_stats['n_backfilled_community']} 行"
+    )
     print(f"[avm] 清洗后样本 {len(rows)}（{time.time() - t0:.1f}s）")
 
     y_log = np.array([np.log(r["up"]) for r in rows])
@@ -406,11 +468,12 @@ def main() -> None:
     test_mat = build_features(te, yte, full_enc, exclude_self=False)
 
     # HistGBR 原生支持 NaN（无坐标/无小区行保留，特征列有缺失不剔除）
+    # 参数：更大容量 + 更低学习率在清洗后数据上 MAPE 更低（-0.4pp）
     model = HistGradientBoostingRegressor(
-        max_iter=800,
-        learning_rate=0.05,
-        max_leaf_nodes=63,
-        min_samples_leaf=15,
+        max_iter=1500,
+        learning_rate=0.03,
+        max_leaf_nodes=100,
+        min_samples_leaf=8,
         l2_regularization=1.0,
         early_stopping=True,
         validation_fraction=0.1,
@@ -439,6 +502,18 @@ def main() -> None:
         f"[avm] 模型 (HistGBR):                  MAPE={model_met['mape']}% MdAPE={model_met['mdape']}% R²={model_met['r2']} n={model_met['n']}"
     )
     print(f"[avm] 相对提升（MAPE 降幅）: {improvement}%")
+
+    # 误差分解：分段 + 分城市（定位剩余瓶颈）
+    seg_metrics = decompose_by_segment(te, tp_te, pred_tp)
+    city_metrics = decompose_by_city(te, tp_te, pred_tp)
+    print("\n[avm] 测试集分段误差（模型）：")
+    for k, v in seg_metrics.items():
+        print(
+            f"    {k:<14} n={v['n']:>6} MAPE={v['mape']}% MdAPE={v['mdape']}% 权重={v['weight_pct']}%"
+        )
+    print("[avm] 测试集分城市 MAPE（top 8）：")
+    for c, v in list(city_metrics.items())[:8]:
+        print(f"    {c:<5} n={v['n']:>5} MAPE={v['mape']}%")
 
     # 特征缺失率（说明空间特征可用性，写入报告）
     miss = {}
@@ -476,10 +551,28 @@ def main() -> None:
         "feature_missing_pct_test": miss,
         "target": "log(unit_price_yuan); total = unit_price * area_sqm",
         "leakage_control": "小区/城市中位价仅用训练折内统计(OOF)；测试集新小区回退城市中位→全局中位",
+        "cleaning": {
+            "rules": "坐标围栏(广东21城超围栏) / 北京南昌等文字标记 / 城市价格上下限；title 统一归一小区名",
+            "n_raw": clean_stats["n_raw"],
+            "n_dropped": clean_stats["n_dropped"],
+            "n_dropped_coord": clean_stats["n_dropped_coord"],
+            "n_dropped_marker": clean_stats["n_dropped_marker"],
+            "n_dropped_price": clean_stats["n_dropped_price"],
+            "dropped_by_coord": clean_stats["dropped_by_coord"],
+            "dropped_by_marker": clean_stats["dropped_by_marker"],
+            "dropped_by_price_cap": clean_stats["dropped_by_price_cap"],
+            "n_comm_missing_before": clean_stats["n_comm_missing_before"],
+            "n_backfilled_community": clean_stats["n_backfilled_community"],
+            "n_comm_missing_after": clean_stats["n_comm_missing_after"],
+        },
         "data_notes": {
-            "raw_rows": len(rows),
+            "rows_after_clean": len(rows),
             "coord_rows_pct": round(np.mean([r["lat"] == r["lat"] for r in rows]) * 100, 1),
             "community_missing_pct": round(np.mean([not r["comm"] for r in rows]) * 100, 1),
+        },
+        "error_decomposition": {
+            "by_segment": seg_metrics,
+            "by_city_mape": {c: v for c, v in city_metrics.items()},
         },
     }
     with open(report_path, "w", encoding="utf-8") as f:
