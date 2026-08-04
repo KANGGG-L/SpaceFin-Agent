@@ -75,6 +75,8 @@ DOC_MD = """
 3. `wait_crawl_done` — 轮询 master `GET /crawl_status`，等 `all_done=true`（42 个任务全 finished 或 stop 置位）。
 4. `drain_workers` — 等在跑的 worker 收尾（`GET /tasks` 无 `status=running`），避免 ETL 读到写了一半的 raw 行。
 5. `etl_finalize` — 跑 `etl.py --date {{ ds }}`（跨日去重、入库、数据湖落盘）。
+5.5 `geocode_fill` — 跑 `geocode_fill.py --daily-limit 6000` 填 community_coords 词典
+    （腾讯 geocoder 每日 6000 配额，跑满即停；pending 状态隔日续跑，断点由 status 驱动）。
 6. `geocode_backfill_finalize` — 跑 `geocode_backfill.py` 补 DWD 坐标（该脚本无 `--date` 参数）。
 
 依赖的 Airflow Variable（均有默认值）：
@@ -254,6 +256,14 @@ with DAG(
         cwd=REPO_ROOT,
     )
 
+    # 腾讯 geocoder 每日 6000 配额：--daily-limit 跑满即停，pending 状态保留到次日续跑（隔日补全）。
+    # 放在 etl_finalize 之后（DWD 有 pending 行）、geocode_backfill_finalize 之前（词典先填好）。
+    geocode_fill = BashOperator(
+        task_id="geocode_fill",
+        bash_command=f'"{PYTHON_BIN}" tools/orchestrator/geocode_fill.py --daily-limit 6000',
+        cwd=REPO_ROOT,
+    )
+
     geocode_backfill_finalize = BashOperator(
         task_id="geocode_backfill_finalize",
         bash_command=f'"{PYTHON_BIN}" tools/orchestrator/geocode_backfill.py',
@@ -266,5 +276,6 @@ with DAG(
         >> wait_crawl_done
         >> drain_workers
         >> etl_finalize
+        >> geocode_fill
         >> geocode_backfill_finalize
     )
