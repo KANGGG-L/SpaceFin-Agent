@@ -64,15 +64,17 @@ sudo -u postgres psql -c "CREATE USER airflow WITH PASSWORD '<改我>';" \
 （postgres / airflow-init / airflow-webserver / airflow-scheduler）。如实说明局限：
 
 - 必须挂 `/var/run/docker.sock` 才能在容器里调宿主 docker compose；这等于把宿主 root 权限给了容器。
-- 必须挂仓库根到 `/opt/spacefin`，并把 Variable `spacefin_repo_root` 改成 `/opt/spacefin`，
-  `spacefin_venv` 改成 `/opt/spacefin/tools/orchestrator/.venv`（**目录，不带 `/bin/python`**：
-  DAG 内部自己拼 `{venv}/bin/python`）；venv 是 Linux 宿主建的才可用。
+- 必须挂仓库根到 `/opt/spacefin`。路径类 Variable **无需改动**：DAG 用 `Path(__file__).resolve().parents[2]`
+  自动推导（`guangdong_daily_crawl.py:39-46`），容器里挂到 `/opt/spacefin` 后自动得到
+  `spacefin_repo_root=/opt/spacefin`、`spacefin_venv=/opt/spacefin/tools/orchestrator/.venv`
+  （**目录，不带 `/bin/python`**：DAG 内部自己拼 `{venv}/bin/python`）；venv 是 Linux 宿主建的才可用。
 - 容器访问宿主 master/渲染服务要走 `host.docker.internal`（已配 `extra_hosts`），
   Variable 的两个 URL 需相应改写；若想直接用 `127.0.0.1`，得给两个 airflow 服务加 `network_mode: host`
   并删掉 `ports:`（此时 webserver 端口由 `airflow.cfg` 决定）。注意 host 网络下服务名 `postgres`
   不再解析，还须把 `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN` 里的 `@postgres:5432` 改成 `@127.0.0.1:5432`，
   并给 postgres 服务同样加 `network_mode: host`（或给它 `ports: ["5432:5432"]`），否则连不上元数据库会 crashloop。
-- `start_all.sh` 里的 `launchctl`（macOS）在 Linux 上无效，需先由 scripts agent 改为 systemd 分支。
+- `start_all.sh` 已按平台分支：macOS 走 launchd，Linux 走 systemd（`start_all.sh:64-87`），
+  渲染服务托管单元见 `deploy/systemd/spacefin-host-render.service`（用户级安装，须 `loginctl enable-linger` 常驻）。
 
 ```bash
 cd airflow && cp .env.example .env && vi .env
@@ -85,15 +87,18 @@ docker compose -f docker-compose.airflow.yml up -d
 
 ## 2. 需要创建的 Airflow Variables
 
-UI → Admin → Variables，或 `airflow variables set <k> <v>`。DAG 全部带 `default_var`，但生产应显式设置。
+UI → Admin → Variables，或 `airflow variables set <k> <v>`。DAG 全部带 `default_var`，其中路径类默认值由
+`Path(__file__).resolve().parents[2]` 自动推导（见 `guangdong_daily_crawl.py:39-46`），**仓库挂到任何目录都自动正确，
+一般无需覆盖**；仅当 DAG 文件被挪到仓库外、或要用与默认不同的值时才显式设置。
 
 | Variable | 默认值 | 说明 |
 |---|---|---|
-| `spacefin_repo_root` | `/Users/ethan/Documents/GitHub/SpaceFin Agent`（开发机路径） | 仓库根，所有 Bash 任务的 cwd；Linux 上**必须显式设置** |
-| `spacefin_venv` | `/opt/spacefin/.venv` | 采集 venv 的**目录**（DAG 拼 `{venv}/bin/python`）；本仓库真实 venv 在 `<repo_root>/tools/orchestrator/.venv`，**必须显式设置** |
+| `spacefin_repo_root` | DAG 所在仓库根（`__file__` 推导） | 仓库根，所有 Bash 任务的 cwd；自动推导，无需设置 |
+| `spacefin_venv` | `<repo_root>/tools/orchestrator/.venv` | 采集 venv 的**目录**（DAG 拼 `{venv}/bin/python`）；默认即真实 venv，无需设置 |
 | `spacefin_master_url` | `http://127.0.0.1:5100` | Sensor 轮询 `/crawl_status` |
 | `spacefin_render_url` | `http://127.0.0.1:8899` | 宿主渲染服务探活 |
 | `spacefin_crawl_timeout_hours` | `6` | `wait_crawl_done` 超时上限 |
+| `spacefin_drain_timeout` | `900` | `drain_workers` 等待秒数，超时只告警不失败 |
 
 ---
 
