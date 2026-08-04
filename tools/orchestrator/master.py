@@ -48,6 +48,7 @@ HB_KEY = "spacefin:master:heartbeat"  # leader heartbeat ts
 WORKER_HB_PREFIX = "spacefin:worker_hb:"  # worker 心跳 key 前缀
 QG_CONSUMED_KEY = "spacefin:qg_consumed"  # 青果提取侧计数（停止条件）
 QG_LAST_POP_KEY = "spacefin:qg_last_pop"  # 最近一次成功发放青果的时间戳（需求闸门）
+FREE_USED_KEY = "spacefin:free_used"  # 本轮已发放的免费代理计数（免费池总上限）
 LOCK_PREFIX = "spacefin:task_lock:"  # 任务独占锁前缀
 PHASE_KEY = "spacefin:phase"  # 阶段：sale(先出售) / fangyuan(后出租)
 STOP_KEY = "spacefin:stop"  # 全局终止信号（fangyuan 提前结束/资源耗尽置位）
@@ -65,6 +66,9 @@ WORKER_HB_TTL = int(os.getenv("WORKER_HB_TTL", 120))  # worker 心跳 key TTL
 MASTER_PORT = int(os.getenv("MASTER_PORT", 5100))
 QG_BUDGET = int(os.getenv("QG_BUDGET", 1000))  # 青果 IP 总预算（跑满 1000）
 QG_SALE_BUDGET = int(os.getenv("QG_SALE_BUDGET", 600))  # sale 阶段青果配额（前 600）
+FREE_BUDGET = int(
+    os.getenv("FREE_BUDGET", 1000)
+)  # 本轮免费代理发放总上限（到限后本轮不再用免费池）
 EMPTY_STALL_CYCLES = int(os.getenv("EMPTY_STALL_CYCLES", 3))  # 双池连续空转 N 轮 → 终止
 MAX_REQUEUE = int(
     os.getenv("MAX_REQUEUE", 3)
@@ -432,6 +436,8 @@ def refill_free(rdb):
     """免费池兜底（独立闸门）：仅当青果池为空时填充（青果可用则优先，不拉免费）。"""
     if rdb.hlen(POOL_QG) != 0:
         return 0
+    if int(rdb.get(FREE_USED_KEY) or 0) >= FREE_BUDGET:
+        return 0  # 本轮免费配额已用尽，不再补池（避免白跑验证）
     seen = set()
     for url in PROXY_SOURCES:
         for line in _download_source(url).splitlines():
@@ -542,6 +548,19 @@ def _remove_from_worker_lists(rdb, proxy):
     try:
         for w in rdb.smembers(WORKERS_KEY):
             rdb.srem(f"spacefin:proxy_list:{w}", proxy)
+    except Exception:
+        pass
+
+
+def _disable_free_pool(rdb):
+    """本轮免费配额耗尽：清空免费池与 worker 代理列表，使本轮不再有免费代理可发。
+
+    不删免费池则 worker 仍可能经 /proxies 回退列表拿到免费代理，绕开 FREE_BUDGET 上限。
+    """
+    try:
+        rdb.delete(POOL_FREE)
+        for k in rdb.scan_iter("spacefin:proxy_list:*"):
+            rdb.delete(k)
     except Exception:
         pass
 
@@ -892,6 +911,7 @@ def _bootstrap_run(rdb):
     rdb.delete(EMPTY_CYCLES_KEY)
     rdb.set(PHASE_KEY, "sale")
     rdb.delete(QG_CONSUMED_KEY)
+    rdb.delete(FREE_USED_KEY)
     rdb.delete(TASK_QUEUE)
     for t in DEFAULT_TASKS:
         city, typ = t["city"], t["type"]
@@ -1216,15 +1236,23 @@ class Handler(BaseHTTPRequestHandler):
             _remove_from_worker_lists(rdb, p)
             self._proxy_json(p, "qg", city, typ, used, budget, budget > 0 and used >= budget)
         elif path == "/proxy/free":
-            # 免费池永不受预算限制；budget_exhausted 仅如实回显该城当前预算状态
+            # 免费池=碰运气兜底：本轮发放总量受 FREE_BUDGET 限制，到限后本轮不再发免费代理
             city, typ = _resolve_scope(query.get("city", ""), query.get("type", ""))
             p = pop_proxy(rdb, POOL_FREE)
             used, budget, exhausted = _budget_state(rdb, city, typ)
-            if not p:
-                self._proxy_json(None, None, city, typ, used, budget, exhausted, "free pool empty")
+            if p:
+                n = rdb.incr(FREE_USED_KEY)
+                if n > FREE_BUDGET:
+                    rdb.decr(FREE_USED_KEY)
+                    _disable_free_pool(rdb)  # 清空免费池与 worker 列表，本轮不再用免费池
+                    self._proxy_json(
+                        None, None, city, typ, used, budget, exhausted, "free budget exhausted"
+                    )
+                    return
+                _remove_from_worker_lists(rdb, p)
+                self._proxy_json(p, "free", city, typ, used, budget, exhausted)
                 return
-            _remove_from_worker_lists(rdb, p)
-            self._proxy_json(p, "free", city, typ, used, budget, exhausted)
+            self._proxy_json(None, None, city, typ, used, budget, exhausted, "free pool empty")
         elif path == "/proxy/random":
             # 青果优先（受预算约束），青果不可用（池空或预算耗尽）则回落免费池
             city, typ = _resolve_scope(query.get("city", ""), query.get("type", ""))
@@ -1245,6 +1273,14 @@ class Handler(BaseHTTPRequestHandler):
             p = pop_proxy(rdb, POOL_FREE)
             used, budget, exhausted = _budget_state(rdb, city, typ)
             if p:
+                n = rdb.incr(FREE_USED_KEY)
+                if n > FREE_BUDGET:
+                    rdb.decr(FREE_USED_KEY)
+                    _disable_free_pool(rdb)  # 本轮免费配额耗尽
+                    self._proxy_json(
+                        None, None, city, typ, used, budget, exhausted, "free budget exhausted"
+                    )
+                    return
                 _remove_from_worker_lists(rdb, p)
                 self._proxy_json(p, "free", city, typ, used, budget, exhausted)
                 return
