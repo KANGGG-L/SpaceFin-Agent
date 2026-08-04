@@ -1,6 +1,6 @@
 # 组件技术说明 · 采集数据 ETL（安居客爬虫 → MySQL DWD + ODS 数据湖）
 
-> **状态**：🔵 设计中（2026-08-03 grill-me 已确认 19 项决策，待实施）
+> **状态**：✅ 已实施（2026-08-03 决策 + 2026-08-04 落地；geocode 已解耦为独立补全链路）
 > **能力地图层级**：L0/L1 数据底座 — 采集数据资产化
 > **所属系统**：tools/orchestrator（与爬虫容器编排同仓）
 
@@ -51,25 +51,34 @@ Task5 触发（`BashOperator` 调宿主机 venv 里的 etl.py）。目标优先�
 
 - **轻量清洗 + 保真入库**：数值字段强制类型转换（失败置 None）、负值/0 价格面积置 None、去首尾空白；
   **不做业务阈值清洗**（留给下游 DWS/分析层）
-- **geocode**：现有离线 `LocalGeocoder`，补 DWD 中 lat/lng 为 null 的行（词典命中才更新，不命中不动）；
-  未命中小区聚合输出 `geocode_miss_{date}.json`（city/community/频次），供人工补 `community_coords.json`
+- **geocode**：ETL 落库时通过 `DbGeocoder`（词典存 `community_coords` 表，按 `(city,community)` 隔离跨城重名）对坐标为 null 的行尝试词典命中补坐标；命中即写回，未命中则标记 `geocode_status=pending` 交 `geocode_fill.py` 后续补。**不再产出 `geocode_miss_{date}.json` 文件**——miss 清单走 `community_coords` 表的 status 状态机，由 `geocode_backfill.py` / `geocode_fill.py` 消费。
 - **去掉 CSV 输出**：只落 MySQL DWD + ODS 湖，单一数据出口
 
-### 2.5 运行环境与建库
+### 2.5 geocode 解耦（方案 C：状态标记代替物理搬家）
+
+坐标补全**从 ETL 主链路解耦**：ETL 落库时只写 `geocode_status`（pending/hit），坐标缺失也照常入库；补全由独立脚本周期执行，不阻塞主链路。三个脚本职责单一：
+
+- **`etl.py`**：落库时通过 `DbGeocoder` 对坐标为 null 的行尝试词典命中补坐标，命中即写回并标 `geocode_status=hit`，未命中则标 `geocode_status=pending`；**不扫历史 null 行**（历史补全交给 `geocode_backfill.py`）。
+- **`tools/orchestrator/geocode_fill.py`**：用腾讯位置服务 geocoder（`/ws/geocoder/v1`，每日 6000 配额）对 `community_coords` 词典里 `status='pending'` 或 miss 超 7 天的小区批量补坐标；查询带 `region=城市名` 消除跨城重名；只采纳 `level>=10`（小区/大厦级）；腾讯返回 GCJ-02，写入前转 WGS-84 统一口径；单小区只调一次 API，断点续跑由 status 驱动。
+- **`tools/orchestrator/geocode_backfill.py`**：读 `community_coords` 词典 hit 行 → 批量 UPDATE DWD 中 `geocode_status IN ('pending','miss')` 且坐标为 null 的行；miss 小区标记不重试（7 天可重查）。
+
+**词典表 `community_coords`**（在 `sql/crawl_schema.sql`，库 `spacefin_crawler`）：复合主键 `(city, community)` 隔离跨城重名，状态机 `pending/hit/miss`，并含 `source`/`level`/`query_count`/`last_queried_at` 等字段。
+
+### 2.6 运行环境与建库
 
 - **etl.py 宿主机 venv 直接跑**（不容器化），Airflow DAG 用 `BashOperator` 调 venv python
 - **建库建表 = etl.py 内嵌 DDL 幂等自建**（`CREATE DATABASE IF NOT EXISTS spacefin_crawler` + `CREATE TABLE IF NOT EXISTS`，DDL 读自 `sql/crawl_schema.sql`）
 - **连接账号**：root 仅初始化（建库/建表/`CREATE USER IF NOT EXISTS 'spacefin_crawler_app'` 只授权 `spacefin_crawler.*`）；
   日常读写用专用账号；`.env` 新增 `MYSQL_APP_USER`/`MYSQL_APP_PASSWORD`
 
-### 2.6 etl_report.json 指标集
+### 2.7 etl_report.json 指标集
 
 六块：
 1. 输入与去重：当日 raw 行数、处理/跳过文件数、去重后唯一数、重复率
 2. 跨日增量：当日新增房源数（新 url_key）、更新房源数（last_seen 更新）、未变化数
-3. 累计库存：DWD 主表总行数、按 city:type 分布
-4. 市场留存：days_on_market 均值/中位数/分桶分布（0-7/8-30/31-90/90+）
-5. geocode：按城命中率、miss 小区数
+3. 累计库存：DWD 主表总行数、**按 city:type 分布**（`stock.city_distribution`，按 district/城市代码分布）
+4. 市场留存：days_on_market **均值/中位数/分桶分布**（0-7/8-30/31-90/90+）；实际报告含 `retention` 分桶 + `days_on_market_stats`（mean/median）
+5. geocode：现只报告 `miss_communities` 计数（不再落 JSON 文件；miss 清单走 `community_coords` 表 status 状态机）
 6. 性能：耗时、吞吐（行/s）、MySQL 写入耗时、湖写入耗时
 
 ## 3. 数据模型
@@ -107,6 +116,8 @@ CREATE TABLE crawl_housing_sale (
 
 `crawl_housing_rent` 同构，字段为 RENT 14 项（title/community/district/bedrooms/halls/bathrooms/
 area_sqm/direction/floor/monthly_rent_yuan/rent_type/latitude/longitude/url）。
+
+> 注：sale 表与 rent 表结构一致，且**两表都含 `geocode_status` 列**（补全状态 `pending`/`hit`/`miss`，补全已从 ETL 解耦为独立链路）；上面 sale 示例 SQL 为简化展示未列出该列，实际建表 DDL 以 `sql/crawl_schema.sql` 为准。
 
 ### 3.2 ODS 湖 Parquet 分区
 
@@ -147,6 +158,10 @@ python etl.py --backfill --raw-dir output/guangdong/raw \
 | 新增 `tools/orchestrator/url_key.py` | URL 规范化去重键纯函数（可单测） |
 | 新增 `tools/orchestrator/sql/crawl_schema.sql` | 两张 DWD 表 DDL |
 | 改造 `tools/orchestrator/etl.py` | 增量识别/url_key/COALESCE upsert/Parquet 湖分区/miss 清单/etl_report 六块/`--backfill`+`--date`/`--mysql-dsn`/`--lake-dir`；删 CSV 输出 |
+| 新增 `tools/orchestrator/geocode_fill.py` | 腾讯位置服务 geocoder 补 `community_coords` 词典（每日 6000 配额、`region` 消跨城重名、`level>=10` 采纳、GCJ-02→WGS-84） |
+| 新增 `tools/orchestrator/geocode_backfill.py` | 读 `community_coords` 词典 hit 行 → 批量 UPDATE DWD `geocode_status IN ('pending','miss')` 且坐标为 null 的行 |
+| `sql/crawl_schema.sql` 新增 `community_coords` 表 | 坐标词典，复合主键 `(city, community)` 隔离跨城重名，状态机 `pending/hit/miss` |
+| `tools/anjuke_crawler/geocoder.py` 新增 `DbGeocoder` 类 | 数据库版词典（替代/补充文件版 `LocalGeocoder`），ETL 落库时查表补坐标 |
 | `.env` | 新增 `MYSQL_APP_USER`/`MYSQL_APP_PASSWORD` |
 | 依赖 | venv 装 pymysql + pyarrow |
 | Airflow DAG（后续） | Task5 `BashOperator` 调 etl.py |
