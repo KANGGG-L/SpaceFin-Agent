@@ -1,8 +1,8 @@
 # ---- Python ----
 __pycache__/
 *.py[cod]
-.venv/
-venv/
+.venv
+venv
 env/
 .env
 *.egg-info/
@@ -80,7 +80,7 @@ tools/anjuke_crawler/chrome_profile/
 anjuke_*.csv
 
 # ---- SpaceFin orchestrator ----
-tools/orchestrator/.venv/
+tools/orchestrator/.venv
 # launchd 托管配置：硬编码本机绝对路径，不入库（Linux 迁移用 systemd unit 替代）
 tools/orchestrator/com.spacefin.host-render.plist
 # 一次性诊断探针脚本（验证码率/渲染冒烟），非生产代码

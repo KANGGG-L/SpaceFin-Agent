@@ -49,7 +49,7 @@ render_alive() {
   return 1
 }
 
-# 1) 宿主渲染服务 venv（DrissionPage + curl_cffi，缺则重建）
+# 1) 宿主渲染服务 Python 环境（本机为 conda `spark` 别名 .venv；缺才重建）
 if [ ! -x "$VENV/bin/python" ]; then
   echo "[start_all] creating venv $VENV (DrissionPage + curl_cffi) ..."
   python3 -m venv "$VENV"
