@@ -84,12 +84,13 @@ def main():
     customers = store.load_customers(biz)
     dwd_unit = valuation.load_dwd_unit_prices(crawl)
     avm_model = valuation.load_avm_model()
+    spatial = store.load_spatial(crawl)
     print(
         f"[risk] loans={len(loans)} collaterals={len(collaterals)} dwd_districts={len(dwd_unit)} "
-        f"avm_model={'loaded' if avm_model else 'absent'}"
+        f"avm_model={'loaded' if avm_model else 'absent'} spatial_feats={len(spatial[0])}"
     )
 
-    rows = store.compute_rows(loans, collaterals, customers, dwd_unit, avm_model)
+    rows = store.compute_rows(loans, collaterals, customers, dwd_unit, avm_model, spatial)
 
     agg = risk_engine.build_aggregate(rows)
     alerts = [r for r in rows if r["alert"]]

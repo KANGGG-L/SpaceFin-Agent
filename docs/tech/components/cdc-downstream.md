@@ -136,7 +136,11 @@ tools/orchestrator/.venv/bin/python tools/pipeline/run_pipeline.py --dry-run
   须先把种子换成广东城市地址。这不是消费链的缺陷，是种子数据问题。
   AVM 接入见 `tools/risk/valuation.py`：`property_addr` 含广东城市名即命中（三级回退
   AVM → DWD 中位 → true_market_price），合成地址无城市码时正确落回兜底。
-- **AVM 指标**：sale DWD 上 MAPE 19.49%（基线 28.62%），未达 10% 目标——瓶颈是 DWD 自身
-  31% 行无小区名/坐标、坐标仅 29% 覆盖且混入外市房源（详见 `tools/avm/README.md` 误差分解）。
+- **AVM 指标**：sale DWD 上 MAPE 16.63%（基线 22.57%，较初版 19.49% 再降；title 回填小区 +
+  外市清洗 2038 行），未达 10% 目标——剩余瓶颈是 16.9% 行无楼盘名可解析且无坐标、sz 全表
+  无坐标、残留外市污染段（详见 `tools/avm/README.md` 误差分解）。
+- **L2 空间特征已接入**：`dws_spatial_feature`（S3）对抵押物按「有效值才覆盖」更新
+  poi_density/commute_min/is_high_risk_zone——落在空间网格外（如种子上海坐标）维持占位值，
+  不误判低置信；模块说明见 [spatial-feature.md](spatial-feature.md)。
 - **DWD 单价词典每批全量加载**：44k 行聚合在秒级，暂未按增量拆分。若 DWD 涨到百万级需改为缓存。
 - **at-least-once 而非 exactly-once**：依赖重算幂等消化重复。跨库事务不在 MVP 范围。

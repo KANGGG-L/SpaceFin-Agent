@@ -167,8 +167,10 @@ def recalc_loans(biz_conn, crawl_conn, root_conn, loan_ids: list[int], date: str
     collaterals = store.load_collaterals(biz_conn, [ln["collateral_id"] for ln in loans])
     customers = store.load_customers(biz_conn, [ln["customer_id"] for ln in loans])
     dwd_unit = valuation.load_dwd_unit_prices(crawl_conn)
+    # 空间特征每次增量都重载：S3 表每日重建，不能缓存陈旧快照（load 在秒级，可接受）。
+    spatial = store.load_spatial(crawl_conn)
 
-    rows = store.compute_rows(loans, collaterals, customers, dwd_unit)
+    rows = store.compute_rows(loans, collaterals, customers, dwd_unit, spatial=spatial)
     store.upsert_dws(root_conn, rows)
     n_alerts = store.replace_alerts(root_conn, rows, date)
     return {

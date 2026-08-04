@@ -72,8 +72,8 @@
 | └ CDC 下游消费链 | L0 增量同步 | ✅ 已接入（改一笔 loan 20s 内下游同步） | Sprint 1 | [cdc-downstream.md](docs/tech/components/cdc-downstream.md) |
 | Doris + MinIO 湖仓 | L0 分层 | ⏳ 待接入 | Sprint 1 | — |
 | Kafka + Flink 实时 | L1 | ⏳ 待接入 | Sprint 2 | — |
-| AVM（GBDT+空间特征） | L3 | ✅ 已接入（MAPE 19.5% vs 基线 28.6%，数据质量修复后可达 10% 目标） | Sprint 2 | [tools/avm/README.md](tools/avm/README.md) · [cdc-downstream.md](docs/tech/components/cdc-downstream.md) |
-| Sedona 空间计算 | L2 | ⏳ 待接入 | Sprint 4 | — |
+| AVM（GBDT+空间特征） | L3 | ✅ 已接入（MAPE 16.6% vs 基线 22.6%，数据质量修复后可达 10% 目标） | Sprint 2 | [tools/avm/README.md](tools/avm/README.md) · [cdc-downstream.md](docs/tech/components/cdc-downstream.md) |
+| L2 空间特征（高危区/POI/通勤） | L2 | ✅ 已接入（单机近似，降级 Sedona） | Sprint 3 | [spatial-feature.md](docs/tech/components/spatial-feature.md) |
 | 倒排索引 / Superset 看板 | L5 | ⏳ 待接入 | Sprint 6 | — |
 
 ## 当前状况（采集系统）

@@ -132,13 +132,84 @@ def loans_by_customer(conn, customer_ids: list) -> list[int]:
 # ---------------------------------------------------------------- 计算
 
 
+def load_spatial(conn) -> tuple[dict, dict]:
+    """从 L2 空间表加载抵押物空间特征（S3，tools/spatial）。
+
+    返回 (spatial_map, zone_risk_map)：
+    - spatial_map: {collateral_id: {poi_density, commute_min, zone_id, spatial_feat_missing_pct}}
+      取 build_date 最新一版（每天重建全量，快照语义）。
+    - zone_risk_map: {zone_id: is_high_risk_zone}，用于把 zone 归属推导为高危区标记。
+
+    空间表可能还没建（S3 模块未跑）——按空表处理，调用方自然回退到 collateral 占位字段。
+    """
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT f.entity_id, f.poi_density, f.commute_min, f.zone_id, f.spatial_feat_missing_pct "
+            "FROM dws_spatial_feature f "
+            "JOIN (SELECT entity_type, MAX(build_date) d FROM dws_spatial_feature "
+            "      WHERE entity_type='collateral' GROUP BY entity_type) m "
+            "  ON f.entity_type=m.entity_type AND f.build_date=m.d "
+            "WHERE f.entity_type='collateral'"
+        )
+        spatial = {}
+        for eid, poi, commute, zone, missing in cur.fetchall():
+            spatial[int(eid)] = {
+                "poi_density": float(poi) if poi is not None else None,
+                "commute_min": float(commute) if commute is not None else None,
+                "zone_id": zone,
+                "spatial_feat_missing_pct": float(missing) if missing is not None else 100.0,
+            }
+        cur.execute("SELECT zone_id, is_high_risk_zone FROM ads_spatial_zone")
+        zone_risk = {z: int(r or 0) for z, r in cur.fetchall()}
+        return spatial, zone_risk
+    except Exception:
+        # 空间表不存在（S3 未跑）→ 空映射，风险引擎维持 collateral 占位空间特征。
+        return {}, {}
+    finally:
+        cur.close()
+
+
+def apply_spatial(collaterals: dict, spatial_map: dict, zone_risk_map: dict) -> None:
+    """把真实空间特征覆盖到抵押物 dict（**有效值才覆盖**）。
+
+    覆盖条件：空间表该抵押物 missing_pct < 100（落在空间网格内、特征真实可算）。
+    否则（如种子数据上海坐标落在广东网格外，missing=100）**不覆盖**——维持 collateral
+    表里的占位空间特征，避免把「无空间数据」误判成「低置信」，破坏现有验收结果。
+
+    覆盖字段与 risk_engine 消费口径一致：poi_density / commute_min / is_high_risk_zone
+    / spatial_feat_missing_pct。is_high_risk_zone 由 zone 归属从 ads_spatial_zone 推导。
+    """
+    if not spatial_map or not collaterals:
+        return
+    for cid, feat in spatial_map.items():
+        col = collaterals.get(cid)
+        if col is None or feat["spatial_feat_missing_pct"] >= 100:
+            continue
+        if feat["poi_density"] is not None:
+            col["poi_density"] = feat["poi_density"]
+        if feat["commute_min"] is not None:
+            col["commute_min"] = feat["commute_min"]
+        col["spatial_feat_missing_pct"] = feat["spatial_feat_missing_pct"]
+        if feat["zone_id"]:
+            col["is_high_risk_zone"] = zone_risk_map.get(feat["zone_id"], 0)
+
+
 def compute_rows(
-    loans: list[dict], collaterals: dict, customers: dict, dwd_unit: dict, avm_model=None
+    loans: list[dict],
+    collaterals: dict,
+    customers: dict,
+    dwd_unit: dict,
+    avm_model=None,
+    spatial=None,
 ) -> list:
     """对一批贷款做打宽（估值 → LTV → 五级 → 预警）。增量与全量走同一函数。
 
     avm_model 为 None 时跳过 AVM 估值（无模型环境与合成地址场景兼容）。
+    spatial 为 (spatial_map, zone_risk_map) 时先做空间特征覆盖（S3 接入）。
     """
+    if spatial:
+        apply_spatial(collaterals, spatial[0], spatial[1])
     return [
         risk_engine.enrich_loan(
             ln,
