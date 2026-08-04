@@ -132,8 +132,13 @@ def loans_by_customer(conn, customer_ids: list) -> list[int]:
 # ---------------------------------------------------------------- 计算
 
 
-def compute_rows(loans: list[dict], collaterals: dict, customers: dict, dwd_unit: dict) -> list:
-    """对一批贷款做打宽（估值 → LTV → 五级 → 预警）。增量与全量走同一函数。"""
+def compute_rows(
+    loans: list[dict], collaterals: dict, customers: dict, dwd_unit: dict, avm_model=None
+) -> list:
+    """对一批贷款做打宽（估值 → LTV → 五级 → 预警）。增量与全量走同一函数。
+
+    avm_model 为 None 时跳过 AVM 估值（无模型环境与合成地址场景兼容）。
+    """
     return [
         risk_engine.enrich_loan(
             ln,
@@ -141,6 +146,7 @@ def compute_rows(loans: list[dict], collaterals: dict, customers: dict, dwd_unit
             customers.get(ln["customer_id"]),
             dwd_unit,
             config.CITY_MAP,
+            avm_model=avm_model,
         )
         for ln in loans
     ]

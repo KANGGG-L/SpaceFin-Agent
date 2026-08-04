@@ -83,13 +83,18 @@ def main():
     collaterals = store.load_collaterals(biz)
     customers = store.load_customers(biz)
     dwd_unit = valuation.load_dwd_unit_prices(crawl)
-    print(f"[risk] loans={len(loans)} collaterals={len(collaterals)} dwd_districts={len(dwd_unit)}")
+    avm_model = valuation.load_avm_model()
+    print(
+        f"[risk] loans={len(loans)} collaterals={len(collaterals)} dwd_districts={len(dwd_unit)} "
+        f"avm_model={'loaded' if avm_model else 'absent'}"
+    )
 
-    rows = store.compute_rows(loans, collaterals, customers, dwd_unit)
+    rows = store.compute_rows(loans, collaterals, customers, dwd_unit, avm_model)
 
     agg = risk_engine.build_aggregate(rows)
     alerts = [r for r in rows if r["alert"]]
     dwd_hits = sum(1 for r in rows if r.get("dwd_hit"))
+    avm_hits = sum(1 for r in rows if r.get("avm_hit"))
 
     os.makedirs(args.out_dir, exist_ok=True)
     dws_path = os.path.join(args.out_dir, "dws_risk_class.csv")
@@ -104,7 +109,11 @@ def main():
     report = {
         "date": args.date,
         "total_loans": len(rows),
-        "valuation_src": {"dwd_hits": dwd_hits, "fallback_true_market": len(rows) - dwd_hits},
+        "valuation_src": {
+            "avm_hits": avm_hits,
+            "dwd_hits": dwd_hits,
+            "fallback_true_market": len(rows) - avm_hits - dwd_hits,
+        },
         "ltv_distribution": {
             "red_line": config.LTV_RED_LINE,
             "over_red_line": sum(

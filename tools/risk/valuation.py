@@ -1,10 +1,90 @@
-"""抵押物估值：优先用房产 DWD 真实行情（crawl_housing_sale），未命中回退业务库 true_market_price。
+"""抵押物估值：AVM 模型 → DWD 真实行情 → 业务库 true_market_price 三级回退。
 
-DWD 匹配轴为 (city_code, district)。collateral.property_addr 目前为合成地址（无城市），
-命中率为 0；当业务数据与广东 DWD 对齐后（地址含城市/区域）此路径自动生效。
+匹配策略：
+1. **AVM（S2）**：tools/avm 训练的 GBDT+空间特征模型。必须能解析出广东城市码才有意义
+   ——AVM 对未知城市会回退全局中位价，而业务库当前是上海合成地址（无广东城市码），
+   强行套全局中位价会让 LTV 失真，故与 DWD 一样以城市码为命中前提。
+2. **DWD 行情**：(city, district) 中位单价 × 面积。
+3. **true_market_price**：业务库合成价，兜底。
+
+未命中 AVM/DWD 时返回 None，由调用方回退下一级。
 """
 
+import os
 import statistics
+import sys
+
+_AVM_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "avm")
+_avm_predict = None  # 模块级惰性加载：AVM 依赖缺失时首次调用返回 None，不炸风险引擎
+
+
+def _avm_module():
+    global _avm_predict
+    if _avm_predict is None:
+        if _AVM_DIR not in sys.path:
+            sys.path.insert(0, _AVM_DIR)
+        try:
+            import predict as avm_predict  # noqa: PLC0415
+
+            _avm_predict = avm_predict
+        except Exception:
+            return None
+    return _avm_predict
+
+
+def load_avm_model() -> object | None:
+    """惰性加载 AVM 模型（tools/avm 产物，output/avm/model.joblib）。
+
+    AVM 的 sklearn/joblib 是惰性导入：模型缺失或依赖缺失时返回 None，不抛异常，
+    让估值链回退到 DWD/true_market_price。模型文件名固定，路径相对仓库根。
+    """
+    model_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "output",
+        "avm",
+        "model.joblib",
+    )
+    if not os.path.exists(model_path):
+        return None
+    mod = _avm_module()
+    if mod is None:
+        return None
+    try:
+        return mod.load_model(model_path)
+    except Exception:
+        return None
+
+
+def valuation_from_avm(model, collateral: dict, city_map: dict) -> float | None:
+    """用 AVM 估抵押物总价（元）。城市码缺失（如合成地址）返回 None，保持原回退语义。
+
+    property_addr 含广东城市名才能命中；community 从地址里提不出来时传 None，
+    由模型回退城市中位价。坐标直接用 collateral 的 lat/lng（种子数据为上海坐标，
+    与广东模型空间带不符，命中城市码前坐标不参与判断）。
+    """
+    if model is None:
+        return None
+    addr = (collateral.get("property_addr") or "").strip()
+    code = _city_code_from_addr(addr, city_map)
+    area = collateral.get("area")
+    if not code or not area or float(area) <= 0:
+        return None
+    mod = _avm_module()
+    if mod is None:
+        return None
+    try:
+        return mod.estimate_total_price(
+            model,
+            city_code=code,
+            community=None,  # 地址粒度不够时让模型回退城市中位
+            area_sqm=float(area),
+            building_age=collateral.get("age"),
+            bedrooms=None,
+            latitude=collateral.get("lat"),
+            longitude=collateral.get("lng"),
+        )
+    except Exception:
+        return None
 
 
 def load_dwd_unit_prices(conn) -> dict:

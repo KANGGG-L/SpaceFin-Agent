@@ -1,6 +1,6 @@
 """风险引擎：估值 → LTV → 五级分类 → 贷后保全预警（AC-02/03/04）。
 
-- 估值：优先 DWD 行情（valuation.valuation_from_dwd），未命中回退 true_market_price。
+- 估值：三级回退，见 valuation.py——AVM（S2 模型）→ DWD 行情 → true_market_price。
 - LTV = 贷款余额 / 抵押物估值。
 - 五级分类：按 LTV 阈值(config.CLASS_LTV_UPPER)分档。
 - 低置信(AC-04)：spatial_feat_missing_pct >= 25% → 标记 low_confidence，不触发自动预警。
@@ -14,9 +14,17 @@ import valuation
 
 
 def enrich_loan(
-    loan: dict, collateral: dict | None, customer: dict | None, dwd_unit: dict, city_map: dict
+    loan: dict,
+    collateral: dict | None,
+    customer: dict | None,
+    dwd_unit: dict,
+    city_map: dict,
+    avm_model=None,
 ) -> dict:
-    """单笔贷款打宽：估值/LTV/五级/低置信/预警。"""
+    """单笔贷款打宽：估值/LTV/五级/低置信/预警。
+
+    avm_model 为 None 时跳过 AVM 估值，直接走 DWD/true_market_price（无模型环境兼容）。
+    """
     if collateral is None:
         return {
             **loan,
@@ -27,9 +35,13 @@ def enrich_loan(
             "is_high_risk_zone": None,
             "alert": False,
             "dwd_hit": False,
+            "avm_hit": False,
         }
 
-    val = valuation.valuation_from_dwd(dwd_unit, collateral, city_map)
+    val = valuation.valuation_from_avm(avm_model, collateral, city_map)
+    avm_hit = val is not None
+    if val is None:
+        val = valuation.valuation_from_dwd(dwd_unit, collateral, city_map)
     dwd_hit = val is not None
     if val is None:
         val = float(collateral.get("true_market_price") or 0.0)  # 回退业务库价格
@@ -54,6 +66,7 @@ def enrich_loan(
         "is_high_risk_zone": collateral.get("is_high_risk_zone"),
         "alert": alert,
         "dwd_hit": dwd_hit,
+        "avm_hit": avm_hit,
         "customer_id": loan.get("customer_id"),
     }
 
