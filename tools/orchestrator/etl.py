@@ -14,6 +14,7 @@ ETL 脚本：采集 raw JSONL → 清洗 → url_key 去重 → geocode → MySQ
 用法：
     python etl.py --date 2026-08-04 --raw-dir output/guangdong/raw --lake-dir data_lake/housing
     python etl.py --backfill --raw-dir output/guangdong/raw --lake-dir data_lake/housing
+    python etl.py --init-db --backfill --raw-dir output/guangdong/raw --lake-dir data_lake/housing  # 首次初始化（root）
 """
 
 from __future__ import annotations
@@ -645,6 +646,11 @@ def main():
     ap.add_argument("--geocoder-db", default=None, help="LocalGeocoder 本地坐标 JSON（可选）")
     ap.add_argument("--backfill", action="store_true", help="首次全量处理（与 --date 互斥）")
     ap.add_argument("--date", default=None, help="落盘日期 YYYY-MM-DD（增量用 DAG 执行日）")
+    ap.add_argument(
+        "--init-db",
+        action="store_true",
+        help="用 root 执行一次初始化（建库/建表/建专用账号，幂等）；日常/Airflow 运行不需要，避免注入 root 凭据",
+    )
     args = ap.parse_args()
 
     if args.backfill and args.date:
@@ -654,8 +660,9 @@ def main():
     env = load_env()
     t0 = time.time()
 
-    # ---- 初始化（root 幂等，仅初始化用）----
-    init_db(env)
+    # ---- 初始化（仅显式 --init-db 时用 root；日常/Airflow 运行走 app 账号，不注入 root 凭据）----
+    if args.init_db:
+        init_db(env)
     params = _mysql_params(args.mysql_dsn, env)
     conn = pymysql.connect(**params, autocommit=False, charset="utf8mb4")
 
