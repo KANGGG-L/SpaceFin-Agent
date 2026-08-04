@@ -13,7 +13,7 @@
 python avm_poc.py
 ```
 
-零第三方依赖（仅 Python 标准库），适配 Python 3.8+。
+零第三方依赖（仅 Python 标准库），适配 Python 3.10+。
 
 ## 结论
 

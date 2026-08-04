@@ -1,5 +1,11 @@
-# Conda 环境：spark
+# Conda 环境：spark（唯一宿主 Python 环境）
 # 依据桌面参考文档《spark42_环境版本汇总.md》构建，环境名由原 spark42 改为 spark。
+#
+# 采集/ETL 运行依赖（curl_cffi / DrissionPage / pyarrow / PyMySQL / redis / pytest 等 29 包）见
+# tools/orchestrator/requirements.txt，已 pip 装入本环境；仓库内 tools/orchestrator/.venv 是指向
+# 本环境的符号链接（兼容别名，非独立环境）。重建完整环境：
+#   conda env create -f environment.yml && conda activate spark
+#   pip install -r tools/orchestrator/requirements.txt
 #
 # 参考文档中的「系统级二进制独立安装」组件不在 conda 内，需另行安装：
 #   Hadoop 3.3.2 / Hive 4.0.1 / Spark 4.2.0 / Java OpenJDK 17.0.19 / MySQL 8.4.10

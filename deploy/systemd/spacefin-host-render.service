@@ -3,7 +3,7 @@
 #   1) mkdir -p ~/.config/spacefin ~/.config/systemd/user
 #   2) 写 ~/.config/spacefin/render.env（勿加引号，systemd 会把引号当值的一部分）：
 #        SPACEFIN_REPO_ROOT=/srv/spacefin-agent
-#        SPACEFIN_RENDER_VENV=/srv/spacefin-agent/tools/orchestrator/.venv
+#        SPACEFIN_RENDER_VENV=/srv/spacefin-agent/tools/orchestrator/.venv   # 单一 Python 环境（conda `spark` 或按 tools/orchestrator/requirements.txt 建的 venv），本机通常是指向 conda env 的符号链接
 #        RENDER_PORT=8899
 #        RENDER_SLOTS=5
 #   3) cp deploy/systemd/spacefin-host-render.service ~/.config/systemd/user/

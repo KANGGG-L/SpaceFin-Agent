@@ -3,7 +3,7 @@
 ETL 脚本：采集 raw JSONL → 清洗 → url_key 去重 → geocode → MySQL DWD 主表 + ODS 数据湖 Parquet。
 
 运行形态（已确认决策，见 docs/tech/components/crawler-etl.md）：
-- 宿主机 venv 直接跑，Airflow DAG 用 BashOperator 调本脚本（不容器化）
+- 宿主机 Python 环境直接跑（单一环境 conda `spark`，`tools/orchestrator/.venv` 是其别名），Airflow DAG 用 BashOperator 调本脚本（不容器化）
 - 增量：只处理"未处理过 或 mtime+size 变化"的 raw 文件，靠 etl_processed.json 记录
 - backfill：--backfill 全量扫（与 --date 互斥），first_seen=last_seen=运行日，同样写 etl_processed.json
 - 去重键：url_key（URL 规范化房源 ID，见 url_key.py），MySQL 唯一主键 + COALESCE 只更新非空/非零字段

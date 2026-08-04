@@ -8,8 +8,8 @@
 关键：宿主机必须绕过 macOS 系统代理（127.0.0.1 的代理软件会拦掉该站点），
 所以这里自建 ChromiumOptions 并加 --no-proxy-server，不走 make_stealth_browser。
 
-用法（宿主 venv）：
-    /tmp/spacefin_captcha_venv/bin/python tools/orchestrator/host_render_service.py [port]
+用法（单一 conda 环境 spark，`tools/orchestrator/.venv` 是其别名）：
+    tools/orchestrator/.venv/bin/python tools/orchestrator/host_render_service.py [port]
 默认端口 8899；容器内经 host.docker.internal:8899 访问。
 
 串行渲染：同一源 chrome_profile 的 Chrome 单实例约束，锁串行最稳。

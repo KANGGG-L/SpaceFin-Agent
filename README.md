@@ -97,7 +97,7 @@
 | 轮次策略（取消 MAX_ROUNDS=3，读完/预算耗尽即终态） | ✅ 已实现 |
 | 每城 IP 预算（sale 600 / fangyuan 400+免费池，广深 15%） | ✅ 已实现 |
 | 增量断点续爬 + 回扫头部 2-3 页 | ✅ 已实现 |
-| Linux 新机部署（launchd → systemd、Airflow 同机、venv 装依赖） | ⏳ 待执行 |
+| Linux 新机部署（launchd → systemd、Airflow 同机、环境装依赖） | ⏳ 待执行 |
 
 > 🔴 **最大风险**：fangyuan 渲染依赖宿主 Chrome。容器 Chrome（Linux/headless）已被反爬按指纹软拦截，Linux 宿主 Chrome 预期可行但**未实测**——新机部署第一步必须做渲染冒烟测试（`/render` 拿 zu-itemmod），失败则需决策降级方案。
 
@@ -128,23 +128,30 @@ make down              # 停止
 
 ## 开发环境与版本
 
-> 规范化开发依赖的固定版本，供团队复现环境（conda 环境名：`spark`）。
+> 开发环境 Python 统一到 **3.10**。宿主唯一 Python 环境 = **conda `spark`**（`tools/orchestrator/.venv` 是指向它的符号链接别名，脚本默认路径无需改动）；Docker worker / Airflow 目标机亦为 3.10。
 
 | 工具 | 版本 | 用途 |
 | --- | --- | --- |
-| Python（conda 环境 `spark`） | 3.10.18 | 本地钩子运行环境 |
+| Python（conda 环境 `spark`） | 3.10.18（`tools/orchestrator/.venv` 是其别名） | **唯一宿主环境**：ETL / 编排 / 测试 / 宿主渲染 / 钩子 / PySpark 产品栈；依赖见 `environment.yml` + `tools/orchestrator/requirements.txt` |
+| Python（worker/master 容器） | 3.10（`python:3.10-slim`） | 采集 worker / master 容器 |
+| Python（Airflow，Linux 目标机） | 3.10（apache-airflow 2.10.5） | 外层编排 DAG |
 | pre-commit | 4.6.1 | 提交前 / 提交信息钩子 |
 | Node.js | v24.16.0 | commitlint 运行环境 |
 | npm | 11.13.0 | 依赖安装 |
 | @commitlint/cli | 19.8.1 | 提交信息校验 |
 | @commitlint/config-conventional | 19.8.1 | Conventional Commits 规则 |
 
+> 注：本机有两套 anaconda（PATH 上是 `/opt/anaconda3`，env 实际在 `/Users/ethan/anaconda3/envs/`），用 `conda` 命令操作 `spark` 环境须先 `conda activate spark`，或直接使用 `/Users/ethan/anaconda3/envs/spark/bin/...` 路径。
+
 初始化（在仓库根目录执行）：
 
 ```bash
-conda activate spark
+conda activate spark                        # 唯一宿主环境（Python 3.10.18）
+pip install -r tools/orchestrator/requirements.txt   # 采集/ETL 运行依赖（首次建环境时）
 pip install pre-commit
 pre-commit install
 pre-commit install --hook-type commit-msg   # 启用提交信息校验
 npm install
+
+# tools/orchestrator/.venv 是指向 spark 的符号链接（别名），无需单独创建
 ```
