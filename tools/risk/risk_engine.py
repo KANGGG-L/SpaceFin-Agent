@@ -40,9 +40,12 @@ def enrich_loan(
 
     val = valuation.valuation_from_avm(avm_model, collateral, city_map)
     avm_hit = val is not None
+    dwd_hit = False
     if val is None:
+        # 只有 AVM 未命中才试 DWD；否则 dwd_hit 会因 val 非 None 被误置 True，
+        # 导致 risk_report 的 avm_hits 与 dwd_hits 同时累计、fallback 变负数。
         val = valuation.valuation_from_dwd(dwd_unit, collateral, city_map)
-    dwd_hit = val is not None
+        dwd_hit = val is not None
     if val is None:
         val = float(collateral.get("true_market_price") or 0.0)  # 回退业务库价格
     balance = float(loan.get("balance") or 0.0)

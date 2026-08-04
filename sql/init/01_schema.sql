@@ -7,6 +7,12 @@
 -- 合规：所有数据均为合成样本，不含任何真实个人金融信息。
 -- ============================================================================
 
+-- 本文件由 /docker-entrypoint-initdb.d 在容器首次初始化时导入，mysql 客户端
+-- 默认字符集可能是 latin1；中文 schema 注释/CHECK 约束若按 latin1 解析会被存储成
+-- 乱码（历史问题：旧版 seed 的地址与约束全部是乱码，导致估值链解析不到城市码）。
+-- 先显式切到 utf8mb4，保证下面所有 UTF-8 文本原样落库。
+SET NAMES utf8mb4;
+
 CREATE DATABASE IF NOT EXISTS spacefin
   DEFAULT CHARACTER SET utf8mb4
   DEFAULT COLLATE utf8mb4_unicode_ci;

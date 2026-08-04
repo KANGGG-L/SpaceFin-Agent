@@ -173,25 +173,27 @@ def load_spatial(conn) -> tuple[dict, dict]:
 def apply_spatial(collaterals: dict, spatial_map: dict, zone_risk_map: dict) -> None:
     """把真实空间特征覆盖到抵押物 dict（**有效值才覆盖**）。
 
-    覆盖条件：空间表该抵押物 missing_pct < 100（落在空间网格内、特征真实可算）。
-    否则（如种子数据上海坐标落在广东网格外，missing=100）**不覆盖**——维持 collateral
-    表里的占位空间特征，避免把「无空间数据」误判成「低置信」，破坏现有验收结果。
+    覆盖规则分两档：
+    - poi_density / commute_min：空间表有有效值即覆盖（距离/密度是连续量，稀疏也有信息量）。
+    - spatial_feat_missing_pct / is_high_risk_zone：**仅在 zone 命中时覆盖**——zone_id 非空
+      说明抵押物落在有样本的价格区块内，空间归属可信。zone 为空（如种子随机坐标落在房源
+      聚集区外）时维持 collateral 表占位缺失率与高危标记，否则会把整批贷款打成低置信、
+      屏蔽预警——这不是空间特征应有的语义。
 
-    覆盖字段与 risk_engine 消费口径一致：poi_density / commute_min / is_high_risk_zone
-    / spatial_feat_missing_pct。is_high_risk_zone 由 zone 归属从 ads_spatial_zone 推导。
+    真实广东抵押物命中 zone 后上述两档自动全部生效。
     """
     if not spatial_map or not collaterals:
         return
     for cid, feat in spatial_map.items():
         col = collaterals.get(cid)
-        if col is None or feat["spatial_feat_missing_pct"] >= 100:
+        if col is None:
             continue
         if feat["poi_density"] is not None:
             col["poi_density"] = feat["poi_density"]
         if feat["commute_min"] is not None:
             col["commute_min"] = feat["commute_min"]
-        col["spatial_feat_missing_pct"] = feat["spatial_feat_missing_pct"]
         if feat["zone_id"]:
+            col["spatial_feat_missing_pct"] = feat["spatial_feat_missing_pct"]
             col["is_high_risk_zone"] = zone_risk_map.get(feat["zone_id"], 0)
 
 

@@ -131,16 +131,37 @@ tools/orchestrator/.venv/bin/python tools/pipeline/run_pipeline.py --dry-run
 
 ## 7. 已知局限
 
-- **数据鸿沟未消除**：`spacefin` 种子是上海合成地址（`合成地址-N`, lat≈31），与广东 DWD 不对齐，
-  故 `dwd_hits=0`、`avm_hits=0`，估值仍回退 `true_market_price`。要让 DWD/AVM 行情估值生效，
-  须先把种子换成广东城市地址。这不是消费链的缺陷，是种子数据问题。
-  AVM 接入见 `tools/risk/valuation.py`：`property_addr` 含广东城市名即命中（三级回退
-  AVM → DWD 中位 → true_market_price），合成地址无城市码时正确落回兜底。
+- **种子已对齐广东（2026-08-05 修订）**：`seed/generate_seed.py` 的 collateral 地址从上海
+  合成地址（`合成地址-N`, lat≈31）换成广东 21 城真实风格地址（城市 + 行政区 + 小区名 +
+  坐标落在对应城市框内），`risk_report.json` 的 `avm_hits` 由 0 → **200/200**，估值链
+  第一次真正走到 AVM（三级回退 AVM → DWD → true_market_price 的上级）。
+- **DWD 真实命中仍为 0（诚实记录）**：`valuation._district_from_addr` 对「XX市XX区…」
+  地址提取到的是含城市前缀的整串（如「广州市天河区」），而 `crawl_housing_sale.community`
+  存的是小区/板块名（如「次新小区」「珠江新城」），两者精确匹配不上，故 DWD 路径没吃到。
+  当前 `risk_report.json` 口径：`avm_hits=200`、`dwd_hits=0`、`fallback_true_market=0`——
+  所有抵押物都命中 AVM，无一笔需要回退（含 DWD）。若要真实 DWD 命中，需在估值匹配层把
+  「行政区」与 DWD community 解耦（不在本组件范围）。
 - **AVM 指标**：sale DWD 上 MAPE 16.63%（基线 22.57%，较初版 19.49% 再降；title 回填小区 +
   外市清洗 2038 行），未达 10% 目标——剩余瓶颈是 16.9% 行无楼盘名可解析且无坐标、sz 全表
   无坐标、残留外市污染段（详见 `tools/avm/README.md` 误差分解）。
 - **L2 空间特征已接入**：`dws_spatial_feature`（S3）对抵押物按「有效值才覆盖」更新
   poi_density/commute_min/is_high_risk_zone——落在空间网格外（如种子上海坐标）维持占位值，
-  不误判低置信；模块说明见 [spatial-feature.md](spatial-feature.md)。
+  不误判低置信；模块说明见 [spatial-feature.md](spatial-feature.md)。对齐广东后，种子坐标
+  落在广东网格内，但 collateral 实体的空间特征仍由 S3 每日重建（当前保留占位字段）。
 - **DWD 单价词典每批全量加载**：44k 行聚合在秒级，暂未按增量拆分。若 DWD 涨到百万级需改为缓存。
 - **at-least-once 而非 exactly-once**：依赖重算幂等消化重复。跨库事务不在 MVP 范围。
+
+## 8. 新任务冒烟记录（2026-08-05，Workflow A）
+
+DAG `guangdong_daily_crawl` 已加载 9 任务（含 `cdc_consume` / `risk_recalc`），对
+2026-08-03T16:30:00+00:00 执行期做了单任务冒烟（不触发完整 DAG，避免拉起采集集群）：
+
+| 任务 | 命令 | 结果 |
+|---|---|---|
+| cdc_consume | `airflow tasks test guangdong_daily_crawl cdc_consume <exec_date>` | 退出码 0，`events=0, offset=7`（无积压） |
+| risk_recalc | `airflow tasks test guangdong_daily_crawl risk_recalc <exec_date>` | 退出码 0，全量 200 笔重算并写库 |
+
+冒烟后种子对齐广东并重灌：`cdc_consume` 等价命令 `consumer.py --once --batch 2000`
+确认积压清零（offset 追上 ods_cdc_log 最新 id），`risk_recalc` 等价命令
+`risk/main.py --date <业务日> --write-db` 输出 avm_hits=200、LTV 五级分布
+正常 127 / 关注 47 / 次级 10 / 可疑 10 / 损失 6，无外键孤儿。

@@ -26,14 +26,19 @@ make seed-gen
 | 表 | 主键 | 关键字段与分布（合成） |
 |----|------|----------------------|
 | `customer` | customer_id (10000+) | credit_score ~ N(680, 60)；income_monthly ~ U(4000, 25000)；debt_ratio ~ U(0.1, 0.8) |
-| `collateral` | collateral_id (20000+) | 经纬度（模拟城市带）、面积 U(40,140)、房龄 U(0,30)；`true_market_price` 由**空间变化系数**合成（与 `docs/poc` 一致，模拟空间非平稳性）；poi_density、commute_min、is_high_risk_zone(≈15%)、spatial_feat_missing_pct |
+| `collateral` | collateral_id (20000+) | **广东 21 城真实风格地址**（城市+行政区+小区名+门牌，如「广州市黄埔区保利紫云府24号」），经纬度落在对应城市坐标框内；面积 U(40,140)、房龄 U(0,30)；`true_market_price` 以 AVM 模型隐含单价（见生成器 `CITY_UNIT_PRICE` 注释）为基准加噪声合成；poi_density、commute_min、is_high_risk_zone(≈15%)、spatial_feat_missing_pct |
 | `loan` | loan_id (30000+) | 关联 customer/collateral；loan_amount、balance、interest_rate；`risk_class` 五级分类按 80/12/5/2/1 分布；origination_date 在基准日前约 3 年内 |
+
+地址对齐广东的原因：风险引擎的三级回退（AVM → DWD → true_market_price）要求抵押物地址能
+解析出广东城市码，合成地址无城市码时估值永远回退兜底（dwd_hits=0、avm_hits=0）。详见
+`docs/tech/components/cdc-downstream.md` 第 7 节。
 
 字段口径与 `sql/init/01_schema.sql` 严格对齐，分布与 `docs/poc/core-prototype/mvp_prototype.py` 保持一致，便于后续 AVM / LTV 链路衔接。
 
 ## 合规（数据红线）
 
-本目录全部为**合成数据**，不含任何真实个人金融信息；`property_addr` 为 `合成地址-{id}` 占位，仅作 schema 演示。
+本目录全部为**合成数据**，不含任何真实个人金融信息；`property_addr` 为真实风格的**虚构**
+地址（小区名为虚构，不与真实楼盘对应），仅作 schema 演示与估值链命中用。
 
 这对应项目数据策略的硬约束——**数据分两类，红线分明**：
 
@@ -41,3 +46,10 @@ make seed-gen
 - **公开渠道数据**（房产挂牌/成交、小区、POI、坐标）：以爬虫等公开渠道获取（见 `tools/anjuke_crawler/`），不含 PII，属另一条合规路径。
 
 后续接入任何数据源前，先确认它落在哪一类——个人数据只能合成，公开数据走公开渠道。
+
+## 导入注意（charset）
+
+`02_seed.sql` 文件头已带 `SET NAMES utf8mb4;`，`01_schema.sql` 同样——容器首次初始化时
+mysql 客户端默认字符集可能是 latin1，没有这行会把中文地址按 latin1 存储成乱码，城市名
+无法被估值链解析（历史踩坑，见 `01_schema.sql` 头注释）。若手工导入请用
+`mysql --default-character-set=utf8mb4 < 02_seed.sql`。
