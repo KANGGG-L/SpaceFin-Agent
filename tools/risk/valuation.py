@@ -75,9 +75,10 @@ def model_version(model: object | None) -> str:
 def valuation_from_avm(model, collateral: dict, city_map: dict) -> float | None:
     """用 AVM 估抵押物总价（元）。城市码缺失（如合成地址）返回 None，保持原回退语义。
 
-    property_addr 含广东城市名才能命中；community 从地址里提不出来时传 None，
-    由模型回退城市中位价。坐标直接用 collateral 的 lat/lng（种子数据为上海坐标，
-    与广东模型空间带不符，命中城市码前坐标不参与判断）。
+    property_addr 含广东城市名才能命中；community 由 `_community_from_addr` 从地址里
+    解析（如「惠州市惠城区惠城123号」→「惠城」）——命中 AVM 小区目标编码时估值贴近
+    小区级，未命中或解析不出时回退城市/全局中位价。坐标直接用 collateral 的 lat/lng
+    （种子数据为上海坐标，与广东模型空间带不符，命中城市码前坐标不参与判断）。
     """
     if model is None:
         return None
@@ -93,7 +94,7 @@ def valuation_from_avm(model, collateral: dict, city_map: dict) -> float | None:
         return mod.estimate_total_price(
             model,
             city_code=code,
-            community=None,  # 地址粒度不够时让模型回退城市中位
+            community=_community_from_addr(addr),
             area_sqm=float(area),
             building_age=collateral.get("age"),
             bedrooms=None,
@@ -156,6 +157,11 @@ def _city_code_from_addr(addr: str, city_map: dict) -> str | None:
 _CITY_PREFIX_RE = re.compile(r"^[\u4e00-\u9fa5]{2,4}市")
 _ADMIN_TOKEN_RE = re.compile(r"^([\u4e00-\u9fa5]{1,6}?(?:区|县|市|街道|镇))")
 _ADMIN_SUFFIX_RE = re.compile(r"(?:区|县|市|街道|镇)$")
+# 小区名解析：政区 token 后可能还紧跟一个政区后缀（「中山市西区街道颐和公馆13号」
+# 剥「西区」后剩「街道颐和公馆…」），先剥掉开头的政区后缀再取小区名；小区名取
+# 剩余串开头的连续中文串（遇到首个非中文字符/数字停止），如「惠城123号」→「惠城」。
+_LEADING_ADMIN_SUFFIX_RE = re.compile(r"^(?:区|县|市|街道|镇)")
+_COMMUNITY_LEAD_RE = re.compile(r"^([\u4e00-\u9fa5]+)")
 
 
 def _district_from_addr(addr: str) -> str | None:
@@ -179,6 +185,29 @@ def _district_from_addr(addr: str) -> str | None:
     token = m.group(1)
     stripped = _ADMIN_SUFFIX_RE.sub("", token)
     return stripped if len(stripped) >= 2 else token
+
+
+def _community_from_addr(addr: str) -> str | None:
+    """从地址文本提取小区名：「惠州市惠城区惠城123号」→「惠城」；解析不出返回 None。
+
+    与 `_district_from_addr` 同构：先剥「XX市」前缀定位城市，再剥首个政区 token
+    （区|县|市|街道|镇）。政区 token 后若还紧跟一个政区后缀（直筒子市的「西区街道
+    颐和公馆13号」剥「西区」后剩「街道颐和公馆…」），先剥掉该后缀，再从剩余串开头
+    取连续中文串（遇到首个非中文字符/数字停止）作为小区名——与 DWD/AVM 词表里不带
+    政区后缀的小区键对齐。
+
+    解析不出（合成地址、剩余串为空或开头非中文）返回 None，由 AVM 回退城市/全局
+    中位价。只剥一层政区后缀：政区与小区之间最多夹一个「街道」，剥多了会拆坏小区名。
+    """
+    if not addr or addr.startswith("合成地址"):
+        return None
+    body = _CITY_PREFIX_RE.sub("", addr, count=1)
+    m = _ADMIN_TOKEN_RE.match(body)
+    if m:
+        body = body[m.end() :]
+        body = _LEADING_ADMIN_SUFFIX_RE.sub("", body, count=1)
+    m = _COMMUNITY_LEAD_RE.match(body)
+    return m.group(1) if m else None
 
 
 def valuation_from_dwd(dwd_unit: dict, collateral: dict, city_map: dict) -> float | None:
