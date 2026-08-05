@@ -979,6 +979,35 @@ def main() -> None:
         json.dump(report, f, ensure_ascii=False, indent=2)
     print(f"[avm] 产物: {model_path}\n      {report_path}")
 
+    # 特征归因（C-02，R-cmp-2 / 设计 P9）：permutation importance 可解释报告。
+    # 模型无关、与 loss 无关（quantile loss 下 HistGBR 无 feature_importances_），
+    # 不是 SHAP（shap 未安装，零依赖风格，报告 method 字段诚实标注）。
+    # 归因是辅助产物，失败只告警不阻断训练。
+    try:
+        from attribution import compute_attribution
+
+        att = compute_attribution(
+            model,
+            test_mat,
+            np.exp(yte),  # log 单价 → 单价口径（评分时模型 exp 回单价再算 MAPE）
+            FEATURE_NAMES,
+            n_repeats=5,
+            seed=args.seed,
+            version=version,
+        )
+        if att is not None:
+            att_path = os.path.join(args.out_dir, "attribution_report.json")
+            with open(att_path, "w", encoding="utf-8") as f:
+                json.dump(att, f, ensure_ascii=False, indent=2)
+            top3 = ", ".join(
+                f"{t['feature']}={t['importance_mean']:.2f}" for t in att["top_features"][:3]
+            )
+            print(f"[avm] 特征归因: {att_path}\n      top3(permutation imp, MAPE pp): {top3}")
+        else:
+            print("[avm] 特征归因跳过：模型/特征校验失败（建议重训）", flush=True)
+    except Exception as e:  # noqa: BLE001 辅助产物异常不阻断训练
+        print(f"[avm] 特征归因跳过（不应阻断训练）: {e}", flush=True)
+
 
 if __name__ == "__main__":
     main()
