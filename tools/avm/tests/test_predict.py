@@ -1,6 +1,6 @@
 """predict.py：模型缺失/信息不足回退、小区→城市→全局中位回退语义、特征构建。
 
-全部用例用 conftest.make_model 构造的假 model dict（含 CaptureRegressor），
+全部用例用 avmmods.make_model 构造的假 model dict（含 CaptureRegressor），
 不加载 output/avm 真实产物、不连数据库。
 """
 
@@ -8,8 +8,7 @@ import math
 
 import numpy as np
 import pytest
-from avmmods import predict
-from conftest import make_model
+from avmmods import make_model, predict
 
 # _build_row 产出的 28 维特征行里与本文件用例相关的索引
 IDX = {
