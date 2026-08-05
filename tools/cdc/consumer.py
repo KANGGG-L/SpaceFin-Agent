@@ -169,14 +169,21 @@ def recalc_loans(biz_conn, crawl_conn, root_conn, loan_ids: list[int], date: str
     dwd_unit = valuation.load_dwd_unit_prices(crawl_conn)
     # 空间特征每次增量都重载：S3 表每日重建，不能缓存陈旧快照（load 在秒级，可接受）。
     spatial = store.load_spatial(crawl_conn)
+    # 增量与全量共用同一模型产物，否则 model_version 落到 'unknown'、估值偏差不可判
+    # （E-06/R-UNW-03 口径必须与 tools/risk/main.py 一致，两路径才能互证）。
+    avm_model = valuation.load_avm_model()
 
-    rows = store.compute_rows(loans, collaterals, customers, dwd_unit, spatial=spatial)
+    rows = store.compute_rows(
+        loans, collaterals, customers, dwd_unit, avm_model=avm_model, spatial=spatial
+    )
     store.upsert_dws(root_conn, rows)
     n_alerts = store.replace_alerts(root_conn, rows, date)
     return {
         "recalc": len(rows),
         "alerts": n_alerts,
         "dwd_hits": sum(1 for r in rows if r.get("dwd_hit")),
+        "model_version": rows[0].get("model_version") if rows else "unknown",
+        "abnormal_valuation": sum(1 for r in rows if r.get("abnormal_valuation")),
     }
 
 

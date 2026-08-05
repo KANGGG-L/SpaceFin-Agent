@@ -21,14 +21,18 @@ import risk_engine
 DWS_INSERT_SQL = (
     "INSERT INTO dws_risk_class "
     "(loan_id, customer_id, collateral_id, balance, interest_rate, market_valuation, "
-    " ltv, risk_class, low_confidence, is_high_risk_zone, alert) "
-    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+    " ltv, risk_class, low_confidence, is_high_risk_zone, alert, "
+    " valuation_deviation_pct, abnormal_valuation, model_version) "
+    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
     "ON DUPLICATE KEY UPDATE "
     " customer_id=VALUES(customer_id), collateral_id=VALUES(collateral_id), "
     " balance=VALUES(balance), interest_rate=VALUES(interest_rate), "
     " market_valuation=VALUES(market_valuation), ltv=VALUES(ltv), "
     " risk_class=VALUES(risk_class), low_confidence=VALUES(low_confidence), "
     " is_high_risk_zone=VALUES(is_high_risk_zone), alert=VALUES(alert), "
+    " valuation_deviation_pct=VALUES(valuation_deviation_pct), "
+    " abnormal_valuation=VALUES(abnormal_valuation), "
+    " model_version=VALUES(model_version), "
     " etl_ts=CURRENT_TIMESTAMP"
 )
 
@@ -228,6 +232,25 @@ def compute_rows(
 # ---------------------------------------------------------------- 落库
 
 
+def _ensure_columns(conn, table: str, columns: list[tuple[str, str]]) -> None:
+    """幂等补列：MySQL 8 的 ALTER TABLE 没有 ADD COLUMN IF NOT EXISTS，需先查 information_schema。
+
+    存量表（S6 前的 DWS）只补新列不动老列，且新列全部允许 NULL——避免给已有行强填充
+    默认值导致全表锁/扫描，也让「老数据无偏差列」这一事实保持诚实。
+    """
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s",
+        (table,),
+    )
+    existing = {r[0] for r in cur.fetchall()}
+    for name, ddl in columns:
+        if name not in existing:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+    cur.close()
+
+
 def ensure_ads_tables(conn) -> None:
     """幂等建 DWS/ADS 表（DDL 需 root，见 config.root_crawl_params）。"""
     cur = conn.cursor()
@@ -240,9 +263,22 @@ def ensure_ads_tables(conn) -> None:
             market_valuation DECIMAL(14,2), ltv DECIMAL(8,4),
             risk_class VARCHAR(8), low_confidence TINYINT,
             is_high_risk_zone TINYINT, alert TINYINT,
+            valuation_deviation_pct DECIMAL(8,4),
+            abnormal_valuation TINYINT,
+            model_version VARCHAR(32),
             etl_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """
+    )
+    # 存量表补列（R-UNW-03 偏差/异常标记 + R-UBQ-01 模型版本），CREATE IF NOT EXISTS 对已有表不生效
+    _ensure_columns(
+        conn,
+        "dws_risk_class",
+        [
+            ("valuation_deviation_pct", "DECIMAL(8,4) DEFAULT NULL"),
+            ("abnormal_valuation", "TINYINT DEFAULT NULL"),
+            ("model_version", "VARCHAR(32) DEFAULT NULL"),
+        ],
     )
     cur.execute(
         """
@@ -254,6 +290,19 @@ def ensure_ads_tables(conn) -> None:
             is_high_risk_zone TINYINT, alert_date DATE,
             etl_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             KEY idx_loan (loan_id), KEY idx_date (alert_date)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ads_risk_valuation_alerts (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            alert_code VARCHAR(16), loan_id INT, collateral_id INT,
+            model_version VARCHAR(32),
+            valuation_deviation_pct DECIMAL(8,4),
+            detail VARCHAR(255), alert_date DATE,
+            etl_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            KEY idx_date (alert_date), KEY idx_loan (loan_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """
     )
@@ -284,6 +333,9 @@ def _dws_tuple(r: dict) -> tuple:
         int(r["low_confidence"]),
         r["is_high_risk_zone"],
         int(r["alert"]),
+        r.get("valuation_deviation_pct"),
+        int(bool(r.get("abnormal_valuation"))),
+        r.get("model_version") or "unknown",
     )
 
 
@@ -298,10 +350,59 @@ def upsert_dws(conn, rows: list[dict]) -> int:
     return len(rows)
 
 
+def _replace_risk_alerts(conn, rows: list[dict], date: str, cur) -> int:
+    """按批重写人工核查类告警（R-UBQ-01 血缘 / R-UNW-03 异常估值）。
+
+    与 LTV 预警相同的「先删本批当日、再插」语义：增量消费一笔时，该笔当日旧告警状态
+    要被新结果覆盖，否则同一批变更反复消费会把已核销的告警重新堆回表里。
+    """
+    if not rows:
+        return 0
+    loan_ids = [r["loan_id"] for r in rows]
+    frag, params = _in_clause(loan_ids)
+    cur.execute(
+        f"DELETE FROM ads_risk_valuation_alerts WHERE alert_date=%s AND loan_id IN {frag}",
+        [date, *params],
+    )
+    items: list[tuple[str, dict, str]] = []
+    for r in rows:
+        mv = r.get("model_version") or "unknown"
+        # E-06：估值记录缺模型版本 → R-UBQ-01 告警，语义「不可溯源」
+        if mv == "unknown":
+            items.append(("R-UBQ-01", r, "模型版本缺失，估值结论不可溯源"))
+        # R-UNW-03：AVM 偏差超阈值 → 推送人工核查
+        if r.get("abnormal_valuation"):
+            dev = r.get("valuation_deviation_pct")
+            items.append(
+                ("R-UNW-03", r, f"AVM 估值偏差 {dev:.2%} 超阈值" if dev else "AVM 估值偏差超阈值")
+            )
+    if items:
+        cur.executemany(
+            "INSERT INTO ads_risk_valuation_alerts "
+            "(alert_code, loan_id, collateral_id, model_version, valuation_deviation_pct, detail, alert_date) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            [
+                (
+                    code,
+                    r["loan_id"],
+                    r.get("collateral_id"),
+                    r.get("model_version"),
+                    r.get("valuation_deviation_pct"),
+                    detail,
+                    date,
+                )
+                for code, r, detail in items
+            ],
+        )
+    return len(items)
+
+
 def replace_alerts(conn, rows: list[dict], date: str) -> int:
     """只重写本批 loan_id 在 `date` 当日的预警：先删后插。
 
     不做全表 DELETE：增量消费一次只该影响这几笔，全表删会误伤当日其它预警。
+    返回 LTV 预警数；血缘/异常估值告警（_replace_risk_alerts）与 LTV 预警同批替换，
+    全量（main.py）与增量（tools/cdc/consumer.py）共用本入口，保证两路径口径一致。
     """
     if not rows:
         return 0
@@ -331,13 +432,18 @@ def replace_alerts(conn, rows: list[dict], date: str) -> int:
                 for r in alerts
             ],
         )
+    # 人工核查类告警与 LTV 预警同批清理重写（共享 conn/事务，最后统一 commit）
+    _replace_risk_alerts(conn, rows, date, cur)
     conn.commit()
     cur.close()
     return len(alerts)
 
 
 def delete_loans(conn, loan_ids: list, date: str) -> int:
-    """贷款被删除（CDC DELETE）：清掉其 DWS 明细与当日预警，避免下游看到幽灵敞口。"""
+    """贷款被删除（CDC DELETE）：清掉其 DWS 明细、LTV 预警与人工核查告警。
+
+    三张表都要清，否则下游会看到「贷款已删但告警仍在」的幽灵敞口/幽灵告警。
+    """
     if not loan_ids:
         return 0
     frag, params = _in_clause(loan_ids)
@@ -345,6 +451,10 @@ def delete_loans(conn, loan_ids: list, date: str) -> int:
     cur.execute(f"DELETE FROM dws_risk_class WHERE loan_id IN {frag}", params)
     cur.execute(
         f"DELETE FROM ads_ltv_alerts WHERE alert_date=%s AND loan_id IN {frag}",
+        [date, *params],
+    )
+    cur.execute(
+        f"DELETE FROM ads_risk_valuation_alerts WHERE alert_date=%s AND loan_id IN {frag}",
         [date, *params],
     )
     conn.commit()

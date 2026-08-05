@@ -6,7 +6,8 @@
     python tools/risk/main.py --date 2026-08-05 --dry-run      # 只算不写库
 
 输出:
-    - MySQL spacefin_crawler：dws_risk_class(打宽明细) / ads_ltv_alerts(预警) / ads_risk_class(五级汇总)
+    - MySQL spacefin_crawler：dws_risk_class(打宽明细，含偏差/异常/模型版本) / ads_ltv_alerts(LTV 预警)
+      / ads_risk_valuation_alerts(血缘 R-UBQ-01 + 异常估值 R-UNW-03 人工核查) / ads_risk_class(五级汇总)
     - 文件：{out_dir}/dws_risk_class.csv / ads_ltv_alerts.csv / risk_report.json
 
 对账说明：DWD 行情估值命中才用真实行情；未命中（当前合成种子地址无城市）回退业务库
@@ -43,6 +44,9 @@ DWS_COLS = [
     "low_confidence",
     "is_high_risk_zone",
     "alert",
+    "valuation_deviation_pct",
+    "abnormal_valuation",
+    "model_version",
 ]
 ALERT_COLS = [
     "loan_id",
@@ -97,6 +101,15 @@ def main():
     dwd_hits = sum(1 for r in rows if r.get("dwd_hit"))
     avm_hits = sum(1 for r in rows if r.get("avm_hit"))
 
+    # R-UNW-03：偏差只在 AVM 命中行可判（见 risk_engine.enrich_loan），统计口径随之收窄
+    deviations = [
+        r["valuation_deviation_pct"] for r in rows if r.get("valuation_deviation_pct") is not None
+    ]
+    abnormal_cnt = sum(1 for r in rows if r.get("abnormal_valuation"))
+    lineage_missing = sum(1 for r in rows if (r.get("model_version") or "unknown") == "unknown")
+    # 模型版本由本批共用的模型产物决定，每行一致；空批时取 'unknown'，避免 KeyError 且保持诚实
+    model_ver = rows[0]["model_version"] if rows else "unknown"
+
     os.makedirs(args.out_dir, exist_ok=True)
     dws_path = os.path.join(args.out_dir, "dws_risk_class.csv")
     alert_path = os.path.join(args.out_dir, "ads_ltv_alerts.csv")
@@ -125,6 +138,23 @@ def main():
         "by_class": agg["by_class"],
         "total_balance": agg["total_balance"],
         "alerts_count": len(alerts),
+        "valuation_deviation": {
+            "threshold": config.VALUATION_DEVIATION_THRESHOLD,
+            "computed": len(deviations),
+            "abnormal": abnormal_cnt,
+            "mean_pct": round(sum(deviations) / len(deviations), 4) if deviations else None,
+            "max_pct": max(deviations) if deviations else None,
+        },
+        "model_version": model_ver,
+        "lineage_alerts": {
+            "alert_code": "R-UBQ-01",
+            "model_version_missing": lineage_missing,
+        },
+        "risk_valuation_alerts": {
+            "abnormal_valuation": abnormal_cnt,
+            # 一笔贷款可能同时命中两类（血缘缺失 + 偏差超标），告警条数按两段分别累计
+            "total": abnormal_cnt + lineage_missing,
+        },
     }
     report_path = os.path.join(args.out_dir, "risk_report.json")
     with open(report_path, "w", encoding="utf-8") as f:
