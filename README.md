@@ -106,7 +106,7 @@
 | 增量断点续爬 + 回扫头部 2-3 页                                | ✅ 已实现               |
 | Linux 新机部署（launchd → systemd、Airflow 同机、环境装依赖） | ⏳ 待执行               |
 
-> 🔴 **最大风险**：fangyuan 渲染依赖宿主 Chrome。容器 Chrome（Linux/headless）已被反爬按指纹软拦截，Linux 宿主 Chrome 预期可行但**未实测**——新机部署第一步必须做渲染冒烟测试（`/render` 拿 zu-itemmod），失败则需决策降级方案。
+> ✅ **渲染链路已验证**：fangyuan 渲染依赖宿主 Chrome。容器 Chrome（Linux/headless）曾被反爬按指纹软拦截（返回空心壳页，无 `zu-itemmod`），但空壳页识别已落地（66 样本零错判），且 `tools/orchestrator/render_smoke_test.sh`（`/render` 拿 zu-itemmod）已通过、2026-08-03 全量跑通（sale 21 城 186,635 行 / fangyuan 出数页率 2.82%→33.33%）。新机部署仍建议先跑一次渲染冒烟测试，但此项已非「未实测」风险。
 
 ### 本地运行
 
