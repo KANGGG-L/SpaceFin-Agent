@@ -156,7 +156,12 @@ def _build_row(
 
 
 def load_model(path: str | None = None) -> object | None:
-    """加载模型产物；文件不存在或依赖缺失时返回 None，不抛异常。"""
+    """加载模型产物；文件不存在或依赖缺失时返回 None，不抛异常。
+
+    返回的 dict 含字段：model/encoders/cities/feature_names/spatial_k/smooth_k/
+    version/trained_at/n_train。version 为模型版本号（如 2026-08-05-r1），
+    由 train.py 生成，风险引擎无需感知——estimate_total_price 只依赖前 5 个键。
+    """
     path = path or DEFAULT_MODEL_PATH
     if not os.path.exists(path):
         return None
@@ -219,6 +224,7 @@ if __name__ == "__main__":
     m = load_model()
     print("model loaded:", m is not None)
     if m:
+        print("model version:", m.get("version"))
         print(
             "gz 天河城 89.5㎡:",
             estimate_total_price(

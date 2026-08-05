@@ -4,12 +4,14 @@
 
 1. **外市数据清洗**：sale DWD 混入了大量北京/燕郊/南昌/杭州湾等外市房源
    （爬虫来源错配），集中在 zs/yf/zh/dg 等城市，拉高城市中位价、贡献了
-   全表最高误差段（dg MAPE 103%、zh 50%、yf 48%）。用三层可复现规则判定：
+   全表最高误差段（dg MAPE 103%、zh 50%、yf 48%）。用四层可复现规则判定：
    a) 坐标围栏：经纬度落在「广东 21 城超围栏」之外的行（如 lat>25.6 在
       东北/北京、lng<109.4 在广西/云南）→ 剔除；
-   b) 文字标记：title/community 命中北京/南昌等地名或「集中供暖/胡同/家属院」
+   b) URL 子域城市：url 子域能解析出城市码且 ≠ district 的行（外市页面抓取
+      错标成广东城市，价格与本地区间重叠，前三层抓不到的残留污染）→ 剔除；
+   c) 文字标记：title/community 命中北京/南昌等地名或「集中供暖/胡同/家属院」
       等北方市场专属词汇的行（带例外表防误杀广东同名地名）→ 剔除；
-   c) 城市价格上/下限：单价超过城市真实天花板（如云浮 >1.5 万、中山 >3 万）
+   d) 城市价格上/下限：单价超过城市真实天花板（如云浮 >1.5 万、中山 >3 万）
       或低于昂贵城市地板价（如深圳 <1.2 万、珠海 <8 千）→ 剔除（例：云浮
       不存在 2 万/㎡ 的房源，深圳不存在 3 千/㎡ 的房源）。
 
@@ -40,6 +42,187 @@ def in_gd_box(lat: float | None, lng: float | None) -> bool:
         return False
     lat_min, lat_max, lng_min, lng_max = GD_BOX
     return lat_min <= lat <= lat_max and lng_min <= lng <= lng_max
+
+
+# ---------------------------------------------------------------------------
+# URL 子域城市校验：第四层外市判定（S6 新增，零成本离线信号）。
+#
+# 爬虫 url 的子域记录了房源实际抓取自哪个城市市场（shenzhen.anjuke.com /
+# jinan.anjuke.com / gz.58.com 等）。前三层规则（坐标/标记/价格）剔掉 2057 行
+# 后仍有 766 行「district 标签城市 != URL 实际城市」的残留外市房源（zs->bj 332、
+# zh->bj 169、zh->gz 94、zs->jn 67 等，北京/济南/保定房源被错标成广东城市），
+# 其价格与本地区间重叠，坐标/文字标记/价格上下限都抓不到——正是 README「已知
+# 局限」第 4 条残留污染，也是 zs/zh/yf/dg 段误差的主要来源。
+#
+# 规则：url 子域能解析出城市码且 != district 即判为外市剔除。子域解析不出
+# （www/m 等通用域名）一律视为无信号、不误杀。只收录确定映射，宁可漏杀。
+# ---------------------------------------------------------------------------
+_GD_CITY_CODES = {
+    "gz",
+    "sz",
+    "fs",
+    "dg",
+    "zs",
+    "zh",
+    "yf",
+    "hui",
+    "jm",
+    "zq",
+    "sg",
+    "qy",
+    "jy",
+    "st",
+    "sw",
+    "cz",
+    "mz",
+    "hy",
+    "mm",
+    "zj",
+    "yj",
+}
+# anjuke/58 子域拼音 -> 城市码（广东 21 城 + 常见外市；广东城直接命中 _GD_CITY_CODES）
+URL_SUBDOMAIN_TO_CODE = {
+    "shenzhen": "sz",
+    "guangzhou": "gz",
+    "foshan": "fs",
+    "dongguan": "dg",
+    "zhongshan": "zs",
+    "zhuhai": "zh",
+    "yunfu": "yf",
+    "huizhou": "hui",
+    "jiangmen": "jm",
+    "zhaoqing": "zq",
+    "shaoguan": "sg",
+    "qingyuan": "qy",
+    "jieyang": "jy",
+    "shantou": "st",
+    "shanwei": "sw",
+    "chaozhou": "cz",
+    "meizhou": "mz",
+    "heyuan": "hy",
+    "maoming": "mm",
+    "zhanjiang": "zj",
+    "yangjiang": "yj",
+    "beijing": "bj",
+    "shanghai": "sh",
+    "nanjing": "nj",
+    "hangzhou": "hz",
+    "nanchang": "nc",
+    "jinan": "jn",
+    "changchun": "cc",
+    "shenyang": "sy",
+    "tianjin": "tj",
+    "chengdu": "cd",
+    "chongqing": "cq",
+    "wuhan": "wh",
+    "changsha": "cs",
+    "xian": "xa",
+    "zhengzhou": "zz",
+    "hefei": "hf",
+    "suzhou": "su",
+    "wuxi": "wx",
+    "ningbo": "nb",
+    "xiamen": "xm",
+    "fuzhou": "fz",
+    "kunming": "km",
+    "guiyang": "gy",
+    "nanning": "nn",
+    "haikou": "hk",
+    "lanzhou": "lz",
+    "yinchuan": "yc",
+    "harbin": "heb",
+    "dalian": "dl",
+    "qingdao": "qd",
+    "yantai": "yt",
+    "weifang": "wf",
+    "tangshan": "ts",
+    "langfang": "lf",
+    "baoding": "bd",
+    "shijiazhuang": "sjz",
+    "taiyuan": "ty",
+    "hohhot": "hhht",
+    "luoyang": "ly",
+    "wenzhou": "wz",
+    "jinhua": "jh",
+    "taizhou": "tz",
+    "nantong": "nt",
+    "yangzhou": "yz",
+    "shaoxing": "sx",
+    "jiaxing": "jx",
+    "putian": "pt",
+    "quanzhou": "qz",
+    "zhangzhou": "zz2",
+    "yancheng": "yc",  # 江苏盐城：实测被错标成 zh 的外市主流之一
+    "deyang": "dy",  # 四川德阳：实测被错标成 dg 的外市主流之一
+    "dingzhou": "dz",  # 河北定州：实测被错标成 zh 的外市之一
+    # 58.com 子域直接用城市短码（bj.58.com / sh.58.com）：仅收录确定城市短码，
+    # 避免把 esf/zu/m 等频道子域误判成城市。短码之间无歧义：任一短码 != 广东
+    # 城市码即判外市，方向恒正确。
+    "bj": "bj",
+    "sh": "sh",
+    "tj": "tj",
+    "cq": "cq",
+    "cd": "cd",
+    "hz": "hz",
+    "nj": "nj",
+    "wh": "wh",
+    "cs": "cs",
+    "xa": "xa",
+    "zz": "zz",
+    "hf": "hf",
+    "su": "su",
+    "wx": "wx",
+    "nb": "nb",
+    "xm": "xm",
+    "fz": "fz",
+    "jn": "jn",
+    "nc": "nc",
+    "cc": "cc",
+    "sy": "sy",
+    "dl": "dl",
+    "qd": "qd",
+    "yt": "yt",
+    "wf": "wf",
+    "ts": "ts",
+    "lf": "lf",
+    "bd": "bd",
+    "sjz": "sjz",
+    "ty": "ty",
+    "hhht": "hhht",
+    "ly": "ly",
+    "wz": "wz",
+    "jh": "jh",
+    "tz": "tz",
+    "nt": "nt",
+    "yz": "yz",
+    "sx": "sx",
+    "jx": "jx",
+    "pt": "pt",
+    "qz": "qz",
+    "km": "km",
+    "gy": "gy",
+    "nn": "nn",
+    "hk": "hk",
+    "lz": "lz",
+    "yc": "yc",
+    "heb": "heb",
+    "gl": "gl",
+}
+_URL_CITY_RE = re.compile(r"https?://([a-z0-9]+)\.(?:anjuke|58)\.com")
+
+
+def url_city_code(url: str | None) -> str | None:
+    """从 url 子域解析房源实际城市码；解析不出返回 None（无信号，不判外市）。"""
+    if not url:
+        return None
+    m = _URL_CITY_RE.search(url)
+    if not m:
+        return None
+    sub = m.group(1)
+    # 58.com 子域直接是城市码（gz.58.com）；anjuke 子域是拼音
+    if sub in _GD_CITY_CODES:
+        return sub
+    return URL_SUBDOMAIN_TO_CODE.get(sub)
 
 
 # ---------------------------------------------------------------------------
@@ -263,14 +446,22 @@ def detect_foreign(
     unit_price: float | None,
     price_caps: dict[str, float] | None = None,
     price_floors: dict[str, float] | None = None,
+    url: str | None = None,
 ) -> str | None:
     """判定一行是否属于外市混入数据。
 
-    优先级：坐标围栏 → 文字标记 → 城市价格上/下限。返回判定原因，None 表示本地。
+    优先级：坐标围栏 → URL 子域城市 → 文字标记 → 城市价格上/下限。
+    返回判定原因，None 表示本地。
     """
     if lat is not None and lng is not None:
         if not in_gd_box(float(lat), float(lng)):
             return "coord_outside_gd"
+    # URL 子域是「房源真实市场」的直接证据：district 标签与 URL 城市不一致
+    # 说明该行是从外市页面抓下来又被错标成广东城市（价格与本地区间重叠，
+    # 前三层规则都抓不到的残留污染）。只认能解析出确定城市的子域。
+    uc = url_city_code(url)
+    if uc is not None and uc != district:
+        return f"url_mismatch:{uc}"
     text = f"{(title or '')}|{(community or '')}"
     for marker in FOREIGN_MARKERS:
         if marker in text:
@@ -799,6 +990,7 @@ def clean_rows_with_stats(rows: list[dict], *, parse_all: bool = False) -> tuple
             r.get("longitude"),
             up_f,
             PRICE_CAPS,
+            url=r.get("url"),
         )
         if why:
             reason[why] += 1
@@ -815,10 +1007,11 @@ def clean_rows_with_stats(rows: list[dict], *, parse_all: bool = False) -> tuple
                 r["community"] = name
                 backfilled += 1
 
-    # 按城市细分：为什么被剔除（坐标围栏 / 文字标记 / 价格上/下限）
+    # 按城市细分：为什么被剔除（坐标围栏 / URL 城市 / 文字标记 / 价格上/下限）
     by_city_coord: Counter = Counter()
     by_city_marker: Counter = Counter()
     by_city_price: Counter = Counter()
+    by_city_url: Counter = Counter()
     for r in rows:
         up = r.get("unit_price_yuan")
         up_f = float(up) if up is not None else None
@@ -829,6 +1022,7 @@ def clean_rows_with_stats(rows: list[dict], *, parse_all: bool = False) -> tuple
             r.get("latitude"),
             r.get("longitude"),
             up_f,
+            url=r.get("url"),
         )
         if why is None:
             continue
@@ -837,6 +1031,8 @@ def clean_rows_with_stats(rows: list[dict], *, parse_all: bool = False) -> tuple
             by_city_marker[city] += 1
         elif why.startswith("price_over") or why.startswith("price_below"):
             by_city_price[city] += 1
+        elif why.startswith("url_mismatch"):
+            by_city_url[city] += 1
         else:
             by_city_coord[city] += 1
 
@@ -847,9 +1043,11 @@ def clean_rows_with_stats(rows: list[dict], *, parse_all: bool = False) -> tuple
         "n_dropped_coord": sum(by_city_coord.values()),
         "n_dropped_marker": sum(by_city_marker.values()),
         "n_dropped_price": sum(by_city_price.values()),
+        "n_dropped_url": sum(by_city_url.values()),
         "dropped_by_coord": dict(by_city_coord),
         "dropped_by_marker": dict(by_city_marker),
         "dropped_by_price_cap": dict(by_city_price),
+        "dropped_by_url": dict(by_city_url),
         "n_comm_missing_before": n_comm_missing_before,
         "n_backfilled_community": parsed + backfilled,
         "n_comm_missing_after": sum(1 for r in kept if not (r.get("community") or "").strip()),

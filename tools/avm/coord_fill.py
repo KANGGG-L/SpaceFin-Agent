@@ -1,7 +1,8 @@
 """腾讯 geocoder 批量补坐标：把缺失经纬度的小区解析成 (lat, lng) 落缓存。
 
-背景：crawl_housing_sale 仅约 31% 行有坐标，sz/zs/zh/yf 等 11 城全表无坐标，
-模型对无坐标行只能靠城市中位估计（sz MAPE 26.9%、gz 33% 的主要来源）。
+背景：crawl_housing_sale 约 2/3 行无坐标，sz/zs/zh/yf 等 11 城全表无坐标，
+模型对无坐标行只能靠城市中位估计（gz/sz 段 MAPE 33%/28% 的主要来源；S6 已
+剔除 zs/yf/zh/dg 四城 100% 外市错标数据，sz/gz 仍无坐标）。
 本脚本按「行数降序」优先解析行数最多的小区，命中写 output/avm/coord_cache.json
 （城市 -> 小区名 -> [lat, lng]，WGS-84），train.py 训练时自动加载回填。
 
@@ -13,7 +14,7 @@
 - 增量缓存：每次 hit 立即写盘，中断不丢进度；重跑只处理缓存缺失的小区。
 
 配额：腾讯 geocoder 每 key 每日 6000 次（超了返回 status=121），脚本自动暂停
-保留进度，次日重跑即可续传。耗时：0.2s/条 × ~6600 小区 ≈ 22 分钟/天。
+保留进度，次日重跑即可续传。耗时：0.2s/条 × ~6800 小区 ≈ 22 分钟/天。
 
 用法：
     tools/orchestrator/.venv/bin/python tools/avm/coord_fill.py [--daily-limit N]
@@ -133,7 +134,7 @@ def collect_pending() -> list[tuple[str, str, int]]:
     cur.execute(
         "SELECT title, community, district, bedrooms, halls, bathrooms, area_sqm, "
         "direction, floor, building_age, parking_count, total_price_wan, "
-        "unit_price_yuan, latitude, longitude FROM crawl_housing_sale"
+        "unit_price_yuan, latitude, longitude, url FROM crawl_housing_sale"
     )
     cols = [d[0] for d in cur.description]
     raw_rows = [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]

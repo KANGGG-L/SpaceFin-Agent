@@ -6,10 +6,14 @@
 用法：
     tools/orchestrator/.venv/bin/python tools/avm/train.py --out-dir output/avm
     tools/orchestrator/.venv/bin/python tools/avm/train.py --out-dir output/avm --max-rows 20000
+    tools/orchestrator/.venv/bin/python tools/avm/train.py --min-train-samples 500  # 覆盖样本门槛
 
 输出（默认 output/avm/）：
-    model.joblib      模型 + 编码字典 + 特征元数据（供 tools/avm/predict.py 加载）
-    avm_report.json   指标、样本量、特征清单、训练时间戳、与基线对照
+    model.joblib      模型 + 编码字典 + 特征元数据 + version（供 tools/avm/predict.py 加载）
+    avm_report.json   指标、样本量、特征清单、训练时间戳、version、与基线对照
+
+样本门槛（B-06 修复）：清洗后样本量低于 --min-train-samples（默认 100）时
+明确退出（exit 3 + 「样本不足，降级人工」提示），不再因 train_test_split 崩溃。
 
 数据口径：
     - 训练集：spacefin_crawler.crawl_housing_sale（sale DWD，44,369 行）
@@ -29,9 +33,9 @@
 
 清洗规则（写入代码即文档）：
     0) 外市混入清洗 + title 回填小区名（见 tools/avm/data_clean.py，可复现、
-       有统计输出）：坐标围栏 / 北京南昌等文字标记 / 城市价格上限三层判定
-       剔除混入的北京燕郊南昌等外市房源；对 community 为空的行用 title 中
-       的楼盘名保守回填。
+       有统计输出）：坐标围栏 / URL 子域城市 / 北京南昌等文字标记 / 城市价格
+       上限四层判定剔除混入的北京燕郊南昌盐城德阳等外市房源；对 community
+       为空的行用 title 中的楼盘名保守回填。
     1) 剔除 total_price_wan / area_sqm / unit_price_yuan 任一缺失或 <=0 的行；
     2) 一致性校验：|total_price*10000/area - unit_price| / unit_price > 2% 视为脏行剔除；
     3) 分位数截尾去极值：unit_price_yuan 与 area_sqm 各截 0.5% / 99.5%；
@@ -85,7 +89,7 @@ def crawl_params(env: dict) -> dict:
 # ---------------------------------------------------------------------------
 SQL = """
 SELECT title, community, district, bedrooms, halls, bathrooms, area_sqm, direction, floor,
-       building_age, parking_count, total_price_wan, unit_price_yuan, latitude, longitude
+       building_age, parking_count, total_price_wan, unit_price_yuan, latitude, longitude, url
 FROM crawl_housing_sale
 """
 
@@ -308,6 +312,33 @@ def apply_encoders(
 # 空间近邻半径集合：3/8/20/50 覆盖"极近邻→城市尺度"
 SPATIAL_K = (3, 8, 20, 50)
 
+# 最小训练样本门槛（B-06 缺陷修复）：清洗后样本低于该值直接退出而非崩溃。
+# 历史上 --max-rows 1 时 train_test_split 因测试集为空抛 ValueError；
+# 样本太少训练出来的模型也不可信（n=1 时任何指标都是噪声），
+# 明确退出并提示降级人工，比抛未处理异常更可控。
+MIN_TRAIN_SAMPLES = 100
+
+
+def make_version(out_dir: str) -> str:
+    """生成模型版本号（如 2026-08-05-r1）。
+
+    规则：当天首训 r1，同日重训递增 r2/r3...（读取旧 avm_report.json 的 version）。
+    版本号随模型产物落盘，predict 侧可读，用于追踪"哪一版模型在跑"。
+    """
+    date = time.strftime("%Y-%m-%d")
+    rev = 1
+    report_path = os.path.join(out_dir, "avm_report.json")
+    if os.path.exists(report_path):
+        try:
+            with open(report_path, encoding="utf-8") as f:
+                old = json.load(f)
+            v = old.get("version", "")
+            if v.startswith(date):
+                rev = int(v.split("-r")[-1]) + 1
+        except (ValueError, OSError):
+            pass
+    return f"{date}-r{rev}"
+
 
 def build_features(
     rows: list[dict],
@@ -445,6 +476,16 @@ def main() -> None:
         default=10.0,
         help="小区目标编码经验贝叶斯收缩强度（0=不收缩）",
     )
+    ap.add_argument(
+        "--min-train-samples",
+        type=int,
+        default=MIN_TRAIN_SAMPLES,
+        help="清洗后样本量下限，低于该值直接退出（降级人工，不训练）",
+    )
+    ap.add_argument("--lr", type=float, default=0.03, help="HistGBR learning_rate")
+    ap.add_argument("--max-leaves", type=int, default=150, help="HistGBR max_leaf_nodes")
+    ap.add_argument("--min-leaf", type=int, default=12, help="HistGBR min_samples_leaf")
+    ap.add_argument("--l2", type=float, default=2.0, help="HistGBR l2_regularization")
     args = ap.parse_args()
 
     t0 = time.time()
@@ -479,11 +520,22 @@ def main() -> None:
         )
     print(
         f"[avm] 外市清洗: 剔除 {clean_stats['n_dropped']} 行"
-        f"（围栏 {clean_stats['n_dropped_coord']} / 标记 {clean_stats['n_dropped_marker']}"
+        f"（围栏 {clean_stats['n_dropped_coord']} / URL {clean_stats.get('n_dropped_url', 0)}"
+        f" / 标记 {clean_stats['n_dropped_marker']}"
         f" / 价格 {clean_stats['n_dropped_price']}），"
         f"title 归一/回填小区 {clean_stats['n_backfilled_community']} 行"
     )
     print(f"[avm] 清洗后样本 {len(rows)}（{time.time() - t0:.1f}s）")
+
+    # B-06 样本门槛：清洗后样本不足直接退出（exit 非 0），不进入 train_test_split。
+    # 极端场景（如 --max-rows 1）下 split/KFold 会因样本过少抛未处理异常，
+    # 且样本过少训练出的模型不可信；明确退出让上层感知并降级人工。
+    if len(rows) < args.min_train_samples:
+        print(
+            f"[avm] 样本不足（清洗后 {len(rows)} < 门槛 {args.min_train_samples}），"
+            f"降级人工，本次不训练"
+        )
+        raise SystemExit(3)
 
     y_log = np.array([np.log(r["up"]) for r in rows])
     cities = sorted({r["city"] for r in rows})
@@ -513,13 +565,14 @@ def main() -> None:
 
     # HistGBR 原生支持 NaN（无坐标/无小区行保留，特征列有缺失不剔除）
     # 参数：max_leaf_nodes=150 + 更强 L2 正则 在本轮清洗/回填数据上 MAPE 最低
-    # （网格 6 组对比：base 16.14 → big 15.97，-0.18pp；lr=0.02 组 16.02 次之）
+    # （网格 6 组对比：base 16.14 → big 15.97，-0.18pp；lr=0.02 组 16.02 次之；
+    #  S6 再扫 5 组 lr/leaf/l2 组合均 ≥ base 15.94/15.51，参数已达局部最优）
     model = HistGradientBoostingRegressor(
         max_iter=2000,
-        learning_rate=0.03,
-        max_leaf_nodes=150,
-        min_samples_leaf=12,
-        l2_regularization=2.0,
+        learning_rate=args.lr,
+        max_leaf_nodes=args.max_leaves,
+        min_samples_leaf=args.min_leaf,
+        l2_regularization=args.l2,
         early_stopping=True,
         validation_fraction=0.1,
         n_iter_no_change=40,
@@ -569,6 +622,7 @@ def main() -> None:
     os.makedirs(args.out_dir, exist_ok=True)
     model_path = os.path.join(args.out_dir, "model.joblib")
     report_path = os.path.join(args.out_dir, "avm_report.json")
+    version = make_version(args.out_dir)
     artifact = {
         "model": model,
         "encoders": full_enc,
@@ -576,6 +630,7 @@ def main() -> None:
         "feature_names": FEATURE_NAMES,
         "spatial_k": list(SPATIAL_K),
         "smooth_k": args.smooth_k,  # 小区目标编码收缩强度（predict 复用同一公式）
+        "version": version,  # 模型版本（如 2026-08-05-r1），供 predict/运营侧追踪
         "trained_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "n_train": len(tr),
     }
@@ -583,6 +638,7 @@ def main() -> None:
 
     joblib.dump(artifact, model_path)
     report = {
+        "version": version,
         "model": "HistGradientBoostingRegressor(log unit_price)",
         "trained_at": artifact["trained_at"],
         "seed": args.seed,
@@ -593,26 +649,37 @@ def main() -> None:
             "baseline_median_x_area": base_met,
             "mape_relative_improvement_pct": improvement,
         },
+        "model_params": {
+            "learning_rate": args.lr,
+            "max_leaf_nodes": args.max_leaves,
+            "min_samples_leaf": args.min_leaf,
+            "l2_regularization": args.l2,
+            "max_iter": 2000,
+            "early_stopping": True,
+        },
         "feature_names": FEATURE_NAMES,
         "feature_missing_pct_test": miss,
         "target": "log(unit_price_yuan); total = unit_price * area_sqm",
         "leakage_control": "小区/城市中位价仅用训练折内统计(OOF)；测试集新小区回退城市中位→全局中位",
         "cleaning": {
-            "rules": "坐标围栏(广东21城超围栏) / 北京南昌等文字标记 / 城市价格上下限；title 统一归一小区名",
+            "rules": "坐标围栏(广东21城超围栏) / URL子域城市 / 北京南昌等文字标记 / 城市价格上下限；title 统一归一小区名",
             "n_raw": clean_stats["n_raw"],
             "n_dropped": clean_stats["n_dropped"],
             "n_dropped_coord": clean_stats["n_dropped_coord"],
             "n_dropped_marker": clean_stats["n_dropped_marker"],
             "n_dropped_price": clean_stats["n_dropped_price"],
+            "n_dropped_url": clean_stats.get("n_dropped_url", 0),
             "dropped_by_coord": clean_stats["dropped_by_coord"],
             "dropped_by_marker": clean_stats["dropped_by_marker"],
             "dropped_by_price_cap": clean_stats["dropped_by_price_cap"],
+            "dropped_by_url": clean_stats.get("dropped_by_url", {}),
             "n_comm_missing_before": clean_stats["n_comm_missing_before"],
             "n_backfilled_community": clean_stats["n_backfilled_community"],
             "n_comm_missing_after": clean_stats["n_comm_missing_after"],
         },
         "data_notes": {
             "rows_after_clean": len(rows),
+            "min_train_samples": args.min_train_samples,
             "coord_rows_pct": round(np.mean([r["lat"] == r["lat"] for r in rows]) * 100, 1),
             "community_missing_pct": round(np.mean([not r["comm"] for r in rows]) * 100, 1),
             "coord_backfill": {
