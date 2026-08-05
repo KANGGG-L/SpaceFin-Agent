@@ -84,6 +84,10 @@ DOC_MD = """
 8. `risk_recalc` — 跑 `tools/risk/main.py --write-db` 全量重算。必须排在 CDC 之后：CDC 只覆盖
    「有变更的贷款」，而 ETL 刷新的行情（DWD）影响**全部**贷款的估值，只有全量过一遍 LTV
    才跟得上新行情。两条路径共用 tools/risk/store 的写库语义，结果可互证。
+9. `lake_sync` — 跑 `tools/lake/sync.py --date {{ ds }}`，把 MySQL 全量同步进 Doris（ODS/DWD/DWS/ADS
+   分层）并把当日数据湖快照 `data_lake/housing/dt={{ ds }}` 上传 MinIO。必须排在 risk_recalc 之后：
+   `sync.py` 的报表口径日 stat_date 取自 `ads_risk_class` 的 MAX(stat_date)，而该表由 risk_recalc
+   写入。`--date` 必须与 ETL 落盘日一致（同步按 dt 分区选快照，传错会找不到目录直接失败）。
 
 依赖的 Airflow Variable（均有默认值）：
 `spacefin_repo_root`、`spacefin_venv`、`spacefin_master_url`、`spacefin_render_url`、
@@ -293,6 +297,16 @@ with DAG(
         cwd=REPO_ROOT,
     )
 
+    # --date 必须与 etl_finalize 落盘日一致：sync.py 按 dt= 分区选当日数据湖快照上传 MinIO，
+    # 传错会找不到目录直接失败。Doris 全量同步幂等（TRUNCATE 重灌），可安全每日执行。
+    lake_sync = BashOperator(
+        task_id="lake_sync",
+        bash_command=(f'"{PYTHON_BIN}" tools/lake/sync.py --date {{{{ ds }}}}'),
+        cwd=REPO_ROOT,
+        retries=1,
+        retry_delay=timedelta(minutes=5),
+    )
+
     (
         render_smoke_test
         >> start_stack
@@ -303,4 +317,5 @@ with DAG(
         >> geocode_backfill_finalize
         >> cdc_consume
         >> risk_recalc
+        >> lake_sync
     )
