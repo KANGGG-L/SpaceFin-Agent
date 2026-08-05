@@ -133,8 +133,15 @@ def internal_of(**by_class):
 
 
 def dws_of(internal, **overrides):
-    """从出口①派生出口②（明细聚合，只有 count/balance），可局部覆盖以制造漂移。"""
+    """从出口①派生出口②（明细聚合：count/balance/balance_pct），可局部覆盖以制造漂移。
+
+    占比按余额重算（与 load_dws_agg 口径一致，分母为全量余额、保留 4 位小数），
+    因此覆盖 balance 后各档占比自动跟着重算；占比本身不直接接受覆盖。
+    """
     out = {cls: {"count": v["count"], "balance": v["balance"]} for cls, v in internal.items()}
     for cls, (cnt, bal) in overrides.items():
         out[cls] = {"count": cnt, "balance": bal}
+    total = sum(v["balance"] for v in out.values())
+    for v in out.values():
+        v["balance_pct"] = round(v["balance"] / total, 4) if total else 0.0
     return out

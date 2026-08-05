@@ -21,15 +21,16 @@ import risk_engine
 DWS_INSERT_SQL = (
     "INSERT INTO dws_risk_class "
     "(loan_id, customer_id, collateral_id, balance, interest_rate, market_valuation, "
-    " ltv, risk_class, low_confidence, is_high_risk_zone, alert, "
+    " ltv, risk_class, low_confidence, is_high_risk_zone, alert, alert_level, "
     " valuation_deviation_pct, abnormal_valuation, model_version) "
-    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
     "ON DUPLICATE KEY UPDATE "
     " customer_id=VALUES(customer_id), collateral_id=VALUES(collateral_id), "
     " balance=VALUES(balance), interest_rate=VALUES(interest_rate), "
     " market_valuation=VALUES(market_valuation), ltv=VALUES(ltv), "
     " risk_class=VALUES(risk_class), low_confidence=VALUES(low_confidence), "
     " is_high_risk_zone=VALUES(is_high_risk_zone), alert=VALUES(alert), "
+    " alert_level=VALUES(alert_level), "
     " valuation_deviation_pct=VALUES(valuation_deviation_pct), "
     " abnormal_valuation=VALUES(abnormal_valuation), "
     " model_version=VALUES(model_version), "
@@ -39,8 +40,8 @@ DWS_INSERT_SQL = (
 ALERT_INSERT_SQL = (
     "INSERT INTO ads_ltv_alerts "
     "(loan_id, customer_id, collateral_id, loan_balance, market_valuation, ltv, "
-    " risk_class, is_high_risk_zone, alert_date) "
-    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+    " risk_class, is_high_risk_zone, alert_level, alert_date) "
+    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
 )
 
 
@@ -194,9 +195,10 @@ def apply_spatial(collaterals: dict, spatial_map: dict, zone_risk_map: dict) -> 
       价格区块内，区块风险归属可信。zone 为空（如种子随机坐标落在房源聚集区外）时维持
       collateral 表占位高危标记，否则会把整批贷款打成高危区。
 
-    低置信语义（AC-04）：缺失率 >= config.LOW_CONF_MISSING_PCT(75) 的笔被标记
-    low_confidence，**抑制自动预警转人工核查**。合成种子里 200 笔缺失率中位落在
-    50–75 区间、约半数 >=75，与「合成坐标大多是随机撒点、空间特征先天不足」一致。
+    低置信语义（AC-04）：缺失率 **严格大于** config.LOW_CONF_MISSING_PCT(75) 的笔被标记
+    low_confidence，**抑制自动预警转人工核查**；恰好 = 75 不低置信。合成种子里 200 笔
+    缺失率中位落在 50–75 区间、约半数 >75，与「合成坐标大多是随机撒点、空间特征先天
+    不足」一致。
     """
     if not spatial_map or not collaterals:
         return
@@ -277,6 +279,7 @@ def ensure_ads_tables(conn) -> None:
             market_valuation DECIMAL(14,2), ltv DECIMAL(8,4),
             risk_class VARCHAR(8), low_confidence TINYINT,
             is_high_risk_zone TINYINT, alert TINYINT,
+            alert_level VARCHAR(8) DEFAULT NULL,
             valuation_deviation_pct DECIMAL(8,4),
             abnormal_valuation TINYINT,
             model_version VARCHAR(32),
@@ -284,11 +287,13 @@ def ensure_ads_tables(conn) -> None:
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """
     )
-    # 存量表补列（R-UNW-03 偏差/异常标记 + R-UBQ-01 模型版本），CREATE IF NOT EXISTS 对已有表不生效
+    # 存量表补列（R-UNW-03 偏差/异常标记 + R-UBQ-01 模型版本 + AC-03 alert_level），
+    # CREATE IF NOT EXISTS 对已有表不生效
     _ensure_columns(
         conn,
         "dws_risk_class",
         [
+            ("alert_level", "VARCHAR(8) DEFAULT NULL"),
             ("valuation_deviation_pct", "DECIMAL(8,4) DEFAULT NULL"),
             ("abnormal_valuation", "TINYINT DEFAULT NULL"),
             ("model_version", "VARCHAR(32) DEFAULT NULL"),
@@ -301,12 +306,15 @@ def ensure_ads_tables(conn) -> None:
             loan_id INT, customer_id INT, collateral_id INT,
             loan_balance DECIMAL(14,2), market_valuation DECIMAL(14,2),
             ltv DECIMAL(8,4), risk_class VARCHAR(8),
-            is_high_risk_zone TINYINT, alert_date DATE,
+            is_high_risk_zone TINYINT, alert_level VARCHAR(8) DEFAULT NULL,
+            alert_date DATE,
             etl_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             KEY idx_loan (loan_id), KEY idx_date (alert_date)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """
     )
+    # 存量表补列（AC-03 两档预警级别），同样幂等处理
+    _ensure_columns(conn, "ads_ltv_alerts", [("alert_level", "VARCHAR(8) DEFAULT NULL")])
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS ads_risk_valuation_alerts (
@@ -347,6 +355,7 @@ def _dws_tuple(r: dict) -> tuple:
         int(r["low_confidence"]),
         r["is_high_risk_zone"],
         int(r["alert"]),
+        r.get("alert_level"),
         r.get("valuation_deviation_pct"),
         int(bool(r.get("abnormal_valuation"))),
         r.get("model_version") or "unknown",
@@ -441,6 +450,7 @@ def replace_alerts(conn, rows: list[dict], date: str) -> int:
                     r["ltv"],
                     r["risk_class"],
                     r["is_high_risk_zone"],
+                    r.get("alert_level"),
                     date,
                 )
                 for r in alerts

@@ -394,7 +394,7 @@ class SpaceFinApp(BaseHTTPRequestHandler):
             page_size=100000,
         )
         lines = [
-            "src,loan_id,customer_id,collateral_id,ltv,balance,valuation,risk_class,high_risk_zone,alert_date,address,confirmed"
+            "src,loan_id,customer_id,collateral_id,ltv,balance,valuation,risk_class,high_risk_zone,alert_date,address,confirmed,alert_level"
         ]
         for r in result["rows"]:
             # PII 最小化：客户号脱敏只留后 4 位（R-UNW-02 语义，开发演示）。
@@ -415,6 +415,8 @@ class SpaceFinApp(BaseHTTPRequestHandler):
                         str(r.get("alert_date") or ""),
                         str(r.get("property_addr") or "").replace(",", "，"),
                         "1" if r.get("confirmed") else "0",
+                        # 两档等级原文导出（warn/strong/NULL→空），机器可读，展示层再映射中文。
+                        str(r.get("alert_level") or ""),
                     ]
                 )
             )

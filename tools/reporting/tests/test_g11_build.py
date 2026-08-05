@@ -42,8 +42,38 @@ def test_load_dws_agg_has_no_date_filter(conn):
     out = g11.load_dws_agg(conn)
 
     assert "stat_date" not in conn.executed[0][0]
-    assert out["正常"] == {"count": 3, "balance": 500.0}
-    assert out["损失"] == {"count": 0, "balance": 0.0}
+    assert out["正常"] == {"count": 3, "balance": 500.0, "balance_pct": 1.0}
+    assert out["损失"] == {"count": 0, "balance": 0.0, "balance_pct": 0.0}
+
+
+def test_load_dws_agg_recomputes_balance_pct_from_balance(conn):
+    """占比按余额重算（分母=全量余额），不信任上游存的 pct——占比校验的独立基准。"""
+    conn.queue_result(
+        [("正常", 3, 500.0), ("关注", 2, 250.0), ("次级", 1, 150.0), ("可疑", 1, 100.0)]
+    )
+
+    out = g11.load_dws_agg(conn)
+
+    assert out["正常"]["balance_pct"] == 0.5
+    assert out["次级"]["balance_pct"] == 0.15
+    assert out["损失"]["balance_pct"] == 0.0
+    assert round(sum(v["balance_pct"] for v in out.values()), 4) == 1.0
+
+
+def test_load_dws_agg_blocks_on_non_five_level_class(conn):
+    """非五级档位（NULL/历史遗留/新增）静默丢弃会让五级总额少算，必须阻断。"""
+    conn.queue_result([("正常", 3, 500.0), ("疑似", 5, 5000.0)])
+
+    with pytest.raises(ValueError, match="疑似"):
+        g11.load_dws_agg(conn)
+
+
+def test_load_internal_blocks_on_non_five_level_class(conn):
+    """ads_risk_class 同样可能出现非五级档位（store 刷新时不筛），一视同仁阻断。"""
+    conn.queue_result([("正常", 3, 500.0, 0.5), ("疑似", 5, 5000.0, 0.9)])
+
+    with pytest.raises(ValueError, match="疑似"):
+        g11.load_internal(conn, "2026-08-05")
 
 
 # ================================================================ G11 模板

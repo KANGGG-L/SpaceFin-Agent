@@ -247,14 +247,17 @@ def alerts(
 
     base = (
         "SELECT src, id, loan_id, customer_id, collateral_id, "
-        "loan_balance, market_valuation, ltv, risk_class, is_high_risk_zone, alert_date "
+        "loan_balance, market_valuation, ltv, risk_class, is_high_risk_zone, "
+        "alert_date, alert_level "
         "FROM ("
         "SELECT 'offline' src, id, loan_id, customer_id, collateral_id, "
-        "loan_balance, market_valuation, ltv, risk_class, is_high_risk_zone, alert_date "
+        "loan_balance, market_valuation, ltv, risk_class, is_high_risk_zone, "
+        "alert_date, alert_level "
         "FROM ads_ltv_alerts "
         "UNION ALL "
         "SELECT 'stream', event_id, loan_id, customer_id, collateral_id, "
-        "loan_balance, market_valuation, ltv, risk_class, is_high_risk_zone, alert_date "
+        "loan_balance, market_valuation, ltv, risk_class, is_high_risk_zone, "
+        "alert_date, NULL "
         "FROM ads_stream_ltv_alerts"
         f") t {where_sql}"
     )

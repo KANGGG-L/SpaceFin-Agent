@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS {INBOX_TABLE} (
     ltv DECIMAL(8,4),
     risk_class VARCHAR(8),
     is_high_risk_zone TINYINT,
+    alert_level VARCHAR(8),
     alert_date DATE,
     received_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uq_loan_date (loan_id, alert_date)
@@ -65,12 +66,13 @@ class SiteInboxDriver(AlertDriver):
         cur.execute(
             f"INSERT INTO {INBOX_TABLE} "
             "(loan_id, customer_id, collateral_id, loan_balance, market_valuation, "
-            " ltv, risk_class, is_high_risk_zone, alert_date) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+            " ltv, risk_class, is_high_risk_zone, alert_level, alert_date) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
             "ON DUPLICATE KEY UPDATE "
             " loan_balance=VALUES(loan_balance), market_valuation=VALUES(market_valuation), "
             " ltv=VALUES(ltv), risk_class=VALUES(risk_class), "
-            " is_high_risk_zone=VALUES(is_high_risk_zone), received_ts=CURRENT_TIMESTAMP",
+            " is_high_risk_zone=VALUES(is_high_risk_zone), alert_level=VALUES(alert_level), "
+            " received_ts=CURRENT_TIMESTAMP",
             (
                 alert["loan_id"],
                 alert.get("customer_id"),
@@ -80,6 +82,7 @@ class SiteInboxDriver(AlertDriver):
                 alert.get("ltv"),
                 alert.get("risk_class"),
                 alert.get("is_high_risk_zone"),
+                alert.get("alert_level"),
                 alert["alert_date"],
             ),
         )
