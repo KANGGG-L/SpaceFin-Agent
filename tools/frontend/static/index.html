@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SpaceFin · S5 资产风险驾驶舱</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <!-- 登录视图 -->
+  <div id="login-view" class="login-wrap hidden">
+    <form id="login-form" class="login-card" autocomplete="off">
+      <div class="login-brand">SpaceFin</div>
+      <div class="login-sub">房产金融风险决策 · S5 驾驶舱</div>
+      <label class="field">
+        <span>账号</span>
+        <input id="login-user" name="username" required placeholder="如 risk" />
+      </label>
+      <label class="field">
+        <span>密码</span>
+        <input id="login-pass" name="password" type="password" required placeholder="••••••" />
+      </label>
+      <div id="login-err" class="login-err"></div>
+      <button type="submit" class="btn btn-primary btn-block">登 录</button>
+      <div class="login-hint">开发环境内置账号见 README（dev-only）</div>
+    </form>
+  </div>
+
+  <!-- 主应用 -->
+  <div id="app-view" class="app hidden">
+    <aside class="sidebar">
+      <div class="brand">SpaceFin · S5</div>
+      <nav id="nav" class="nav"></nav>
+      <div class="side-user">
+        <div id="user-label"></div>
+        <div id="user-role"></div>
+        <button id="logout-btn" class="btn btn-ghost btn-sm">退出</button>
+      </div>
+    </aside>
+    <main class="main">
+      <!-- 驾驶舱 -->
+      <section id="page-dashboard" class="page hidden">
+        <h1 class="page-title">资产质量监控驾驶舱</h1>
+        <div id="kpi-cards" class="kpi-row"></div>
+        <div class="grid-2">
+          <div class="card">
+            <h2 class="card-title">五级分类分布（余额/笔数/占比）</h2>
+            <div id="five-class-chart" class="chart"></div>
+          </div>
+          <div class="card">
+            <h2 class="card-title">LTV 分布直方图</h2>
+            <div id="ltv-hist-chart" class="chart"></div>
+          </div>
+          <div class="card">
+            <h2 class="card-title">区域贷款分布（城市 · 高危区笔数）</h2>
+            <div id="city-dist" class="hbar-list"></div>
+          </div>
+          <div class="card">
+            <h2 class="card-title">LTV 预警概览</h2>
+            <div id="alert-overview" class="alert-overview"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- LTV 预警列表 -->
+      <section id="page-alerts" class="page hidden">
+        <h1 class="page-title">LTV 爆仓预警列表</h1>
+        <form id="alert-filter" class="filter-bar">
+          <label>风险类
+            <select name="risk_class" id="f-risk-class">
+              <option value="">全部</option>
+              <option>正常</option><option>关注</option><option>次级</option>
+              <option>可疑</option><option>损失</option>
+            </select>
+          </label>
+          <label>来源
+            <select name="source" id="f-source">
+              <option value="">全部</option>
+              <option value="offline">离线 T+1</option>
+              <option value="stream">实时</option>
+            </select>
+          </label>
+          <label>LTV ≥
+            <input type="number" id="f-ltv-min" step="0.01" min="0" max="2" placeholder="如 0.85" />
+          </label>
+          <label>LTV ≤
+            <input type="number" id="f-ltv-max" step="0.01" min="0" max="2" placeholder="如 2" />
+          </label>
+          <label>日期从
+            <input type="date" id="f-date-from" />
+          </label>
+          <label>日期至
+            <input type="date" id="f-date-to" />
+          </label>
+          <button type="submit" class="btn btn-primary">查询</button>
+          <a id="export-btn" class="btn btn-ghost" href="#">导出 CSV</a>
+          <span id="alert-total" class="filter-total"></span>
+        </form>
+        <div class="card">
+          <table class="table" id="alert-table">
+            <thead>
+              <tr>
+                <th>来源</th><th>贷款号</th><th>客户号</th><th>LTV</th><th>贷款余额</th>
+                <th>市场估值</th><th>风险类</th><th>高危区</th><th>预警日期</th>
+                <th>抵押物地址</th><th>确认</th><th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <div class="pager">
+            <button id="prev-page" class="btn btn-ghost btn-sm">上一页</button>
+            <span id="page-info"></span>
+            <button id="next-page" class="btn btn-ghost btn-sm">下一页</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 1104 报送 -->
+      <section id="page-report" class="page hidden">
+        <h1 class="page-title">1104 G11 资产质量报送</h1>
+        <div class="filter-bar">
+          <label>业务日期
+            <select id="report-date"></select>
+          </label>
+          <span id="report-status" class="badge"></span>
+        </div>
+        <div class="grid-2">
+          <div class="card">
+            <h2 class="card-title">G11 模板（五级 + 合计）</h2>
+            <table class="table" id="report-table">
+              <thead>
+                <tr><th>风险类</th><th>笔数</th><th>余额（元）</th><th>余额占比</th><th>etl_ts</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="card">
+            <h2 class="card-title">口径一致性校验</h2>
+            <div id="report-check"></div>
+            <h2 class="card-title" style="margin-top:16px">阻断告警历史（ads_report_alert）</h2>
+            <div id="report-alerts"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
