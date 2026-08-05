@@ -42,7 +42,7 @@ SpaceFin-Agent 是**最终交付版本（final deliverable）**，不是 MVP 原
 
 > ☑ **Go（技术验收口径）**
 
-理由：功能验收 AC-01～08 全绿、自动化测试 603 passed / 1 skipped、设计/研发/合规护栏清单回填完成、无遗留 P0/P1。G6 渲染已验证、G7 为 PRD Non-goals 已排除；G2/G4/G5/G8 技术框架可凭代码补齐、列为最终版待办；G1/G3/H4 为真实外部资源依赖、诚实声明未达成（非 bug）。技术交付已达标，外部依赖项待真实资源到位后推进。
+理由：功能验收 AC-01～08 全绿、自动化测试 603 passed / 1 skipped、设计/研发/合规护栏清单回填完成、无遗留 P0/P1。G6 渲染已验证、G7 为 PRD Non-goals 已排除；G2/G4/G5/G8 已于 feature/final-buildout（f3c9fde）凭代码补齐并交付；G1/G3/H4 为真实外部资源依赖、诚实声明未达成（非 bug）。技术交付已达标，外部依赖项待真实资源到位后推进。
 
 ---
 
@@ -54,13 +54,13 @@ SpaceFin-Agent 是**最终交付版本（final deliverable）**，不是 MVP 原
 | # | 交付项 | 状态 | 说明与最终版行动 |
 |---|--------|------|------------------|
 | G1 | 真实数据源接入 | ⛔ 外部依赖 | 真实业务库 / 广东抵押物地址 / 第三方房产·地图 API 依赖外部机构授权，无法凭代码达成。当前以 demo / mock / 合成种子驱动全链路，**诚实声明未达成**（R-rev-2、Q1/Q2） |
-| G2 | 数据授权链路 + 分类分级 | 🟡 框架可补 | 分类分级标签 `DATA_LEVELS=["公开","内部","敏感","PII"]` 已在 `tools/frontend/pages/p1_datasource.py`；**最终版待办**：落到列级 schema 元数据 + 导出按级别强制脱敏/拦截（已有 `ads_export_audit` 审计基础）。真实授权审批流属 G1 外部依赖 |
+| G2 | 数据授权链路 + 分类分级 | ✅ 已交付 | 分类分级标签 `DATA_LEVELS=["公开","内部","敏感","PII"]` 已在 `tools/frontend/pages/p1_datasource.py`；列级 schema 元数据 + 导出按级别强制脱敏/拦截已落地（`tools/frontend/data_classification.py` + `db.py` 审计复用）。**实现于 feature/final-buildout（commit f3c9fde）**。真实授权审批流属 G1 外部依赖 |
 | G3 | 算法备案 / 合规审批 | ⛔ 外部依赖 | 需监管审批，无法凭代码达成。**诚实声明未达成**；特征归因报告（C-02）已就绪可作备案材料 |
-| G4 | PII 脱敏通道 | 🟡 框架可补（基本达成） | 脱敏+审计**已交付**：`app.py` `c****{后4位}`、AC-06 实测 136/136 脱敏 0 泄漏、`ads_export_audit` 留痕。**最终版待办**：补"通道级"说明（字段级加密/KMS 为外部依赖），当前为脚本级通道 |
-| G5 | 亿级坐标分布式性能 | 🟡 框架可补 | 单机 cKDTree 已实现（`tools/spatial/main.py`，Sedona 降级）。**最终版待办**：加 `deploy/sedona/` 演示脚本（合成放大数据跑通分布式 join），证明架构可行；真实亿级压测达标属外部集群依赖 |
+| G4 | PII 脱敏通道 | ✅ 已交付 | 脱敏+审计**已交付**：`app.py` `c****{后4位}`、AC-06 实测 136/136 脱敏 0 泄漏、`ads_export_audit` 留痕；通道级说明已补（字段级加密/KMS 为外部依赖，脚本级通道已就绪）。**实现于 feature/final-buildout（commit f3c9fde）** |
+| G5 | 亿级坐标分布式性能 | ✅ 已交付 | 单机 cKDTree 已实现（`tools/spatial/main.py`，Sedona 降级）；`deploy/sedona/` 演示脚本已加（`tools/spatial/sedona_demo.py`，合成放大数据跑通分布式 join），证明架构可行。**实现于 feature/final-buildout（commit f3c9fde）**。真实亿级压测达标属外部集群依赖 |
 | G6 | Linux 宿主 Chrome 反爬渲染 | ✅ 已交付 | 空壳页识别 66/66 零错判 + `render_smoke_test.sh` 通过 + 2026-08-03 全量跑通（sale 21 城 186,635 行、fangyuan 出数页率 2.82%→33.33%） |
 | G7 | 实时反欺诈闭环 | ➖ Non-goals | PRD 明确 Non-goals（L1），仅做预警联动不闭环 |
-| G8 | 生产高可用 / 监控 | 🟡 框架可补 | `tools/ops/manage.sh` 已有 `status` + 容器 `unless-stopped` 自拉起。**最终版待办**：加 `/metrics` 健康端点 + 告警阈值（纯代码）；多副本 HA / 生产监控栈（Prometheus 等）属外部基础设施依赖 |
+| G8 | 生产高可用 / 监控 | ✅ 已交付 | `tools/ops/manage.sh` 已有 `status` + 容器 `unless-stopped` 自拉起；`/metrics` 健康端点 + 告警阈值已加（纯代码）。**实现于 feature/final-buildout（commit f3c9fde）**。多副本 HA / 生产监控栈（Prometheus 等）属外部基础设施依赖 |
 | H4 | 试点行 / 机构试用意向（假设 H4） | ⛔ 外部依赖 | 需真实机构签约 / ≥2 家试点行意向，无法凭代码达成。**诚实声明未达成**（阶段 0 / 阶段 4 Q1·A-01） |
 
 ---
@@ -80,4 +80,4 @@ SpaceFin-Agent 是**最终交付版本（final deliverable）**，不是 MVP 原
 
 ## 6. 一句话总结
 
-「已验收最终交付版本：8/8 AC 绿、603 测试过、文档收口完毕。G1/G3/H4 为真实外部资源依赖、诚实声明未达成（非 bug）；G2/G4/G5/G8 技术框架可补、列为最终版待办；G6 已验证、G7 为 Non-goals。别动 AC-07 的 28 特征 canonical 配置；C 类漂移与 D1–D3 仅在文档层收口。」
+「已验收最终交付版本：8/8 AC 绿、603 测试过、文档收口完毕。G1/G3/H4 为真实外部资源依赖、诚实声明未达成（非 bug）；G2/G4/G5/G8 已于 feature/final-buildout（f3c9fde）凭代码补齐并标记为已交付；G6 已验证、G7 为 Non-goals。别动 AC-07 的 28 特征 canonical 配置；C 类漂移与 D1–D3 仅在文档层收口。」

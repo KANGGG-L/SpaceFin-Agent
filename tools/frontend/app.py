@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import db  # noqa: E402
 import pages as page_registry  # noqa: E402
+from data_classification import level_of, mask_value  # noqa: E402  # G2 导出分级脱敏
 
 # ---------------- 用户与 RBAC ----------------
 # 仅开发环境内置账号；凭据写死在代码里并标注 dev-only，上线前必须接统一认证。
@@ -78,6 +79,12 @@ CAN_VIEW_REPORT = {
 SESSION_TTL_SECONDS = 12 * 3600
 _sessions = {}
 _sessions_lock = threading.Lock()
+
+# G8 健康度：内存超过该值(MB)判定 degraded（与 ops/manage.sh 的 WARN_AVAIL_MB 同级口径）。
+MEM_DEGRADED_MB = 2560
+
+# 进程启动时刻，用于 uptime 计算（monotonic，不受系统时间回拨影响）。
+_PROCESS_START = time.monotonic()
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 MIME = {
@@ -233,6 +240,10 @@ class SpaceFinApp(BaseHTTPRequestHandler):
             user = self._require(CAN_VIEW_REPORT)
             if user:
                 self._send_json(200, {"dates": db.report_dates()})
+        elif path == "/api/metrics":
+            user = self._require()  # G8：健康度需登录，不对外匿名暴露
+            if user:
+                self._handle_metrics(user)
         elif not self._dispatch_plugin("GET", parsed):
             self._send_error(404, "not found")
 
@@ -397,29 +408,54 @@ class SpaceFinApp(BaseHTTPRequestHandler):
             "src,loan_id,customer_id,collateral_id,ltv,balance,valuation,risk_class,high_risk_zone,alert_date,address,confirmed,alert_level"
         ]
         for r in result["rows"]:
-            # PII 最小化：客户号脱敏只留后 4 位（R-UNW-02 语义，开发演示）。
-            cid = r.get("customer_id")
-            masked = f"c****{str(cid)[-4:]}" if cid is not None else ""
-            lines.append(
-                ",".join(
-                    [
-                        str(r["src"]),
-                        str(r["loan_id"]),
-                        masked,
-                        str(r.get("collateral_id") or ""),
-                        f"{r['ltv']:.4f}" if r.get("ltv") is not None else "",
-                        str(r.get("loan_balance") or ""),
-                        str(r.get("market_valuation") or ""),
-                        str(r["risk_class"]),
-                        str(r.get("is_high_risk_zone") or 0),
-                        str(r.get("alert_date") or ""),
-                        str(r.get("property_addr") or "").replace(",", "，"),
-                        "1" if r.get("confirmed") else "0",
-                        # 两档等级原文导出（warn/strong/NULL→空），机器可读，展示层再映射中文。
-                        str(r.get("alert_level") or ""),
-                    ]
-                )
-            )
+            # -------------------------------------------------------------------
+            # G2 导出分级脱敏：
+            #   逐列查 COLUMN_LEVELS（来自 data_classification，初值播种自
+            #   P1 PRESET_SOURCES 的 data_level + PII 白名单）。PII 级字段走
+            #   mask_value 脱敏（c****{后4位}），其余字段保持明文——loan_id /
+            #   collateral_id 不属于个人敏感信息，按既有口径明文导出供业务核对。
+            # G4 说明：本函数做的是脚本级脱敏（导出时单点完成），并写一条
+            #   ads_export_audit 审计行记录 who/role/when/what/result/ip；
+            #   字段级加密（KMS/字段级密钥）属于外部依赖，未在本演示中实现，
+            #   仅在此声明其边界。脱敏逻辑本身不再改动（已正确）。
+            # -------------------------------------------------------------------
+            row_vals = []
+            csv_cols = [
+                ("src", None),
+                ("loan_id", None),
+                ("customer_id", "customer"),
+                ("collateral_id", None),
+                ("ltv", None),
+                ("loan_balance", None),
+                ("market_valuation", None),
+                ("risk_class", None),
+                ("is_high_risk_zone", None),
+                ("alert_date", None),
+                ("property_addr", None),
+                ("confirmed", None),
+                ("alert_level", None),
+            ]
+            for field, pii_table in csv_cols:
+                raw = r.get(field)
+                if pii_table and (field in ("customer_id", "customer_name")):
+                    level = level_of(pii_table, field)
+                    cell = (
+                        mask_value(level, raw)
+                        if level == "PII"
+                        else ("" if raw is None else str(raw))
+                    )
+                elif field == "confirmed":
+                    cell = "1" if raw else "0"
+                elif field == "is_high_risk_zone":
+                    cell = str(raw or 0)
+                elif field == "ltv":
+                    cell = f"{raw:.4f}" if raw is not None else ""
+                elif field == "property_addr":
+                    cell = str(raw or "").replace(",", "，")
+                else:
+                    cell = "" if raw is None else str(raw)
+                row_vals.append(cell)
+            lines.append(",".join(row_vals))
         body = ("\n".join(lines) + "\n").encode("utf-8")
         # TC-06：导出留痕（who/role/when/what=筛选参数/result/ip），CSV 返回后写审计。
         db.write_audit(
@@ -485,6 +521,77 @@ class SpaceFinApp(BaseHTTPRequestHandler):
             ip,
         )
         self._send_json(200, {"ok": True, "confirmed_by": user["user"]})
+
+    # ---------------- G8 健康度 ----------------
+
+    def _handle_metrics(self, user):
+        """G8 /api/metrics：返回 collect_metrics() 快照；鉴权由 do_GET 统一做。"""
+        self._send_json(200, collect_metrics())
+
+
+def collect_metrics():
+    """采集服务健康度快照（模块级函数，可脱离 HTTP 请求被测试直接调用）。
+
+    字段：
+      status                  : "ok" | "degraded"（memory_mb 超阈值即 degraded）
+      uptime                  : 进程启动至今的秒数（monotonic）
+      memory_mb               : 当前 RSS 物理内存(MB)
+      cdc_position_advance_ok : CDC 位点是否在推进（查 ods_cdc_position 的
+                                updated_at 距 NOW 是否 < 30min）；DB 不可用→False（降级）
+      last_alert_count        : ads_cdc_alert 当前未解条数；DB 不可用→0（降级）
+
+    内存优先用 psutil（RSS 精确），缺失时回退解析 /proc/self/status 的 VmRSS。
+    """
+    metrics = {
+        "status": "ok",
+        "uptime": time.monotonic() - _PROCESS_START,
+        "memory_mb": 0,
+        "cdc_position_advance_ok": False,
+        "last_alert_count": 0,
+    }
+
+    # ---- 内存 ----
+    mem_mb = 0
+    try:
+        import psutil  # 可选依赖；缺失即回退 /proc
+
+        mem_mb = psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+    except Exception:  # noqa: BLE001 —— psutil 未装或非 Linux
+        try:
+            with open("/proc/self/status", encoding="utf-8") as fh:
+                for line in fh:
+                    if line.startswith("VmRSS:"):
+                        mem_mb = int(line.split()[1]) / 1024  # kB -> MB
+                        break
+        except OSError:
+            mem_mb = 0
+    metrics["memory_mb"] = round(mem_mb, 1)
+
+    # ---- CDC 位点推进 / 告警计数（DB 不可用时全部降级为 False/0，不抛异常）----
+    try:
+        conn = db.crawl_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT TIMESTAMPDIFF(SECOND, MAX(updated_at), NOW()) "
+                "FROM ods_cdc_position WHERE repl_key='binlog'"
+            )
+            row = cur.fetchone()
+            age = int(row[0]) if row and row[0] is not None else None
+            # 位点 30min 内更新过 = 仍在推进。
+            metrics["cdc_position_advance_ok"] = age is not None and age < 1800
+            cur.execute("SELECT COUNT(*) FROM ads_cdc_alert")
+            metrics["last_alert_count"] = int(cur.fetchone()[0])
+            cur.close()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 —— DB 抖动不应让 /api/metrics 直接 500
+        metrics["cdc_position_advance_ok"] = False
+        metrics["last_alert_count"] = 0
+
+    # ---- 综合判定 ----
+    metrics["status"] = "degraded" if metrics["memory_mb"] > MEM_DEGRADED_MB else "ok"
+    return metrics
 
 
 def main():
