@@ -77,7 +77,7 @@
 | L2 空间特征（高危区/POI/通勤）               | L2                               | ✅ 已接入（单机近似，降级 Sedona）                                                                         | Sprint 3    | [spatial-feature.md](docs/tech/components/spatial-feature.md)                                                                                    |
 | 预警推送（I-05 贷后保全）                    | L4 应用接口                      | ✅ 已接入（T+1 推送）                                                                                      | Sprint 4    | [alerting-iv05.md](docs/tech/components/alerting-iv05.md)                                                                                        |
 | 1104 报送（G11 三出口校验）                  | L5 合规                          | ✅ 已接入                                                                                                  | Sprint 4    | [reporting-1104.md](docs/tech/components/reporting-1104.md)                                                                                      |
-| 前端驾驶舱（S5）                             | L5 展示                          | ✅ 已接入（端口 8500，零依赖插件架构）                                                                     | Sprint 5    | [frontend README](tools/frontend/README.md)                                                                                                      |
+| 前端驾驶舱（S5）                             | L5 展示                          | ✅ 已接入（端口 8500，零依赖插件架构）                                                                     | Sprint 5    | [frontend.md](docs/tech/components/frontend.md) · [frontend README](tools/frontend/README.md)                                                    |
 | 运维（容器恢复 + 资源管家）                  | 运维                             | ✅ 已接入                                                                                                  | —           | [ops.md](docs/tech/components/ops.md)                                                                                                            |
 | 倒排索引 / Superset 看板                     | L5                               | ⏳ 待接入                                                                                                  | Sprint 6    | —                                                                                                                                                |
 
@@ -173,7 +173,7 @@ make down              # 停止
 | @commitlint/cli                 | 19.8.1                                         | 提交信息校验                                                                                                                             |
 | @commitlint/config-conventional | 19.8.1                                         | Conventional Commits 规则                                                                                                                |
 
-> 注：本机有两套 anaconda（PATH 上是 `/opt/anaconda3`，env 实际在 `/Users/ethan/anaconda3/envs/`），用 `conda` 命令操作 `spark` 环境须先 `conda activate spark`，或直接使用 `/Users/ethan/anaconda3/envs/spark/bin/...` 路径。
+> 注：本机为 Linux 宿主（`/home/azureuser`），conda 为 **Miniforge**（位于 `~/miniforge`），唯一环境 `spark`（Python 3.10.18）。`conda` 不在默认 PATH，操作 `spark` 环境前先 `conda activate spark` 或 `source ~/miniforge/etc/profile.d/conda.sh`；Node v24（含 npm/npx）位于 `~/node24/bin`，同样不在默认 PATH，提交前先 `export PATH="$HOME/node24/bin:$PATH"`。
 
 初始化（在仓库根目录执行）：
 
