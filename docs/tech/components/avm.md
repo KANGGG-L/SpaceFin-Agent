@@ -180,6 +180,7 @@ val = predict.estimate_total_price(               # 返回总价（元）
 |---|---|
 | `output/avm/model.joblib` | 模型 + 编码字典（encoders/eb_k/nn）+ cities + 特征元数据 + smooth_k/smooth_mode + version |
 | `output/avm/avm_report.json` | 指标、清洗统计（cleaning 含分城市明细）、误差分解、特征缺失率、置信分层与覆盖率曲线、version |
+| `output/avm/attribution_report.json` | 特征归因可解释报告（C-02）：permutation importance 的 Top 特征与全特征 mean/std，见第 10 节 |
 
 版本号 `YYYY-MM-DD-rN`（同日重训递增 r2/r3...），随产物落盘，供 predict/风险引擎追踪
 「哪版模型在跑」。
@@ -244,3 +245,47 @@ val = predict.estimate_total_price(               # 返回总价（元）
 - **城市间差异 85% 由数据属性决定**：每城 MAPE 对「小区标签密度」corr=-0.823、对「城内
   价格离散度」corr=+0.836，二元回归 R²=0.848——gz 的 oracle 下界本身就有 24.72%，模型
   能力并非瓶颈。
+
+## 10. 特征归因（C-02）：模型在「看」什么
+
+PRD R-cmp-2 / 设计 P9 要求 AVM 输出可解释报告：哪些特征主导估值、各特征的边际贡献量级。
+产物 `output/avm/attribution_report.json`（**训练收尾自动生成**；也可独立跑
+`python tools/avm/attribution.py --model output/avm/model.joblib --out-dir output/avm`）。
+
+### 10.1 方法 = permutation importance，**不是 SHAP**（诚实标注）
+
+- `shap` **未安装**（本项目零依赖风格，不引入新重依赖）；
+- HistGBR 在 **quantile loss 下可能没有 `feature_importances_`**；
+- permutation importance 模型无关、与 loss 无关：把测试集某特征列打乱
+  `n_repeats` 次，测「neg MAPE 恶化多少」，恶化越多 = 该特征越重要。
+  report `method` 字段为 `permutation_importance`，不冒充 SHAP。
+
+### 10.2 评分口径与报告结构
+
+评分：模型输出 log(单价)，评分时 `exp` 回**单价口径**再算 neg MAPE——总价 MAPE =
+单价 MAPE（乘性误差），与 avm_report.json 总价口径一致；`scoring` 字段标注
+`neg_mean_absolute_percentage_error`。
+
+| 字段 | 含义 |
+|---|---|
+| version / generated_at | 模型版本 / 生成时间 |
+| method | `permutation_importance`（诚实标注，非 SHAP） |
+| n_repeats / seed | 打乱次数 / 随机种子（默认 5 / 42，可复现） |
+| scoring / scoring_note | 评分口径与说明 |
+| n_test | 评分测试集行数（CLI 从库重取、seed=42 复现切分） |
+| top_features | 按 importance 降序，含中文名/说明（28 特征描述表复用 §4，映射不出留英文名） |
+| full_importances | 全部 28 特征 mean/std（不随 top_n 截断） |
+
+### 10.3 结果（canonical r11，测试集 8,041 行，neg MAPE 降幅口径）
+
+| 排名 | 特征 | importance (MAPE pp) | 说明 |
+|---|---|---|---|
+| 1 | comm_mean | 11.31 | 小区目标编码均值（**位置信号主载体**） |
+| 2 | comm_median | 10.31 | 小区目标编码中位数 |
+| 3 | city_code | 7.12 | 城市编码 |
+| 4 | floor_total | 2.43 | 总层数（楼层区位/总层数的粗代理） |
+| 5 | area | 1.04 | 面积 |
+
+解读：**定价信号几乎全部集中在目标编码的位置特征**（小区/城市），与 §9.3「城市间差异
+85% 由数据属性决定」、§5「有小区无坐标段反而最好」互相印证；属性特征（面积/房型/楼龄）
+的边际贡献远小于位置。归因报告不改变模型本身，只用于向业务侧解释「模型依据什么定价」。

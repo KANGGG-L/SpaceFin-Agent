@@ -23,14 +23,15 @@ def _load():
         sys.path.remove(AVM_DIR)
     sys.path.insert(0, AVM_DIR)
 
+    import attribution  # noqa: F401
     import data_clean  # noqa: F401  (import 时载入 community_vocab.json，只读)
     import predict  # noqa: F401
     import train  # noqa: F401
 
-    return data_clean, predict, train
+    return attribution, data_clean, predict, train
 
 
-data_clean, predict, train = _load()
+attribution, data_clean, predict, train = _load()
 
 
 # ------------------------------------------------------------------ 假模型产物
