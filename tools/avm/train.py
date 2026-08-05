@@ -683,6 +683,13 @@ def main() -> None:
     ap.add_argument("--l2", type=float, default=2.0, help="HistGBR l2_regularization")
     args = ap.parse_args()
 
+    if args.loss != "quantile" or args.smooth_mode != "eb":
+        print(
+            f"⚠️ 非 canonical r11 配置（loss={args.loss} smooth_mode={args.smooth_mode}），"
+            "45% 覆盖 MAPE 可能不达 AC-07（9.88%）；请用 --loss quantile --quantile 0.45 --smooth-mode eb",
+            flush=True,
+        )
+
     t0 = time.time()
     env = load_env()
     import pymysql

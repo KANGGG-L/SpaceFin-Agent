@@ -136,7 +136,7 @@ score = log1p(cnt±2%) + 0.5·log1p(cnt±5%)   # 同(城市, 小区, 房型) 且
 PY=tools/orchestrator/.venv/bin/python
 
 # 标准训练（读 spacefin_crawler.crawl_housing_sale，app 账号只读，走仓库根 .env）
-$PY tools/avm/train.py --out-dir output/avm
+$PY tools/avm/train.py --out-dir output/avm --loss quantile --quantile 0.45 --smooth-mode eb
 
 # 覆盖样本门槛（清洗后样本 < --min-train-samples 默认 100 时 exit 3，降级人工）
 $PY tools/avm/train.py --min-train-samples 500
