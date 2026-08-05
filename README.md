@@ -70,8 +70,8 @@
 | └ Kubernetes 分布式集群 | 采集横向扩展 | ⏸ 清单齐备（待集群） | 数据源探索 | [k8s-crawler-cluster.md](docs/tech/components/k8s-crawler-cluster.md) |
 | MySQL binlog CDC（I-01） | L0 变更接入 | ✅ 已接入 | Sprint 1 | [cdc-downstream.md](docs/tech/components/cdc-downstream.md) |
 | └ CDC 下游消费链 | L0 增量同步 | ✅ 已接入（改一笔 loan 20s 内下游同步） | Sprint 1 | [cdc-downstream.md](docs/tech/components/cdc-downstream.md) |
-| Doris + MinIO 湖仓 | L0 分层 | ⏳ 待接入 | Sprint 1 | — |
-| Kafka + Flink 实时 | L1 | ⏳ 待接入 | Sprint 2 | — |
+| Doris + MinIO 湖仓 | L0 分层 | ✅ 已接入（ODS/DWD/DWS/ADS 四层 24 表，与 MySQL 对账一致） | Sprint 1 | [doris-lake.md](docs/tech/components/doris-lake.md) |
+| Kafka + Flink 实时 | L1 | ✅ 已接入（CDC→Kafka→Flink 实时预警，3s 端到端；含 rebuild.sh 一键重建） | Sprint 2 | [kafka-flink-realtime.md](docs/tech/components/kafka-flink-realtime.md) |
 | AVM（GBDT+空间特征） | L3 | ✅ 已接入（MAPE 16.6% vs 基线 22.6%，数据质量修复后可达 10% 目标） | Sprint 2 | [tools/avm/README.md](tools/avm/README.md) · [cdc-downstream.md](docs/tech/components/cdc-downstream.md) |
 | L2 空间特征（高危区/POI/通勤） | L2 | ✅ 已接入（单机近似，降级 Sedona） | Sprint 3 | [spatial-feature.md](docs/tech/components/spatial-feature.md) |
 | 倒排索引 / Superset 看板 | L5 | ⏳ 待接入 | Sprint 6 | — |
