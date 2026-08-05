@@ -1,6 +1,6 @@
 # 组件技术说明 · S5 前端驾驶舱（L5 展示层）
 
-> **状态**：✅ 已实施（2026-08-05 落地，feature/s5-frontend，含 P1/P3/P5/P6/P7 插件页）
+> **状态**：✅ 已实施（2026-08-05 落地，feature/s5-frontend，含 P1/P3/P5/P6/P7 插件页；同日收口补 P9/P10，达成设计评审 D-01 十页全覆盖）
 > **能力地图层级**：L5 展示层 — 资产质量监控驾驶舱（PRD §7.3 语义）
 > **所属系统**：tools/frontend（数据源 spacefin_crawler.ads_* + spacefin.collateral）
 
@@ -14,7 +14,7 @@
 一个零依赖的 Web 应用，并在此之上做 RBAC 访问控制。
 
 本组件做四件事：
-1. **只读展示**：内置三页（资产质量驾驶舱 / LTV 预警列表 / 1104 报送）+ 5 个插件页面（P1/P3/P5/P6/P7）；
+1. **只读展示**：内置三页（资产质量驾驶舱 / LTV 预警列表 / 1104 报送）+ 7 个插件页面（P1/P3/P5/P6/P7/P9/P10，覆盖设计评审 10 页清单）；
 2. **RBAC**：登录 + 服务端每个 API 强制角色校验（未登录 401 / 角色不符 403），前端只按 `/api/me` 裁剪导航；
 3. **预警确认留痕**：风控/管理员「确认」写 `ads_alert_confirm`（不改预警链路既有表）；
 4. **操作审计**：导出/确认写 `ads_export_audit`（who/role/when/what/result/ip，对应 TC-06「审计日志已记录」）。
@@ -40,7 +40,9 @@ tools/frontend/
 │   ├── p3_migration.py    # P3 五级分类迁徙矩阵（admin/risk/da）
 │   ├── p5_spatial.py      # P5 空间风险画像（admin/risk/da）
 │   ├── p6_policy.py       # P6 空间惩罚项配置（admin/risk/da）
-│   └── p7_avm.py          # P7 AVM 估值管理（admin/risk/da）
+│   ├── p7_avm.py          # P7 AVM 估值管理（admin/risk/da）
+│   ├── p9_compliance_audit.py  # P9 合规审计/特征归因（admin/risk，读 ads_export_audit/ads_report_alert/output/avm/attribution_report.json）
+│   └── p10_sandbox.py     # P10 策略沙盒推演（admin/risk/da，仅框架 + R-OPT-01 未校准标记，读 output/persona/persona_report.json）
 └── static/
     ├── index.html         # 登录视图 + 三个内置页面的 section 骨架
     ├── app.js             # 前端逻辑：登录/导航/内置三页渲染 + 插件 JS 动态加载
@@ -87,7 +89,7 @@ handler 签名统一为 `handler(ctx) -> dict | (int, dict)`；`ctx` 只暴露 `
 | LTV 预警列表 | `ads_ltv_alerts` ∪ `ads_stream_ltv_alerts` + `spacefin.collateral` + `ads_alert_confirm` | 合并分页列表（LTV/估值/余额/抵押物地址/高危区标记/来源/确认状态）；风险类/LTV 区间/日期/来源筛选；风控「确认」；导出 CSV（客户号脱敏只留后 4 位） |
 | 1104 报送 | `ads_1104_g11`、`dws_risk_class`、`ads_report_alert` | G11 五级 + 合计表；口径一致性实时校验（以 dws 明细聚合为裁判，逻辑同 `tools/reporting/main.py`）；阻断告警历史 |
 
-### 插件页面（P1/P3/P5/P6/P7）
+### 插件页面（P1/P3/P5/P6/P7/P9/P10）
 
 | 页面 | 模块 | 数据表 | 说明 |
 |------|------|--------|------|
@@ -96,6 +98,8 @@ handler 签名统一为 `handler(ctx) -> dict | (int, dict)`；`ctx` 只暴露 `
 | 空间风险画像 | `p5_spatial.py`（admin/risk/da） | `ads_spatial_zone`、`dws_spatial_feature`、`dws_risk_class`、`spacefin.collateral` | 高危区总览（zone 列表 + 命中规则 + 建区日期）、单区下钻（实体构成/价格偏离）、区内贷款风险分布 |
 | 空间惩罚项配置 | `p6_policy.py`（admin/risk/da） | `ads_spatial_zone`、`dws_spatial_feature`、`dws_risk_class`、`spacefin.collateral` | 空间惩罚规则 CRUD + 试算预览（改规则后先预览再保存）+ 删除；基于 zone 网格生成（如 LTV 上限、低置信判定） |
 | AVM 估值管理 | `p7_avm.py`（admin/risk/da） | `dws_risk_class`、`spacefin.collateral`、`ads_risk_valuation_alerts` | AVM 估值覆盖与精度、异常估值清单（`ads_risk_valuation_alerts`，按 alert_code 归类）、三分量归因展示（对应 AC-07 / R-UNW-03 口径） |
+| 合规审计 / 特征归因 | `p9_compliance_audit.py`（admin/risk） | `ads_export_audit`、`ads_report_alert`（level=block）、`output/avm/attribution_report.json` | 三块：PII 导出脱敏留痕（TC-06，who/role/when/what/result/ip）、报送阻断告警（AC-05/AC-08「已阻断」态）、SHAP 特征归因报告（产物缺失时降级提示不 500） |
+| 策略沙盒推演 | `p10_sandbox.py`（admin/risk/da） | `output/persona/persona_report.json` | 生成→批评→校准闭环说明框架（D-09 本期仅框架，不实现闭环交互）+ R-OPT-01「未校准」醒目标记（报告含 naive 输出时置顶红色横幅）+ KS/校准轨迹/分布对比证据 |
 
 > 插件页的完整读写语义以其模块 docstring 与 README 为权威；本文只列数据表，不展开页面内部算法。
 
@@ -117,6 +121,8 @@ handler 签名统一为 `handler(ctx) -> dict | (int, dict)`；`ctx` 只暴露 `
 | 预警确认 | ✓ | ✓ | — | — |
 | 预警导出 CSV | ✓ | ✓ | ✓ | — |
 | 1104 报送页 | ✓ | ✓ | ✓ | ✗ 不可见（403） |
+| 合规审计/特征归因（P9） | ✓ | ✓ | ✗ 不可见（403） | ✗ 不可见（403） |
+| 策略沙盒推演（P10） | ✓ | ✓ | ✓ | ✗ 不可见（403） |
 | 插件页 P1/P3/P5/P6/P7 | 全部 | 除 P1 外 | 除 P1 外 | — |
 
 > 权限在服务端每个 API 前强制校验（401 未登录 / 403 角色不符）；前端只根据 `/api/me` 裁剪导航与按钮，
@@ -167,7 +173,7 @@ pkill -f "tools/frontend/app.py"
 | GET | `/api/alerts/export` | admin / risk / da |
 | GET | `/api/report` `/api/report/dates` | admin / risk / da |
 
-插件路由（`/api/datasource*`、`/api/migration`、`/api/spatial*`、`/api/policy*`、`/api/avm*`）由各页面模块
+插件路由（`/api/datasource*`、`/api/migration`、`/api/spatial*`、`/api/policy*`、`/api/avm*`、`/api/compliance_audit`、`/api/sandbox`）由各页面模块
 自行声明，权限 = 该页 `PAGE["roles"]`，服务端统一校验。
 
 ## 9. 已知局限

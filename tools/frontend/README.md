@@ -20,6 +20,8 @@
 | LTV 预警列表 | `ads_ltv_alerts` ∪ `ads_stream_ltv_alerts` + `spacefin.collateral` + `ads_alert_confirm` | 合并分页列表（LTV/估值/余额/抵押物地址/高危区标记/来源/确认状态）；风险类/LTV 区间/日期/来源筛选；风控「确认」；导出 CSV（客户号脱敏） |
 | 1104 报送 | `ads_1104_g11`、`dws_risk_class`、`ads_report_alert` | G11 五级 + 合计表；口径一致性实时校验（以 dws 明细聚合为裁判，逻辑同 `tools/reporting/main.py`）；阻断告警历史 |
 
+插件页（pages/ 下，按设计评审 P1~P10 覆盖）：数据底座接入配置（P1）、五级分类迁徙矩阵（P3）、空间风险画像（P5）、空间惩罚项配置（P6）、AVM 估值管理（P7）、合规审计/特征归因（P9）、策略沙盒推演（P10）。页面清单与 RBAC 以各页模块的 `PAGE` 声明为准（自动发现，无需改动 app.py）。
+
 ## RBAC 角色矩阵（登录 + 服务端强制校验）
 
 | 页面 / 操作 | admin | risk 风控 | da 数据分析师 | postloan 贷后 |
@@ -29,6 +31,9 @@
 | 预警确认 | ✓ | ✓ | — | — |
 | 预警导出 CSV | ✓ | ✓ | ✓ | — |
 | 1104 报送页 | ✓ | ✓ | ✓ | ✗ 不可见（403） |
+| 合规审计/特征归因（P9） | ✓ | ✓ | ✗ 不可见（403） | ✗ 不可见（403） |
+| 策略沙盒推演（P10） | ✓ | ✓ | ✓ | ✗ 不可见（403） |
+| 其余插件页（P1/P3/P5/P6/P7） | 全部 | 除 P1 外 | 除 P1 外 | — |
 
 > 权限在服务端每个 API 前强制校验（401 未登录 / 403 角色不符）；前端只根据 `/api/me` 裁剪导航与按钮，属第二层防御。会话 cookie 带 `HttpOnly`，JS 不可读。
 
@@ -83,3 +88,7 @@ pkill -f "tools/frontend/app.py"
 | POST | `/api/alerts/confirm` | admin / risk |
 | GET | `/api/alerts/export` | admin / risk / da |
 | GET | `/api/report` `/api/report/dates` | admin / risk / da |
+| GET | `/api/compliance_audit` | admin / risk |
+| GET | `/api/sandbox` | admin / risk / da |
+
+> 插件路由（`/api/datasource*`、`/api/migration`、`/api/spatial*`、`/api/policy*`、`/api/avm*`、`/api/compliance_audit`、`/api/sandbox`）由各页面模块在 `PAGE["routes"]` 自行声明，权限 = 该页 `PAGE["roles"]`，服务端统一校验。
