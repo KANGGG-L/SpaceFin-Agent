@@ -1,0 +1,95 @@
+# ==============================================================================
+# SpaceFin Agent · MinIO + Doris 湖仓组件（L0 数据底座）
+# ------------------------------------------------------------------------------
+# 拓扑：单 MinIO + 单 Doris FE + 单 Doris BE（开发环境最小节点，官方镜像）。
+#   - minio/minio:latest      —— S3 对象存储，存放房产 Parquet 数据湖文件
+#   - apache/doris:fe-2.1.9   —— Doris 前端（FE）：元数据/查询入口
+#   - apache/doris:be-2.1.9   —— Doris 后端（BE）：存储与计算
+#
+# 网络：全部使用 host 网络模式。
+#   官方 quick-start（doris.apache.org/docs/2.1/gettingStarted/quick-start）在 Linux
+#   上即用 host 网络，FE 以 FE_SERVERS=fe1:127.0.0.1:9010 自举并只绑定 127.0.0.1，
+#   BE 通过 BE_ADDR 注册到 FE。host 模式下三个服务共享宿主回环地址，彼此以
+#   127.0.0.1 互通，规避了 bridge 网络中 FE 绑定 127.0.0.1 导致跨容器不可达的问题。
+#
+# 内存预算（宿主仅 15G，必须逐容器设上限防 OOM 拖垮整机）：
+#   minio 1G + doris-fe 3G（JVM 堆 2G）+ doris-be 5G（BE mem_limit 4G）≈ 9G
+#   数据目录：/srv/spacefin-lake（宿主磁盘，仓库外，避免数据进 git 扫描范围）
+# ==============================================================================
+
+services:
+  # --------------------------------------------------------------------------
+  # MinIO 对象存储：房产 Parquet 数据湖的物理底座（湖）
+  # --------------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    container_name: spacefin-minio
+    restart: unless-stopped
+    network_mode: host
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: spacefin_minio
+      MINIO_ROOT_PASSWORD: spacefin_minio_dev_only
+      TZ: Asia/Shanghai
+    volumes:
+      # 数据与配置持久化到宿主，容器重建不丢桶与对象
+      - /srv/spacefin-lake/minio/data:/data
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # --------------------------------------------------------------------------
+  # Doris FE：元数据管理 + 查询规划/执行入口（仓的大脑）
+  # --------------------------------------------------------------------------
+  doris-fe:
+    image: apache/doris:fe-2.1.9
+    container_name: spacefin-doris-fe
+    restart: unless-stopped
+    network_mode: host
+    hostname: doris-fe
+    environment:
+      # 单 FE 自举：自身即 master（FE_ID=1 对应 FE_SERVERS 里第一个地址）
+      FE_SERVERS: "fe1:127.0.0.1:9010"
+      FE_ID: "1"
+      TZ: Asia/Shanghai
+    volumes:
+      # 元数据目录必须单独持久化：meta_dir 默认 ${DORIS_HOME}/doris-meta
+      - /srv/spacefin-lake/doris/fe-meta:/opt/apache-doris/fe/doris-meta
+      - /srv/spacefin-lake/doris/logs/fe:/opt/apache-doris/fe/log
+      # 覆盖镜像默认 fe.conf：默认 JVM 堆 8G 超出宿主预算，压到 2G（见 conf/fe.conf 注释）
+      - ./conf/fe.conf:/opt/apache-doris/fe/conf/fe.conf
+    mem_limit: 3g
+    healthcheck:
+      test: ["CMD", "mysql", "-uroot", "-P9030", "-h127.0.0.1", "-e", "select 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 30
+      start_period: 90s
+
+  # --------------------------------------------------------------------------
+  # Doris BE：数据存储与计算执行（仓的算力）
+  # --------------------------------------------------------------------------
+  doris-be:
+    image: apache/doris:be-2.1.9
+    container_name: spacefin-doris-be
+    restart: unless-stopped
+    network_mode: host
+    hostname: doris-be
+    environment:
+      # FE 地址（edit_log_port 9010）与本 BE 心跳地址 127.0.0.1:9050
+      FE_SERVERS: "fe1:127.0.0.1:9010"
+      BE_ADDR: "127.0.0.1:9050"
+      TZ: Asia/Shanghai
+    depends_on:
+      - doris-fe
+    volumes:
+      # storage_root_path 默认 ${DORIS_HOME}/storage，需持久化否则数据随容器消失
+      - /srv/spacefin-lake/doris/be-storage:/opt/apache-doris/be/storage
+      - /srv/spacefin-lake/doris/logs/be:/opt/apache-doris/be/log
+      # 覆盖默认 be.conf：把 mem_limit 从默认 80% 宿主内存压到 4G（见 conf/be.conf 注释）
+      - ./conf/be.conf:/opt/apache-doris/be/conf/be.conf
+    mem_limit: 5g
