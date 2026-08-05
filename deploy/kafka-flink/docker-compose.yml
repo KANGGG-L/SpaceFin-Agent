@@ -50,10 +50,12 @@ services:
       - "9092:9092"
       - "9093:9093"
     volumes:
-      # 数据目录持久化：KRaft 元数据 + topic 日志。无此挂载时任何容器重建
-      # （compose up -d 改配置、宿主重启）都会清空全部 topic 数据——曾实测
-      # 历史 66 条事件随重建丢失。目录放仓库外，避免进 git 扫描。
-      - /srv/spacefin-lake/kafka/data:/var/lib/kafka/data
+      # 数据目录持久化：KRaft 元数据 + topic 日志。注意必须挂到镜像实际的 log.dirs
+      # （apache/kafka 镜像默认 /tmp/kafka-logs，见容器内 ls /tmp/kafka-logs），
+      # 挂到 /var/lib/kafka/data 是无效的——曾实测该目录始终为空、容器重建即丢全部
+      # topic/元数据（cluster id/topicId 每次重建都变，是 Flink source 状态错乱诱因之一）。
+      # 目录放仓库外，避免进 git 扫描。
+      - /srv/spacefin-lake/kafka/data:/tmp/kafka-logs
     networks:
       - spacefin
 
