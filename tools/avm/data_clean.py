@@ -1354,6 +1354,8 @@ def save_name_vocab(path: str = VOCAB_PATH) -> None:
     tmp = f"{path}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
+        # 末尾补换行：与仓库 HEAD 版本字节级一致，重跑不产生工作树 diff。
+        f.write("\n")
     os.replace(tmp, path)
 
 

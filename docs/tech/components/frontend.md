@@ -98,7 +98,7 @@ handler 签名统一为 `handler(ctx) -> dict | (int, dict)`；`ctx` 只暴露 `
 | 空间风险画像 | `p5_spatial.py`（admin/risk/da） | `ads_spatial_zone`、`dws_spatial_feature`、`dws_risk_class`、`spacefin.collateral` | 高危区总览（zone 列表 + 命中规则 + 建区日期）、单区下钻（实体构成/价格偏离）、区内贷款风险分布 |
 | 空间惩罚项配置 | `p6_policy.py`（admin/risk/da） | `ads_spatial_zone`、`dws_spatial_feature`、`dws_risk_class`、`spacefin.collateral` | 空间惩罚规则 CRUD + 试算预览（改规则后先预览再保存）+ 删除；基于 zone 网格生成（如 LTV 上限、低置信判定） |
 | AVM 估值管理 | `p7_avm.py`（admin/risk/da） | `dws_risk_class`、`spacefin.collateral`、`ads_risk_valuation_alerts` | AVM 估值覆盖与精度、异常估值清单（`ads_risk_valuation_alerts`，按 alert_code 归类）、三分量归因展示（对应 AC-07 / R-UNW-03 口径） |
-| 合规审计 / 特征归因 | `p9_compliance_audit.py`（admin/risk） | `ads_export_audit`、`ads_report_alert`（level=block）、`output/avm/attribution_report.json` | 三块：PII 导出脱敏留痕（TC-06，who/role/when/what/result/ip）、报送阻断告警（AC-05/AC-08「已阻断」态）、SHAP 特征归因报告（产物缺失时降级提示不 500） |
+| 合规审计 / 特征归因 | `p9_compliance_audit.py`（admin/risk） | `ads_export_audit`、`ads_report_alert`（level=block）、`output/avm/attribution_report.json` | 三块：PII 导出脱敏留痕（TC-06，who/role/when/what/result/ip）、报送阻断告警（AC-05/AC-08「已阻断」态）、permutation importance 特征归因报告（产物缺失时降级提示不 500） |
 | 策略沙盒推演 | `p10_sandbox.py`（admin/risk/da） | `output/persona/persona_report.json` | 生成→批评→校准闭环说明框架（D-09 本期仅框架，不实现闭环交互）+ R-OPT-01「未校准」醒目标记（报告含 naive 输出时置顶红色横幅）+ KS/校准轨迹/分布对比证据 |
 
 > 插件页的完整读写语义以其模块 docstring 与 README 为权威；本文只列数据表，不展开页面内部算法。

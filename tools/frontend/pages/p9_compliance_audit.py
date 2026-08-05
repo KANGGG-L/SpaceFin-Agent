@@ -9,7 +9,7 @@
   的落点——detail 里的 rows 字段即导出行数，脱敏规则见 LTV 预警导出（客户号只留后 4 位）。
 - 报送告警：只取 `ads_report_alert` 中 `alert_level='block'` 的阻断级记录，
   对应设计评审 §2.2 报送状态机里的「已阻断」态（AC-05 / AC-08 的界面证据）。
-- 特征归因：读取 `output/avm/attribution_report.json`（dev-attrib 本轮产出的 SHAP 归因）。
+- 特征归因：读取 `output/avm/attribution_report.json`（dev-attrib 本轮产出的 permutation importance 归因）。
   归因产物在 output/ 下（.gitignore，有意为之），**文件不存在是正常路径**——页面降级
   显示「归因报告未生成，请先运行 tools/avm 训练」，绝不 500。
 
@@ -35,7 +35,7 @@ import db  # noqa: E402
 _REPO_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
-# 特征归因产物：dev-attrib 本轮产出（SHAP），与 avm_report.json 同目录。
+# 特征归因产物：dev-attrib 本轮产出（permutation importance），与 avm_report.json 同目录。
 _ATTRIBUTION_FILE = os.path.join(_REPO_ROOT, "output", "avm", "attribution_report.json")
 
 # 展示上限：审计明细是留痕流水，只显示最近一批即可，完整追溯交给 DBA。
@@ -128,7 +128,7 @@ def get_compliance_audit(ctx):
         attribution = {
             "available": False,
             # 降级提示给出重建命令（产物 .gitignore，克隆后需重跑训练），与 p7 的口径一致。
-            "message": "归因报告未生成，请先运行 tools/avm 训练（产出 "
+            "message": "归因报告未生成（permutation importance），请先运行 tools/avm 训练（产出 "
             f"<code>{rel_path}</code>）。当前展示归因概要的规则框架，待报告产出后自动填充。",
             "path": rel_path,
         }
