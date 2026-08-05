@@ -97,6 +97,43 @@ def test_single_char_residue_keeps_administrative_suffix(addr, expected, why):
     assert valuation._district_from_addr(addr) == expected, why
 
 
+# ================================================================ 小区名解析（AVM community 键）
+
+
+@pytest.mark.parametrize(
+    ("addr", "expected", "why"),
+    [
+        ("惠州市惠城区惠城123号", "惠城", "剥市名+政区后取开头连续中文串，遇数字停"),
+        ("云浮市新兴县锦绣华庭33号", "锦绣华庭", "县级政区后缀同样要剥"),
+        ("东莞市万江街道碧桂园凤凰城106号", "碧桂园凤凰城", "直筒子市的街道级地名"),
+        ("珠海市香洲区颐和公馆181号", "颐和公馆", "常规「X市Y区」"),
+        ("中山市西区街道颐和公馆13号", "颐和公馆", "政区后紧跟政区后缀（街道）要再剥一层"),
+        ("天河区体育西路1号", "体育西路", "不带市名前缀也要能解析"),
+    ],
+)
+def test_community_parsed_after_stripping_city_and_district(addr, expected, why):
+    """小区名 = 剥城市+政区后剩余串开头的连续中文串。
+
+    种子地址是「城市市+区名+小区名+门牌号」，小区名正好是政区 token 之后的下一段，
+    与 DWD/AVM 词表里不带政区后缀的小区键同粒度，可直接作 enc["comm"] 的查找键。
+    """
+    assert valuation._community_from_addr(addr) == expected, why
+
+
+@pytest.mark.parametrize(
+    ("addr", "why"),
+    [
+        ("", "空地址"),
+        (None, "空地址"),
+        ("合成地址上海市浦东新区", "合成地址没有真实小区"),
+        ("云浮市云城区", "剥完政区后没有剩余，提不出小区名"),
+        ("广州市123号", "政区后紧跟数字，小区名缺失"),
+    ],
+)
+def test_community_unparseable_yields_none(addr, why):
+    assert valuation._community_from_addr(addr) is None, why
+
+
 # ================================================================ DWD 行情估值
 
 
@@ -246,14 +283,30 @@ def stub_avm(monkeypatch):
     return _install
 
 
-def test_avm_hit_passes_city_code_and_area_through(stub_avm):
+def test_avm_hit_passes_city_code_area_and_community_through(stub_avm):
     stub = stub_avm(result=8_800_000.0)
-    col = {"property_addr": "深圳市南山区某路", "area": 88.0, "age": 5, "lat": 22.5, "lng": 113.9}
+    col = {
+        "property_addr": "深圳市南山区美的云峰花园60号",
+        "area": 88.0,
+        "age": 5,
+        "lat": 22.5,
+        "lng": 113.9,
+    }
 
     assert valuation.valuation_from_avm(object(), col, CITY_MAP) == 8_800_000.0
     assert stub.calls[0]["city_code"] == "sz"
     assert stub.calls[0]["area_sqm"] == 88.0
-    # 地址粒度不够时不硬塞小区名，让模型回退城市中位价
+    # 地址能解析出小区名时传给模型：命中小区目标编码则估值贴近小区级，否则回退城市中位
+    assert stub.calls[0]["community"] == "美的云峰花园"
+
+
+def test_avm_community_none_when_address_has_no_community(stub_avm):
+    """小区名解析不出（剥完政区后无剩余）时传 None，由模型回退城市中位价。"""
+    stub = stub_avm(result=8_800_000.0)
+    col = {"property_addr": "云浮市云城区", "area": 88.0}
+
+    assert valuation.valuation_from_avm(object(), col, CITY_MAP) == 8_800_000.0
+    assert stub.calls[0]["city_code"] == "yf"
     assert stub.calls[0]["community"] is None
 
 
