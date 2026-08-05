@@ -362,6 +362,54 @@ def confirm_alert(loan_id, alert_date, source, user):
         conn.close()
 
 
+# ---------------- 操作审计（TC-06：导出/确认留痕） ----------------
+
+
+def ensure_export_audit_table():
+    """幂等建操作审计表（root+房产库）。独立于预警/确认链路，只做 who/when/what 留痕；
+    不改动任何既有表，导出/确认失败也不影响业务主流程。"""
+    conn = ddl_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS ads_export_audit ("
+            "id BIGINT AUTO_INCREMENT PRIMARY KEY,"
+            "action VARCHAR(32) NOT NULL,"
+            "username VARCHAR(32) NOT NULL,"
+            "role VARCHAR(16) NOT NULL,"
+            "detail TEXT,"
+            "result VARCHAR(16) NOT NULL,"
+            "ip VARCHAR(64),"
+            "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
+            "KEY idx_action_ts (action, created_at)"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        )
+        conn.commit()
+        cur.close()
+    finally:
+        conn.close()
+
+
+def write_audit(action, username, role, detail, result, ip):
+    """写一条操作审计记录（TC-06：who/role/when(created_at)/what(detail)/result/ip）。
+    建表用 root，写用 app 用户（与确认表同权限）；表缺失时静默降级，不阻断导出/确认动作。"""
+    ensure_export_audit_table()
+    conn = crawl_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO ads_export_audit (action, username, role, detail, result, ip) "
+            "VALUES (%s,%s,%s,%s,%s,%s)",
+            (action, username, role, detail, result, ip),
+        )
+        conn.commit()
+        cur.close()
+    except pymysql.err.ProgrammingError:
+        pass
+    finally:
+        conn.close()
+
+
 # ---------------- 1104 报送 ----------------
 
 
