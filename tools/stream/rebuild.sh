@@ -8,19 +8,23 @@
 #   「故障排查与重建」章节，再用本脚本做一次干净重建。
 #
 # 本脚本做什么（按序）：
-#   1) 备份现场状态（docker ps / topic offset / producer 水位 / inbox 水位）
+#   1) 备份现场状态（docker ps / topic offset / producer 水位 / inbox 水位 / ODS max）
 #   2) 停实时链：停 producer → 取消 Flink 作业 → compose down（只停 Kafka/Flink，
 #      不动 MySQL / CDC / 离线 consumer / 前端）
 #   3) 起 Kafka 并等 broker 就绪 → 干净重建 topic（删旧建新，避免旧生命周期数据残留）
-#   4) 重置 producer 水位到 ods_cdc_log 当前最大值（只转发重建后的新事件，不重放历史）
+#   4) 记录并重置 producer 水位到 ods_cdc_log 当前最大值（记为"重置点"；只转发重建后
+#      的新事件，不重放历史，自检断言以重置点为准）
 #   5) 起 Flink（JM + TM）并等注册就绪 → 重启 producer 常驻
+#      （重启后先等 producer 稳定：已进入轮询循环、水位 >= 重置点、无 batch error）
 #   6) 重提 Flink 作业并等 RUNNING
-#   7) 端到端自检：改一笔贷款余额，断言 30s 内 inbox 出现新预警，报告耗时
+#   7) 端到端自检：改一笔贷款余额，断言 60s 内 inbox 出现 event_id 大于重置点的新预警
+#      （用重置点而非 inbox 基线，避免与旧行混淆）；自检通过后把测试余额恢复原值
 #
 # 约束：
 #   - 只影响实时链（spacefin-stream-producer / kafka / flink），离线链（binlog CDC、
 #     ods→dws 重算、前端驾驶舱）不受影响。
-#   - 不改任何数据源表结构；自检会用 UPDATE 改一笔测试贷款余额（可配环境变量覆盖）。
+#   - 不改任何数据源表结构；自检会用 UPDATE 改一笔测试贷款余额（可配环境变量覆盖），
+#     自检通过后自动恢复原值（不把测试值留在业务表里）。
 #   - Flink 作业无 checkpoint/无保存点：重建后从 latest-offset 重新消费，历史积压不会
 #     重放（这正是"仅推送不闭环、无状态作业"的设计语义，见 docs 第 7 节）。
 #   - 密码不硬编码：MySQL root 密码从仓库 .env 读取；Kafka/Flink 交互全走 docker exec。
@@ -92,6 +96,7 @@ docker exec spacefin-kafka /opt/kafka/bin/kafka-get-offsets.sh \
   --bootstrap-server localhost:9092 --topic "$TOPIC" > "$BK_DIR/topic-offsets.txt" 2>&1 || true
 docker exec spacefin-mysql mysql -uroot -p"$ROOT_PW" -N -e \
   "SELECT 'producer_watermark', consumer, last_id FROM $CRAWL_DB.ods_cdc_consumer_offset WHERE consumer='kafka_stream_producer'; \
+   SELECT 'ods_cdc_log_max', COALESCE(MAX(id),0) FROM $CRAWL_DB.ods_cdc_log; \
    SELECT 'inbox_max', COALESCE(MAX(event_id),0) FROM $CRAWL_DB.ads_stream_ltv_alerts;" \
   > "$BK_DIR/db-state.txt" 2>/dev/null || true
 
@@ -137,12 +142,18 @@ docker exec spacefin-kafka /opt/kafka/bin/kafka-topics.sh \
   || die "创建 topic 失败"
 
 # ---- 5. 重置 producer 水位 ----
-# 水位置为 ods_cdc_log 当前最大 id：producer 只转发重建后的新事件。
+# 先记录"重置点"：重建前 ods_cdc_log 的当前最大 id。它是后续一切"新事件"的判据——
+# 自检 UPDATE 产生的事件 id 一定 > 重置点；producer 只转发 id 大于水位的行，因此只要
+# 自检事件发生在重置点之后，就必然被转发，不依赖轮询窗口的运气。
 # 注意不要置 0——那会让 producer 把几千条历史积压重新推到刚清空的 topic，纯属浪费，
 # 且新作业 latest-offset 也只会从空 topic 的新端点开始。
-log "重置 producer 水位到 ods_cdc_log 当前最大值"
+log "记录并重置 producer 水位到 ods_cdc_log 当前最大值（重置点）"
+RESET_ID="$(docker exec spacefin-mysql mysql -uroot -p"$ROOT_PW" -N -e \
+  "SELECT COALESCE(MAX(id),0) FROM $CRAWL_DB.ods_cdc_log;" 2>/dev/null || true)"
+[ -n "$RESET_ID" ] && [ "$RESET_ID" -ge 0 ] 2>/dev/null || die "读取 ods_cdc_log max(id) 失败"
+log "重置点 RESET_ID=$RESET_ID"
 docker exec spacefin-mysql mysql -uroot -p"$ROOT_PW" -e \
-  "INSERT INTO $CRAWL_DB.ods_cdc_consumer_offset (consumer, last_id) VALUES ('kafka_stream_producer', (SELECT COALESCE(MAX(id),0) FROM $CRAWL_DB.ods_cdc_log)) ON DUPLICATE KEY UPDATE last_id=(SELECT COALESCE(MAX(id),0) FROM $CRAWL_DB.ods_cdc_log);" \
+  "INSERT INTO $CRAWL_DB.ods_cdc_consumer_offset (consumer, last_id) VALUES ('kafka_stream_producer', $RESET_ID) ON DUPLICATE KEY UPDATE last_id=$RESET_ID;" \
   || die "重置水位失败"
 docker exec spacefin-mysql mysql -uroot -p"$ROOT_PW" -N -e \
   "SELECT consumer, last_id FROM $CRAWL_DB.ods_cdc_consumer_offset WHERE consumer='kafka_stream_producer';"
@@ -156,10 +167,31 @@ wait_ok "curl -s http://localhost:8081/overview | grep -q '\"taskmanagers\":[1-9
 log "Flink 就绪"
 
 # ---- 7. 重启 producer 常驻 ----
+# 重启后必须等 producer 稳定再进入自检：旧实现只查 is-active（单元活跃不等于已进入
+# 轮询循环），自检 UPDATE 若撞上"producer 刚重启尚未就绪"的窗口，事件可能跳过/迟到，
+# 自检误报失败。这里等三个信号同时成立：
+#   a) 服务 active（systemd 层面已拉起）
+#   b) journal 出现 loop start 且自本次启动以来无 batch error（已进入轮询且至少消费
+#      一轮无异常）
+#   c) 水位表 last_id >= 重置点（producer 读到的是重建前快照点，不会回放历史）
 log "重启 producer（常驻轮询）"
+START_TS="$(date +%Y-%m-%dT%H:%M:%S)"
 systemctl --user start "$PRODUCER_UNIT" || die "producer 启动失败"
-sleep 3
-systemctl --user is-active "$PRODUCER_UNIT" >/dev/null || die "producer 未在运行"
+log "等待 producer 稳定（水位>=重置点 $RESET_ID、已进入轮询、无 batch error）"
+ACTIVE=""; WM=""; LOOPED=0; ERR=0
+for _ in $(seq 1 30); do   # 最多 60s，覆盖 producer 启动 + 首个轮询周期
+  ACTIVE="$(systemctl --user is-active "$PRODUCER_UNIT" 2>/dev/null || true)"
+  WM="$($MYSQL -N -e "SELECT last_id FROM $CRAWL_DB.ods_cdc_consumer_offset WHERE consumer='kafka_stream_producer';" 2>/dev/null || true)"
+  LOOPED="$(journalctl --user -u "$PRODUCER_UNIT" --since "$START_TS" --no-pager 2>/dev/null | grep -c 'loop start' || true)"
+  ERR="$(journalctl --user -u "$PRODUCER_UNIT" --since "$START_TS" --no-pager 2>/dev/null | grep -c 'batch error' || true)"
+  if [ "$ACTIVE" = "active" ] && [ "${WM:-0}" -ge "$RESET_ID" ] && [ "$LOOPED" -ge 1 ] && [ "$ERR" -eq 0 ]; then
+    log "producer 已稳定（active、水位=$WM、已进入轮询、无 batch error）"
+    break
+  fi
+  sleep 2
+done
+[ "$ACTIVE" = "active" ] && [ "${WM:-0}" -ge "$RESET_ID" ] && [ "$LOOPED" -ge 1 ] && [ "$ERR" -eq 0 ] \
+  || die "producer 60s 内未稳定（active=$ACTIVE 水位=${WM:-?} loop_start=$LOOPED batch_error=$ERR）"
 
 # ---- 8. 重提 Flink 作业并等 RUNNING ----
 log "重提 Flink 作业 $JOB_NAME"
@@ -172,7 +204,11 @@ log "作业 RUNNING"
 # 动态算一个"必触发且必改变"的余额：取该贷款的估值 V，设余额 = 0.95*V（LTV≈0.95>0.85
 # 必越线），并保证与当前余额不同。教训：写死某个余额可能恰好等于现值，UPDATE 变成
 # no-op，MySQL 行格式 binlog 不产生事件，自检会误报失败。
-log "端到端自检：贷款 $TEST_LOAN_ID，动态计算测试余额并等待 inbox 新行"
+# 时序保证：此时 producer 已稳定、水位已固定在重置点 RESET_ID 上（第 5/7 步完成）；
+# 自检 UPDATE 产生的事件 id 一定 > RESET_ID，producer 下个轮询周期必然转发。
+# 断言用"event_id > 重置点"而不是"inbox 基线"：重置点之前的旧行不可能混进来，
+# 也避免与重建过程中其它新事件混淆。
+log "端到端自检：贷款 $TEST_LOAN_ID，动态计算测试余额并等待 inbox 新行（event_id>$RESET_ID）"
 VAL="$($MYSQL -N -e "SELECT market_valuation FROM $CRAWL_DB.dws_risk_class WHERE loan_id=$TEST_LOAN_ID LIMIT 1;" 2>/dev/null)"
 [ -n "$VAL" ] || die "自检：贷款 $TEST_LOAN_ID 在 dws_risk_class 无估值，请换 TEST_LOAN_ID"
 CUR_BAL="$($MYSQL -N -e "SELECT balance FROM $BIZ_DB.loan WHERE loan_id=$TEST_LOAN_ID;" 2>/dev/null)"
@@ -183,24 +219,28 @@ if [ -z "$TEST_BALANCE" ]; then
   fi
 fi
 log "估值=$VAL 当前余额=$CUR_BAL -> 测试余额=$TEST_BALANCE (LTV≈0.95)"
-BASE="$($MYSQL -N -e "SELECT COALESCE(MAX(event_id),0) FROM $CRAWL_DB.ads_stream_ltv_alerts;" 2>/dev/null)"
 T0=$(date +%s)
 $MYSQL -e "UPDATE $BIZ_DB.loan SET balance=$TEST_BALANCE WHERE loan_id=$TEST_LOAN_ID;" \
   || die "自检 UPDATE 失败"
 NEW_ROW=""
-for _ in $(seq 1 15); do
+for _ in $(seq 1 30); do   # 60s：30s 对"producer 2s 轮询 + Flink 首次消费抖动"偏紧，放宽到 60s
   sleep 2
   NEW_ROW="$($MYSQL -N -e \
-    "SELECT event_id, loan_id, loan_balance, ltv, risk_class FROM $CRAWL_DB.ads_stream_ltv_alerts WHERE event_id > $BASE ORDER BY event_id DESC LIMIT 1;" 2>/dev/null || true)"
+    "SELECT event_id, loan_id, loan_balance, ltv, risk_class FROM $CRAWL_DB.ads_stream_ltv_alerts WHERE event_id > $RESET_ID AND loan_id=$TEST_LOAN_ID ORDER BY event_id DESC LIMIT 1;" 2>/dev/null || true)"
   [ -n "$NEW_ROW" ] && break
 done
 T1=$(date +%s)
+# 无论自检成败，都把测试余额恢复原值：自检只是验证链路，不能把测试值留在业务表里。
+# 恢复本身会再产生一条合法事件（余额回到原值），由正常链路消费，无需等待。
+$MYSQL -e "UPDATE $BIZ_DB.loan SET balance=$CUR_BAL WHERE loan_id=$TEST_LOAN_ID;" \
+  && log "已恢复贷款 $TEST_LOAN_ID 余额原值 $CUR_BAL" \
+  || log "警告：恢复原值失败，请手动执行：UPDATE $BIZ_DB.loan SET balance=$CUR_BAL WHERE loan_id=$TEST_LOAN_ID"
 if [ -n "$NEW_ROW" ]; then
-  log "自检通过：inbox 新行 event_id>$BASE -> $NEW_ROW（耗时 $((T1-T0))s）"
+  log "自检通过：inbox 新行 event_id>$RESET_ID -> $NEW_ROW（耗时 $((T1-T0))s）"
 else
-  log "FAIL：30s 内 inbox 无新行（基线 event_id=$BASE）。"
+  log "FAIL：60s 内 inbox 无新行（自检阈值 event_id>$RESET_ID、loan_id=$TEST_LOAN_ID）。"
   log "      排查线索：TM 日志 /opt/flink/log/、producer journalctl --user -u $PRODUCER_UNIT、"
-  log "      Kafka 日志 docker logs spacefin-kafka。自检失败但不回滚（现场保留供诊断）。"
+  log "      Kafka 日志 docker logs spacefin-kafka。测试余额已恢复原值，现场备份保留供诊断。"
   exit 1
 fi
 
