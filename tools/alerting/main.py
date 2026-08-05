@@ -82,8 +82,31 @@ def connect(env):
     return pymysql.connect(**config.root_crawl_params(env), charset="utf8mb4")
 
 
+def _ensure_columns(conn, table: str, columns: list[tuple[str, str]]) -> None:
+    """幂等补列：MySQL 8 的 ALTER TABLE 没有 ADD COLUMN IF NOT EXISTS，需先查 information_schema。
+
+    存量表只补新列不动老列，且新列全部允许 NULL——避免给已有行强填充默认值导致全表锁，
+    也让「老数据无该列」这一事实保持诚实（与 tools/risk/store.py 同模式）。
+    """
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s",
+        (table,),
+    )
+    existing = {r[0] for r in cur.fetchall()}
+    for name, ddl in columns:
+        if name not in existing:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+    cur.close()
+
+
 def ensure_tables(conn):
-    """幂等建推送台账表与站内告警表。"""
+    """幂等建推送台账表与站内告警表。
+
+    CREATE TABLE IF NOT EXISTS 只保证建新表，不补存量表缺列；旧环境重跑时
+    ads_alert_inbox 可能缺 alert_level，这里在 CREATE 之后幂等补列。
+    """
     cur = conn.cursor()
     cur.execute(DISPATCH_DDL)
     cur.execute(
@@ -105,6 +128,8 @@ def ensure_tables(conn):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """
     )
+    # 存量表补列：ads_alert_inbox 缺 alert_level 的旧环境（如 S6 前建的告警表）幂等补齐。
+    _ensure_columns(conn, "ads_alert_inbox", [("alert_level", "VARCHAR(8)")])
     conn.commit()
     cur.close()
 
