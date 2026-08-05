@@ -23,22 +23,29 @@ make seed-gen
 
 ## 三张表与分布
 
-| 表 | 主键 | 关键字段与分布（合成） |
-|----|------|----------------------|
-| `customer` | customer_id (10000+) | credit_score ~ N(680, 60)；income_monthly ~ U(4000, 25000)；debt_ratio ~ U(0.1, 0.8) |
-| `collateral` | collateral_id (20000+) | **广东 21 城真实风格地址**（城市+行政区+小区名+门牌，如「广州市黄埔区保利紫云府24号」），经纬度落在对应城市坐标框内；面积 U(40,140)、房龄 U(0,30)；`true_market_price` 以 AVM 模型隐含单价（见生成器 `CITY_UNIT_PRICE` 注释）为基准加噪声合成；poi_density、commute_min、is_high_risk_zone(≈15%)、spatial_feat_missing_pct |
-| `loan` | loan_id (30000+) | 关联 customer/collateral；loan_amount、balance、interest_rate；`risk_class` 五级分类按 80/12/5/2/1 分布；origination_date 在基准日前约 3 年内 |
+| 表           | 主键                   | 关键字段与分布（合成）                                                                                                                                                                                                                                                                                                                                                            |
+| ------------ | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `customer`   | customer_id (10000+)   | credit_score ~ N(680, 60)；income_monthly ~ U(4000, 25000)；debt_ratio ~ U(0.1, 0.8)                                                                                                                                                                                                                                                                                              |
+| `collateral` | collateral_id (20000+) | **广东 21 城地址**（城市+区+小区名+门牌，如「惠州市惠城区惠城24号」），经纬度落在对应城市坐标框内；面积 U(40,140)、房龄 U(0,30)；`true_market_price` 有键城市以其选中 DWD 键均价为基准、无键城市以 AVM 模型隐含单价（见生成器 `CITY_UNIT_PRICE` 注释）为基准加 ±10% 噪声（单价乘子 U(0.9, 1.1)）合成；poi_density、commute_min、is_high_risk_zone(≈15%)、spatial_feat_missing_pct |
+| `loan`       | loan_id (30000+)       | 关联 customer/collateral；loan_amount、balance、interest_rate；`risk_class` 五级分类按 80/12/5/2/1 分布；origination_date 在基准日前约 3 年内                                                                                                                                                                                                                                     |
 
 地址对齐广东的原因：风险引擎的三级回退（AVM → DWD → true_market_price）要求抵押物地址能
 解析出广东城市码，合成地址无城市码时估值永远回退兜底（dwd_hits=0、avm_hits=0）。详见
 `docs/tech/components/cdc-downstream.md` 第 7 节。
 
+DWD 命中口径（2026-08-05 起）：有键城市（17 城）的地址写作 `{城市}市{key}区{key}{门牌}号`，
+`key` 为 `crawl_housing_sale.community` 的**实有键**（优先区级聚合，如 惠城/禅城/榕城/汕尾城，
+辅以高样本真实小区），剥掉「区」后缀后 100% 命中 DWD 行情（实测 161/200 → 80.5%，其余
+39 笔恰为 zs/yf/zh/dg 四城，见生成器 `DWD_KEYS` 与模块文档）。噪音描述词键（次新小区/新城/
+阳光城…）与 >6 字键已被排除，`zs/yf/zh/dg` 四城 DWD 为 100% 外市错标、不配键。
+
 字段口径与 `sql/init/01_schema.sql` 严格对齐，分布与 `docs/poc/core-prototype/mvp_prototype.py` 保持一致，便于后续 AVM / LTV 链路衔接。
 
 ## 合规（数据红线）
 
-本目录全部为**合成数据**，不含任何真实个人金融信息；`property_addr` 为真实风格的**虚构**
-地址（小区名为虚构，不与真实楼盘对应），仅作 schema 演示与估值链命中用。
+本目录全部为**合成数据**，不含任何真实个人金融信息；`property_addr` 以 DWD 实有键为骨架
+拼装（键为公开行情库的区级聚合/小区名，仅作 schema 演示与估值链命中用），不含任何真实
+个人门牌/隐私信息。
 
 这对应项目数据策略的硬约束——**数据分两类，红线分明**：
 
