@@ -13,7 +13,8 @@
 #   127.0.0.1 互通，规避了 bridge 网络中 FE 绑定 127.0.0.1 导致跨容器不可达的问题。
 #
 # 内存预算（宿主仅 15G，必须逐容器设上限防 OOM 拖垮整机）：
-#   minio 1G + doris-fe 3G（JVM 堆 2G）+ doris-be 5G（BE mem_limit 4G）≈ 9G
+#   minio 1G + doris-fe 2.5G（JVM 堆 2G）+ doris-be 4G（BE mem_limit 4G）≈ 7.5G
+#   配额 2026-08-05 收紧：给采集栈峰值留余量（原 fe 3G/be 5G → 2.5G/4G）。
 #   数据目录：/srv/spacefin-lake（宿主磁盘，仓库外，避免数据进 git 扫描范围）
 # ==============================================================================
 
@@ -62,7 +63,7 @@ services:
       - /srv/spacefin-lake/doris/logs/fe:/opt/apache-doris/fe/log
       # 覆盖镜像默认 fe.conf：默认 JVM 堆 8G 超出宿主预算，压到 2G（见 conf/fe.conf 注释）
       - ./conf/fe.conf:/opt/apache-doris/fe/conf/fe.conf
-    mem_limit: 3g
+    mem_limit: 2.5g
     healthcheck:
       test: ["CMD", "mysql", "-uroot", "-P9030", "-h127.0.0.1", "-e", "select 1"]
       interval: 15s
@@ -92,4 +93,4 @@ services:
       - /srv/spacefin-lake/doris/logs/be:/opt/apache-doris/be/log
       # 覆盖默认 be.conf：把 mem_limit 从默认 80% 宿主内存压到 4G（见 conf/be.conf 注释）
       - ./conf/be.conf:/opt/apache-doris/be/conf/be.conf
-    mem_limit: 5g
+    mem_limit: 4g

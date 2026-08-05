@@ -20,7 +20,7 @@ services:
   kafka:
     image: apache/kafka:3.8.0
     container_name: spacefin-kafka
-    mem_limit: 1536m
+    mem_limit: 1228m
     environment:
       # KRaft 单节点：broker+controller 合一，节点 id 固定，quorum 指向自身。
       KAFKA_NODE_ID: 0
@@ -45,6 +45,11 @@ services:
     ports:
       - "9092:9092"
       - "9093:9093"
+    volumes:
+      # 数据目录持久化：KRaft 元数据 + topic 日志。无此挂载时任何容器重建
+      # （compose up -d 改配置、宿主重启）都会清空全部 topic 数据——曾实测
+      # 历史 66 条事件随重建丢失。目录放仓库外，避免进 git 扫描。
+      - /srv/spacefin-lake/kafka/data:/var/lib/kafka/data
     networks:
       - spacefin
 
@@ -52,7 +57,7 @@ services:
     image: apache/flink:1.19.1
     container_name: flink-jobmanager
     command: jobmanager
-    mem_limit: 1536m
+    mem_limit: 1228m
     environment:
       # TM 靠 jobmanager.rpc.address 找 JM；容器名即服务名，写入环境变量让脚本拼进配置。
       JOB_MANAGER_RPC_ADDRESS: flink-jobmanager
@@ -78,7 +83,7 @@ services:
     image: apache/flink:1.19.1
     container_name: flink-taskmanager
     command: taskmanager
-    mem_limit: 1536m
+    mem_limit: 1228m
     environment:
       JOB_MANAGER_RPC_ADDRESS: flink-jobmanager
       FLINK_PROPERTIES: |
