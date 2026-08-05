@@ -10,7 +10,8 @@
 
 US-01 要求风险引擎具备空间惩罚项：抵押物落在「高危区」时风险等级至少升一档
 （`is_high_risk_zone`），且空间特征缺失率过高时标记低置信、不触发自动预警
-（AC-04，`spatial_feat_missing_pct >= 25%`）。
+（AC-04，`spatial_feat_missing_pct > 75`，0–100 百分数标度，与
+`config.LOW_CONF_MISSING_PCT=75` 一致；严格大于，恰好 =75 不低置信）。
 
 S3 规划原案用 Sedona 做分布式空间连接，但本机 4 核 / 15G 内存跑不动
 Spark/Sedona/Doris（规划 R-tech-1 已建议 MVP 降级）。本模块用 **scipy cKDTree +
