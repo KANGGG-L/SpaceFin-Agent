@@ -123,8 +123,12 @@ def load_rows(conn, max_rows: int | None) -> list[dict]:
     return out
 
 
-def clean_rows(rows: list[dict]) -> list[dict]:
-    """清洗 sale DWD（规则见模块 docstring），返回 list[dict]。"""
+def clean_rows(rows: list[dict], raw_comm_by_id: dict | None = None) -> list[dict]:
+    """清洗 sale DWD（规则见模块 docstring），返回 list[dict]。
+
+    raw_comm_by_id：id(r) -> 原始 community（clean_rows_with_stats 已把 community
+    就地替换为 title 归一结果，这里用快照保留爬虫原始标签，供坐标词典匹配）。
+    """
     cleaned = []
     for r in rows:
         tp, area, up = r["total_price_wan"], r["area_sqm"], r["unit_price_yuan"]
@@ -138,6 +142,8 @@ def clean_rows(rows: list[dict]) -> list[dict]:
         cleaned.append(
             {
                 "comm": (r["community"] or "").strip() or None,
+                "raw_comm": (raw_comm_by_id or {}).get(id(r)) if raw_comm_by_id else None,
+                "title": r["title"] or "",
                 "city": r["district"],
                 "bed": r["bedrooms"] or 0,
                 "hall": r["halls"] or 0,
@@ -250,19 +256,32 @@ def fit_encoders(rows: list[dict], y: np.ndarray) -> dict:
     return enc
 
 
-def apply_encoders(enc: dict, rows: list[dict], exclude_self: bool = False) -> np.ndarray:
+def apply_encoders(
+    enc: dict, rows: list[dict], exclude_self: bool = False, smooth_k: float = 0.0
+) -> np.ndarray:
     """把编码特征映射到行。exclude_self=True 用于训练折内 OOF 计算（邻域不含自身）。
 
     回退语义：小区无 → 城市中位；城市无 → 全局中位。与测试/服务期一致。
+
+    smooth_k>0 时对小区目标编码做经验贝叶斯收缩（向城市均值/中位靠拢）：
+    sm = (n*val + k*ref)/(n+k)。n 小的新小区统计噪声大，收缩能显著降低其对
+    预测的方差贡献；n 大的成熟小区几乎不受影响。
     """
     g = enc["global"]
+    k = smooth_k
     feat = []
     for r in rows:
         cv = enc["city"].get(r["city"], (g, g, 0))
         cmv = enc["comm"].get((r["city"], r["comm"])) if r["comm"] else None
         if cmv:
-            # 小区均值/中位/样本量 + 小区均值相对城市均值的偏移（树可拆出区域效应）
-            feat.append([cmv[0], cmv[1], cmv[2], cmv[0] - cv[0]])
+            n = cmv[2]
+            if k > 0 and n > 0:
+                # 小区均值/中位向城市均值/中位收缩；comm_minus_city 用收缩后值
+                sm_mean = (n * cmv[0] + k * cv[0]) / (n + k)
+                sm_med = (n * cmv[1] + k * cv[1]) / (n + k)
+            else:
+                sm_mean, sm_med = cmv[0], cmv[1]
+            feat.append([sm_mean, sm_med, n, sm_mean - cv[0]])
         else:
             feat.append([np.nan, np.nan, 0.0, np.nan])
         feat[-1] += [cv[0], cv[1], cv[2]]  # 城市均值/中位/样本量
@@ -291,11 +310,15 @@ SPATIAL_K = (3, 8, 20, 50)
 
 
 def build_features(
-    rows: list[dict], y: np.ndarray, encoders: dict, exclude_self: bool = False
+    rows: list[dict],
+    y: np.ndarray,
+    encoders: dict,
+    exclude_self: bool = False,
+    smooth_k: float = 0.0,
 ) -> np.ndarray:
     """组装全部特征（基础 + 编码 + 空间）。供训练与测试两用。"""
     base_feat, _ = base_features(rows)
-    enc_feat = apply_encoders(encoders, rows, exclude_self=exclude_self)
+    enc_feat = apply_encoders(encoders, rows, exclude_self=exclude_self, smooth_k=smooth_k)
     return np.hstack([base_feat, enc_feat])
 
 
@@ -416,6 +439,12 @@ def main() -> None:
     ap.add_argument("--out-dir", default="output/avm")
     ap.add_argument("--max-rows", type=int, default=None, help="限制读入行数（调试用）")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument(
+        "--smooth-k",
+        type=float,
+        default=10.0,
+        help="小区目标编码经验贝叶斯收缩强度（0=不收缩）",
+    )
     args = ap.parse_args()
 
     t0 = time.time()
@@ -433,8 +462,21 @@ def main() -> None:
     # 消除爬虫 community 字段「整句噪音标签」造成的标签碎片化。
     from data_clean import clean_rows_with_stats
 
+    # 快照原始 community（清洗会就地替换为归一名，坐标词典按原始名匹配）
+    raw_comm_by_id = {id(r): (r.get("community") or "").strip() or None for r in raw_rows}
     raw_rows, clean_stats = clean_rows_with_stats(raw_rows, parse_all=True)
-    rows = clean_rows(raw_rows)
+    rows = clean_rows(raw_rows, raw_comm_by_id)
+
+    # 坐标回填：离线词典（community_coords/dws_spatial 小区坐标 + 区中心点）给
+    # 无坐标行补位置信号；不消耗腾讯配额，失败自动降级（保持 NaN）。
+    from coord_backfill import backfill_coords, load_coord_dict
+
+    coord_stats = backfill_coords(rows, load_coord_dict(env))
+    if coord_stats["n_backfilled"]:
+        print(
+            f"[avm] 坐标回填 {coord_stats['n_backfilled']} 行"
+            f"（词典 {coord_stats['by_source']['dict']} / 区中心 {coord_stats['by_source']['district']}）"
+        )
     print(
         f"[avm] 外市清洗: 剔除 {clean_stats['n_dropped']} 行"
         f"（围栏 {clean_stats['n_dropped_coord']} / 标记 {clean_stats['n_dropped_marker']}"
@@ -461,23 +503,26 @@ def main() -> None:
     enc_tr = np.zeros((len(tr), len(FEATURE_NAMES)))
     for a, b in kf.split(np.arange(len(tr))):
         fold_enc = fit_encoders([tr[i] for i in a], ytr[a])
-        enc_tr[b] = build_features([tr[i] for i in b], ytr[b], fold_enc, exclude_self=True)
+        enc_tr[b] = build_features(
+            [tr[i] for i in b], ytr[b], fold_enc, exclude_self=True, smooth_k=args.smooth_k
+        )
     # 测试集用完整训练集编码映射（新小区自动回退城市/全局中位）
     full_enc = fit_encoders(tr, ytr)
     train_mat = enc_tr
-    test_mat = build_features(te, yte, full_enc, exclude_self=False)
+    test_mat = build_features(te, yte, full_enc, exclude_self=False, smooth_k=args.smooth_k)
 
     # HistGBR 原生支持 NaN（无坐标/无小区行保留，特征列有缺失不剔除）
-    # 参数：更大容量 + 更低学习率在清洗后数据上 MAPE 更低（-0.4pp）
+    # 参数：max_leaf_nodes=150 + 更强 L2 正则 在本轮清洗/回填数据上 MAPE 最低
+    # （网格 6 组对比：base 16.14 → big 15.97，-0.18pp；lr=0.02 组 16.02 次之）
     model = HistGradientBoostingRegressor(
-        max_iter=1500,
+        max_iter=2000,
         learning_rate=0.03,
-        max_leaf_nodes=100,
-        min_samples_leaf=8,
-        l2_regularization=1.0,
+        max_leaf_nodes=150,
+        min_samples_leaf=12,
+        l2_regularization=2.0,
         early_stopping=True,
         validation_fraction=0.1,
-        n_iter_no_change=30,
+        n_iter_no_change=40,
         random_state=args.seed,
         categorical_features=[FEATURE_NAMES.index("city_code")],
     )
@@ -530,6 +575,7 @@ def main() -> None:
         "cities": cities,
         "feature_names": FEATURE_NAMES,
         "spatial_k": list(SPATIAL_K),
+        "smooth_k": args.smooth_k,  # 小区目标编码收缩强度（predict 复用同一公式）
         "trained_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "n_train": len(tr),
     }
@@ -569,6 +615,14 @@ def main() -> None:
             "rows_after_clean": len(rows),
             "coord_rows_pct": round(np.mean([r["lat"] == r["lat"] for r in rows]) * 100, 1),
             "community_missing_pct": round(np.mean([not r["comm"] for r in rows]) * 100, 1),
+            "coord_backfill": {
+                "n_backfilled": coord_stats["n_backfilled"],
+                "by_city": coord_stats["by_city"],
+                "by_source": coord_stats["by_source"],
+                "sources": "community_coords/dws_spatial 词典 + gz/sz/fs/dg/zh 区中心点；"
+                "腾讯 geocoder 缓存 output/avm/coord_cache.json 有则优先",
+            },
+            "smooth_k": args.smooth_k,
         },
         "error_decomposition": {
             "by_segment": seg_metrics,
