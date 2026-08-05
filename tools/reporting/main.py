@@ -8,7 +8,10 @@
    落 ads_1104_g11 表并导出 CSV/JSON；
 2. 三出口口径一致性校验（TC-08）：1104 模板 vs dws_risk_class 明细 SQL 聚合 vs
    ads_risk_class 内部累计，余额/笔数/占比任一项对不上就**阻断报送**并写 ads_report_alert
-   告警（TC-05）——合规报送宁可拒报，也不能把口径不一致的数字送出去；
+   告警（TC-05）——合规报送宁可拒报，也不能把口径不一致的数字送出去；占比不信任
+   ads_risk_class 里存的 balance_pct（模板同源自比恒等拦不住写错），由明细聚合侧按
+   余额重算后比对，并校验五级占比之和=1、两路径余额总额一致；任一读取侧出现非五级
+   档位直接阻断，不再静默丢弃；
 3. 幂等 upsert：同一 (stat_date, risk_class) 重跑覆盖，不产生脏数据。
 
 为什么校验要拉 dws_risk_class 明细聚合而不是只信 ads_risk_class：ads_risk_class 是
@@ -88,6 +91,8 @@ def load_internal(conn, date):
     """出口① 内部累计：ads_risk_class（风险引擎已写，含五级与占比）。
 
     缺级（如损失=0）补默认零行，保证三出口对比时有完整五级。
+    出现非五级 risk_class（NULL、历史遗留、新增档位）一律抛错阻断：store 刷新侧
+    本就会把未知档位原样写进 ads_risk_class，静默丢弃会让五级总额少算而不告警。
     """
     cur = conn.cursor()
     cur.execute(
@@ -95,8 +100,14 @@ def load_internal(conn, date):
         "FROM ads_risk_class WHERE stat_date=%s",
         (date,),
     )
-    got = {r[0]: (int(r[1]), float(r[2]), float(r[3])) for r in cur.fetchall()}
+    rows = cur.fetchall()
     cur.close()
+    bad = [r[0] for r in rows if r[0] not in CLASS_ORDER]
+    if bad:
+        raise ValueError(
+            "ads_risk_class 出现非五级 risk_class，阻断报送: " + ", ".join(str(x) for x in bad)
+        )
+    got = {r[0]: (int(r[1]), float(r[2]), float(r[3])) for r in rows}
     out = {}
     for cls in CLASS_ORDER:
         cnt, bal, pct = got.get(cls, (0, 0.0, 0.0))
@@ -105,18 +116,36 @@ def load_internal(conn, date):
 
 
 def load_dws_agg(conn):
-    """出口② dws_risk_class 明细 SQL 聚合（独立复算，不受 ads_risk_class 影响）。"""
+    """出口② dws_risk_class 明细 SQL 聚合（独立复算，不受 ads_risk_class 影响）。
+
+    顺带按余额重算每档 balance_pct（分母为全量余额）——这是占比校验的独立基准：
+    1104 模板与 internal 同源自比恒等，占比写错无人拦；与这里重算的占比比对，
+    ads_risk_class.balance_pct 写错才会被抓住。
+    遇非五级 risk_class（NULL、历史遗留、新增档位）一律抛错阻断：静默丢弃会让
+    三出口在「都不含该档」的前提下达成一致，报送总额少算却不告警。
+    """
     cur = conn.cursor()
     cur.execute(
         "SELECT risk_class, COUNT(*), COALESCE(SUM(balance),0) "
         "FROM dws_risk_class GROUP BY risk_class"
     )
-    got = {r[0]: (int(r[1]), float(r[2])) for r in cur.fetchall()}
+    rows = cur.fetchall()
     cur.close()
+    bad = [r[0] for r in rows if r[0] not in CLASS_ORDER]
+    if bad:
+        raise ValueError(
+            "dws_risk_class 出现非五级 risk_class，阻断报送: " + ", ".join(str(x) for x in bad)
+        )
+    got = {r[0]: (int(r[1]), float(r[2])) for r in rows}
+    total = sum(bal for _, bal in got.values())
     out = {}
     for cls in CLASS_ORDER:
         cnt, bal = got.get(cls, (0, 0.0))
-        out[cls] = {"count": cnt, "balance": bal}
+        out[cls] = {
+            "count": cnt,
+            "balance": bal,
+            "balance_pct": round(bal / total, 4) if total else 0.0,
+        }
     return out
 
 
@@ -152,8 +181,10 @@ def validate_consistency(g11_rows, internal, dws):
     """三出口比对：1104 模板（源自 internal）vs dws 明细聚合。
 
     任一出口的笔数不等、或余额/占比差超容差，即记一条 mismatch。
-    1104 模板与 internal 同源（模板就是 internal 排的序），比对它俩是自检；
-    真正的外部裁判是 dws 明细聚合，汇总表与明细表一旦漂移就会被这里拦下。
+    - 1104 模板与 internal 同源：count/balance 的 1104_vs_internal 是模板自检；
+    - balance_pct 不再自比 internal（同源恒等没意义），改与 load_dws_agg 按余额
+      重算的占比比对——internal 里占比写错会在这里被拦下；
+    - 五级占比之和必须约等于 1、两路径余额总额必须一致，都是 G11 基本恒等式。
     """
     mismatches = []
     for cls in CLASS_ORDER:
@@ -162,16 +193,28 @@ def validate_consistency(g11_rows, internal, dws):
             mismatches.append(f"1104_vs_internal:{cls}:loan_count")
         if abs(tpl["balance"] - internal[cls]["balance"]) > EPS_BALANCE:
             mismatches.append(f"1104_vs_internal:{cls}:balance")
-        if abs(tpl["balance_pct"] - internal[cls]["balance_pct"]) > EPS_PCT:
-            mismatches.append(f"1104_vs_internal:{cls}:balance_pct")
         if tpl["loan_count"] != dws[cls]["count"]:
             mismatches.append(f"1104_vs_dws:{cls}:loan_count")
         if abs(tpl["balance"] - dws[cls]["balance"]) > EPS_BALANCE:
             mismatches.append(f"1104_vs_dws:{cls}:balance")
+        if abs(tpl["balance_pct"] - dws[cls]["balance_pct"]) > EPS_PCT:
+            mismatches.append(f"1104_vs_dws:{cls}:balance_pct")
         if dws[cls]["count"] != internal[cls]["count"]:
             mismatches.append(f"dws_vs_internal:{cls}:loan_count")
         if abs(dws[cls]["balance"] - internal[cls]["balance"]) > EPS_BALANCE:
             mismatches.append(f"dws_vs_internal:{cls}:balance")
+
+    # 两路径余额总额一致：internal（ads 汇总）与 dws（明细聚合）必须同额。
+    internal_total = round(sum(v["balance"] for v in internal.values()), 2)
+    dws_total = round(sum(v["balance"] for v in dws.values()), 2)
+    if abs(internal_total - dws_total) > EPS_BALANCE:
+        mismatches.append("dws_vs_internal:总额:balance")
+
+    # 五级占比之和=1 是 G11 恒等式；余额为 0 时占比无分母（全 0），跳过。
+    if internal_total > 0:
+        pct_sum = sum(r["balance_pct"] for r in g11_rows if not r["is_total"])
+        if abs(pct_sum - 1.0) > EPS_PCT:
+            mismatches.append("g11:占比之和:balance_pct")
     return mismatches
 
 
@@ -261,13 +304,36 @@ def main():
     if not args.dry_run:
         ensure_tables(conn)
 
-    internal = load_internal(conn, args.date)
-    dws = load_dws_agg(conn)
+    try:
+        internal = load_internal(conn, args.date)
+        dws = load_dws_agg(conn)
+    except ValueError as e:
+        # 读取侧硬阻断（如出现非五级档位）：记阻断告警并出拒报留痕，不裸崩在 traceback。
+        if not args.dry_run:
+            write_alerts(conn, args.date, [str(e)])
+        report = {
+            "date": args.date,
+            "report_type": REPORT_TYPE,
+            "error": str(e),
+            "consistent": False,
+            "blocked": True,
+        }
+        csv_path, json_path = write_outputs(
+            args.out_dir, args.date, [], "blocked", [str(e)], report
+        )
+        print(f"[reporting] 读取校验阻断报送: {e}")
+        conn.close()
+        print(f"[reporting] blocked {time.time() - t0:.1f}s | csv={csv_path} json={json_path}")
+        return 1
 
     # 演练钩子：只在内存里改 dws 聚合，用于验证 AC-05 阻断链路，不写任何库。
     if args.simulate_mismatch:
         first = CLASS_ORDER[0]
-        dws[first] = {"count": dws[first]["count"], "balance": dws[first]["balance"] + 1.0}
+        dws[first]["balance"] += 1.0
+        total = round(sum(v["balance"] for v in dws.values()), 2)
+        if total:
+            for cls in CLASS_ORDER:
+                dws[cls]["balance_pct"] = round(dws[cls]["balance"] / total, 4)
 
     g11_rows = build_g11(internal)
     mismatches = validate_consistency(g11_rows, internal, dws)

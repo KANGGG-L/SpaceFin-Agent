@@ -3,9 +3,10 @@
 覆盖的业务规则：
 - 估值三级回退：AVM(S2) → DWD 行情 → 业务库 true_market_price，且命中标记互斥。
 - LTV = 余额 / 估值，估值为 0 或缺失时不得抛异常。
-- AC-03 预警：LTV **严格大于**红线 0.85 且非低置信才报警。
-- AC-04 低置信：空间特征缺失率 >= 75%（0–100 标度）→ 抑制自动预警。0–1 小数的归一
-  在 store.load_collaterals() 入口完成（SPF-AC04 修复），引擎只认 0–100。
+- AC-03 预警：LTV 两档——严格大于警示线 0.75 → 'warn'；严格大于强预警线 0.85 → 'strong'；
+  恰好 = 阈值不触发；strong 覆盖 warn；非低置信才报。
+- AC-04 低置信：空间特征缺失率 **严格大于** 75（0–100 标度，恰好 = 75 不低置信）→ 抑制
+  自动预警。0–1 小数的归一在 store.load_collaterals() 入口完成（SPF-AC04 修复），引擎只认 0–100。
 - 高危区叠加：正常/关注档处高危区至少升到「关注」。
 - R-UNW-03 异常估值：仅 AVM 命中时算偏差，严格大于 30% 才标异常。
 - R-UBQ-01 血缘：每行都带 model_version，取不到版本号即 'unknown'。
@@ -113,11 +114,38 @@ def test_missing_balance_treated_as_zero_exposure(loan, collateral, patch_avm):
     assert row["risk_class"] == "正常"
 
 
-# ================================================================ AC-03 红线预警
+# ================================================================ AC-03 两档预警
+#
+# 两档口径：LTV 严格大于警示线 0.75 → 'warn'；严格大于强预警线 0.85 → 'strong'
+# （strong 覆盖 warn）；恰好 = 阈值不触发。alert 布尔 = alert_level is not None，兼容下游。
 
 
-def test_ltv_exactly_at_red_line_does_not_alert(loan, collateral, patch_avm):
-    """红线语义是「严格大于」：LTV == 0.85 压线不报警，分类停在「次级」。"""
+def test_ltv_exactly_at_warn_line_does_not_trigger(loan, collateral, patch_avm):
+    """警示线语义「严格大于」：LTV == 0.75 压线不报警，alert_level 为 None。"""
+    patch_avm(None)
+    collateral["true_market_price"] = 10_000_000.0
+    loan["balance"] = 7_500_000.0  # LTV = 0.7500
+
+    row = enrich(loan, collateral, dwd={})
+
+    assert row["ltv"] == 0.75
+    assert row["alert"] is False
+    assert row["alert_level"] is None
+
+
+def test_ltv_between_warn_and_red_raises_warn(loan, collateral, patch_avm):
+    patch_avm(None)
+    collateral["true_market_price"] = 10_000_000.0
+    loan["balance"] = 8_000_000.0  # LTV = 0.80，> 警示线且 <= 强预警线
+
+    row = enrich(loan, collateral, dwd={})
+
+    assert row["alert"] is True
+    assert row["alert_level"] == "warn"
+
+
+def test_ltv_at_red_line_is_warn_not_strong(loan, collateral, patch_avm):
+    """强预警线也是「严格大于」：LTV == 0.85 不触发 strong，但仍 > 警示线 → warn。"""
     patch_avm(None)
     collateral["true_market_price"] = 10_000_000.0
     loan["balance"] = 8_500_000.0  # LTV = 0.8500
@@ -125,11 +153,12 @@ def test_ltv_exactly_at_red_line_does_not_alert(loan, collateral, patch_avm):
     row = enrich(loan, collateral, dwd={})
 
     assert row["ltv"] == 0.85
-    assert row["alert"] is False
+    assert row["alert"] is True
+    assert row["alert_level"] == "warn"  # 不是 strong
     assert row["risk_class"] == "次级"
 
 
-def test_ltv_just_over_red_line_alerts_and_downgrades_to_doubtful(loan, collateral, patch_avm):
+def test_ltv_just_over_red_line_raises_strong(loan, collateral, patch_avm):
     patch_avm(None)
     collateral["true_market_price"] = 10_000_000.0
     loan["balance"] = 8_501_000.0  # LTV = 0.8501
@@ -138,17 +167,40 @@ def test_ltv_just_over_red_line_alerts_and_downgrades_to_doubtful(loan, collater
 
     assert row["ltv"] == 0.8501
     assert row["alert"] is True
+    assert row["alert_level"] == "strong"
     assert row["risk_class"] == "可疑"
 
 
-def test_red_line_threshold_is_config_driven(loan, collateral, patch_avm, monkeypatch):
-    """阈值走 config.LTV_RED_LINE，不是散落的魔法数字——调低红线应立刻多出预警。"""
+def test_ltv_over_red_line_raises_strong(loan, collateral, patch_avm):
+    """LTV=0.90 远超强预警线 → strong（strong 覆盖 warn）。"""
+    patch_avm(None)
+    collateral["true_market_price"] = 10_000_000.0
+    loan["balance"] = 9_000_000.0  # LTV = 0.90
+
+    row = enrich(loan, collateral, dwd={})
+
+    assert row["alert"] is True
+    assert row["alert_level"] == "strong"
+
+
+def test_warn_line_threshold_is_config_driven(loan, collateral, patch_avm, monkeypatch):
+    """阈值走 config.LTV_WARN_LINE：调低警示线应立刻多出 warn 预警。"""
     patch_avm(None)
     loan["balance"] = 5_000_000.0  # LTV = 0.5
-    assert enrich(loan, collateral, dwd={})["alert"] is False
+    assert enrich(loan, collateral, dwd={})["alert_level"] is None
+
+    monkeypatch.setattr(config, "LTV_WARN_LINE", 0.4)
+    assert enrich(loan, collateral, dwd={})["alert_level"] == "warn"
+
+
+def test_red_line_threshold_is_config_driven(loan, collateral, patch_avm, monkeypatch):
+    """阈值走 config.LTV_RED_LINE，不是散落的魔法数字——调低强预警线应立刻多出 strong 预警。"""
+    patch_avm(None)
+    loan["balance"] = 5_000_000.0  # LTV = 0.5
+    assert enrich(loan, collateral, dwd={})["alert_level"] is None
 
     monkeypatch.setattr(config, "LTV_RED_LINE", 0.4)
-    assert enrich(loan, collateral, dwd={})["alert"] is True
+    assert enrich(loan, collateral, dwd={})["alert_level"] == "strong"
 
 
 # ================================================================ AC-04 低置信抑制
@@ -169,24 +221,39 @@ def test_percent_scale_missing_pct_above_threshold_marks_low_confidence(
     assert enrich(loan, collateral, dwd={})["low_confidence"] is True
 
 
-def test_missing_pct_at_threshold_marks_low_confidence_and_suppresses_alert(
+def test_missing_pct_exactly_at_threshold_is_not_low_confidence(loan, collateral, patch_avm):
+    """低置信语义是「严格大于」：缺失率恰好 = 75 不标记，自动预警不被抑制。"""
+    patch_avm(None)
+    loan["balance"] = 9_500_000.0  # LTV 0.95，远超强预警线
+    collateral["spatial_feat_missing_pct"] = 75.0
+
+    row = enrich(loan, collateral, dwd={})
+
+    assert row["low_confidence"] is False  # 恰好 = 75 不低置信
+    assert row["ltv"] == 0.95
+    assert row["alert"] is True  # 未被抑制
+    assert row["alert_level"] == "strong"
+
+
+def test_missing_pct_just_over_threshold_marks_low_confidence_and_suppresses_alert(
     loan, collateral, patch_avm
 ):
-    """缺失率 >= 75% 时空间特征几乎不可用，估值不可信，宁可不报也不能误报给贷后。"""
+    """缺失率 75.1 **严格大于** 75 → 低置信，抑制自动预警转人工核查。"""
     patch_avm(None)
-    loan["balance"] = 9_500_000.0  # LTV 0.95，远超红线
-    collateral["spatial_feat_missing_pct"] = 75.0
+    loan["balance"] = 9_500_000.0  # LTV 0.95，远超强预警线
+    collateral["spatial_feat_missing_pct"] = 75.1
 
     row = enrich(loan, collateral, dwd={})
 
     assert row["low_confidence"] is True
     assert row["ltv"] == 0.95
     assert row["alert"] is False  # 被抑制
+    assert row["alert_level"] is None
     assert row["risk_class"] == "可疑"  # 但分类照常降级，敞口不被隐藏
 
 
 def test_missing_pct_just_below_threshold_still_alerts(loan, collateral, patch_avm):
-    """边界是 `>=`：74.9% 不算低置信。"""
+    """边界是 `>`：74.9% 不算低置信。"""
     patch_avm(None)
     loan["balance"] = 9_500_000.0
     collateral["spatial_feat_missing_pct"] = 74.9
@@ -195,6 +262,7 @@ def test_missing_pct_just_below_threshold_still_alerts(loan, collateral, patch_a
 
     assert row["low_confidence"] is False
     assert row["alert"] is True
+    assert row["alert_level"] == "strong"
 
 
 def test_none_missing_pct_treated_as_zero(loan, collateral, patch_avm):
@@ -238,6 +306,7 @@ def test_missing_collateral_is_classified_as_loss_without_alert(loan):
     assert row["ltv"] is None
     assert row["low_confidence"] is True
     assert row["alert"] is False
+    assert row["alert_level"] is None
     assert row["avm_hit"] is False and row["dwd_hit"] is False
 
 

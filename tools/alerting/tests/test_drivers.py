@@ -21,6 +21,7 @@ def alert(loan_id=1, date="2026-08-05", **kw):
         "ltv": 0.92,
         "risk_class": "可疑",
         "is_high_risk_zone": 0,
+        "alert_level": None,
         "alert_date": date,
     }
     base.update(kw)
@@ -67,8 +68,21 @@ def test_site_inbox_write_is_idempotent_per_loan_and_date():
     sql, params = conn.find_sql("INSERT INTO ads_alert_inbox")
     assert "ON DUPLICATE KEY UPDATE" in sql
     assert params[0] == 1
+    assert params[8] is None  # alert_level（无等级行落 NULL）
     assert params[-1] == "2026-08-05"
     assert conn.commits == 1
+
+
+def test_site_inbox_persists_alert_level_two_tiers():
+    """两档等级原样落库：warn/strong 区分推送强度，强预警不能降级成警示。"""
+    from alertmods import FakeConn
+
+    for level in ("warn", "strong"):
+        conn = FakeConn()
+        drivers.SiteInboxDriver(conn).send(alert(1, alert_level=level))
+
+        _, params = conn.find_sql("INSERT INTO ads_alert_inbox")
+        assert params[8] == level
 
 
 def test_site_inbox_tolerates_missing_optional_fields():

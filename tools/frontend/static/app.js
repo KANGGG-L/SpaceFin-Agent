@@ -317,6 +317,15 @@ function renderAlertOverview(ab) {
 
 /* ---------------- LTV 预警列表 ---------------- */
 
+/* 两档预警等级标签（与 tools/alerting/main.py 的 alert_level_label 口径一致）：
+ * strong→强预警级、warn→警示级、缺失/NULL→「—」。 */
+function alertLevelLabel(lv) {
+  const level = (lv == null ? "" : String(lv)).toLowerCase();
+  if (level === "strong") return `<span class="badge bad">强预警级</span>`;
+  if (level === "warn") return `<span class="badge warn">警示级</span>`;
+  return "—";
+}
+
 function buildAlertQuery(page) {
   const q = new URLSearchParams();
   const v = (id) => document.getElementById(id).value;
@@ -338,7 +347,7 @@ async function renderAlerts() {
 
   const tbody = document.querySelector("#alert-table tbody");
   if (!data.rows.length) {
-    tbody.innerHTML = `<tr><td colspan="12" class="empty">无符合条件的数据</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="13" class="empty">无符合条件的数据</td></tr>`;
   } else {
     tbody.innerHTML = data.rows
       .map((r) => {
@@ -357,6 +366,7 @@ async function renderAlerts() {
           `<td>${fmtMoney(r.market_valuation)}</td>` +
           `<td><span class="badge" style="background:${CLASS_COLORS[r.risk_class]}22;color:${CLASS_COLORS[r.risk_class]}">${esc(r.risk_class)}</span></td>` +
           `<td>${r.is_high_risk_zone ? `<span class="badge bad">高危区</span>` : "-"}</td>` +
+          `<td>${alertLevelLabel(r.alert_level)}</td>` +
           `<td>${r.alert_date}</td>` +
           `<td>${esc(r.property_addr)}</td>` +
           `<td>${conf}</td>` +

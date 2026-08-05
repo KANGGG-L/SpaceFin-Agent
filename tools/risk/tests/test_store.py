@@ -318,6 +318,7 @@ def test_dws_tuple_normalizes_bools_and_missing_model_version():
         "low_confidence": False,
         "is_high_risk_zone": 0,
         "alert": True,
+        "alert_level": "warn",
         "valuation_deviation_pct": None,
         "abnormal_valuation": None,
         "model_version": None,
@@ -327,8 +328,9 @@ def test_dws_tuple_normalizes_bools_and_missing_model_version():
 
     assert t[8] == 0  # low_confidence -> TINYINT
     assert t[10] == 1  # alert -> TINYINT
-    assert t[12] == 0  # abnormal_valuation None -> 0
-    assert t[13] == "unknown"  # 血缘不能落 NULL，缺失即 unknown
+    assert t[11] == "warn"  # alert_level 原样透传
+    assert t[13] == 0  # abnormal_valuation None -> 0
+    assert t[14] == "unknown"  # 血缘不能落 NULL，缺失即 unknown
 
 
 def test_dws_upsert_is_idempotent_per_loan_id():
@@ -368,6 +370,7 @@ def _dws_row(**kw):
         "low_confidence": False,
         "is_high_risk_zone": 0,
         "alert": False,
+        "alert_level": None,
         "valuation_deviation_pct": None,
         "abnormal_valuation": False,
         "model_version": "s2-r4",
@@ -390,13 +393,17 @@ def test_alerts_rewrite_is_scoped_to_batch_and_date():
 
 def test_only_alerting_rows_reach_ltv_alert_table():
     conn = FakeConn()
-    rows = [_dws_row(loan_id=1, alert=True, ltv=0.9), _dws_row(loan_id=2, alert=False)]
+    rows = [
+        _dws_row(loan_id=1, alert=True, ltv=0.9, alert_level="strong"),
+        _dws_row(loan_id=2, alert=False),
+    ]
 
     store.replace_alerts(conn, rows, "2026-08-05")
 
     _, sent = conn.find_many("INSERT INTO ads_ltv_alerts")
     assert len(sent) == 1
     assert sent[0][0] == 1  # loan_id
+    assert sent[0][8] == "strong"  # alert_level 随预警落库
     assert sent[0][-1] == "2026-08-05"  # alert_date 用批次日期
 
 

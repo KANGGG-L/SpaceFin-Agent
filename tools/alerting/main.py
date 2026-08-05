@@ -98,6 +98,7 @@ def ensure_tables(conn):
             ltv DECIMAL(8,4),
             risk_class VARCHAR(8),
             is_high_risk_zone TINYINT,
+            alert_level VARCHAR(8),
             alert_date DATE,
             received_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE KEY uq_loan_date (loan_id, alert_date)
@@ -113,7 +114,7 @@ def load_alerts(conn, date):
     cur = conn.cursor()
     cur.execute(
         "SELECT id, loan_id, customer_id, collateral_id, loan_balance, "
-        " market_valuation, ltv, risk_class, is_high_risk_zone, alert_date "
+        " market_valuation, ltv, risk_class, is_high_risk_zone, alert_level, alert_date "
         "FROM ads_ltv_alerts WHERE alert_date=%s ORDER BY id",
         (date,),
     )
@@ -144,6 +145,20 @@ def load_dispatch(conn, alerts):
         }
     cur.close()
     return out
+
+
+def alert_level_label(alert: dict) -> str:
+    """alert_level 两档中文文案：warn→警示级、strong→强预警级、缺失/未知→「—」。
+
+    ads_ltv_alerts.alert_level 允许为 NULL（历史行或引擎未写等级），推送侧
+    一律按「—」标注，不臆造等级。
+    """
+    level = (alert.get("alert_level") or "").strip().lower()
+    if level == "warn":
+        return "警示级"
+    if level == "strong":
+        return "强预警级"
+    return "—"
 
 
 def run_dispatch(conn, drivers, date, max_retries, force_fail):
@@ -183,7 +198,8 @@ def run_dispatch(conn, drivers, date, max_retries, force_fail):
             new_status = STATE_FAILED
             summary["failed"] += 1
             print(
-                f"[alerting] loan_id={alert['loan_id']} 推送失败: {last_error} "
+                f"[alerting] loan_id={alert['loan_id']} level={alert_level_label(alert)} "
+                f"推送失败: {last_error} "
                 f"attempt={attempt} max_retries={max_retries}",
                 flush=True,
             )
@@ -277,8 +293,8 @@ def main():
             )
             for a in alerts:
                 print(
-                    f"  loan_id={a['loan_id']} ltv={a['ltv']} risk_class={a['risk_class']} "
-                    f"alert_date={a['alert_date']}"
+                    f"  loan_id={a['loan_id']} ltv={a['ltv']} level={alert_level_label(a)} "
+                    f"risk_class={a['risk_class']} alert_date={a['alert_date']}"
                 )
             return 0
 

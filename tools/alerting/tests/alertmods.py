@@ -147,11 +147,12 @@ ALERT_COLS = [
     "ltv",
     "risk_class",
     "is_high_risk_zone",
+    "alert_level",
     "alert_date",
 ]
 
 
-def alert_row(loan_id, date="2026-08-05", ltv=0.92):
+def alert_row(loan_id, date="2026-08-05", ltv=0.92, alert_level=None):
     """一行 ads_ltv_alerts（元组形式，供 FakeConn 当查询结果返回）。"""
     return (
         loan_id,
@@ -163,6 +164,7 @@ def alert_row(loan_id, date="2026-08-05", ltv=0.92):
         ltv,
         "可疑",
         0,
+        alert_level,
         date,
     )
 

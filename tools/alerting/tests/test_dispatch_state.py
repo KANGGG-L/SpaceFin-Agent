@@ -276,6 +276,39 @@ def test_force_fail_still_feeds_the_retry_state_machine(make_conn, driver):
     assert s["failed"] == 1
 
 
+# ================================================================ 两档等级文案
+
+
+def test_alert_level_label_maps_two_tiers():
+    """warn→警示级、strong→强预警级；缺失/空/未知一律标注「—」，不臆造等级。"""
+    for level, label in [("warn", "警示级"), ("strong", "强预警级")]:
+        assert alerting.alert_level_label({"alert_level": level}) == label
+    for missing in ({}, {"alert_level": None}, {"alert_level": ""}, {"alert_level": "urgent"}):
+        assert alerting.alert_level_label(missing) == "—"
+
+
+def test_alert_level_flow_from_ads_ltv_alerts_to_push(make_conn):
+    """两档等级随预警行进入推送：warn 与 strong 原样到达 driver，缺失行不丢字段。"""
+    strong, warn, none_ = (
+        alertmods.RecordingDriver(),
+        alertmods.RecordingDriver(),
+        alertmods.RecordingDriver(),
+    )
+    conn = make_conn(
+        [
+            alert_row(1, alert_level="strong"),
+            alert_row(2, alert_level="warn"),
+            alert_row(3, alert_level=None),
+        ]
+    )
+
+    run(conn, [strong, warn, none_])
+
+    assert [a["alert_level"] for a in strong.sent] == ["strong", "warn", None]
+    assert [a["alert_level"] for a in warn.sent] == ["strong", "warn", None]
+    assert [a["alert_level"] for a in none_.sent] == ["strong", "warn", None]
+
+
 # ================================================================ 摘要口径
 
 

@@ -3,8 +3,10 @@
 - 估值：三级回退，见 valuation.py——AVM（S2 模型）→ DWD 行情 → true_market_price。
 - LTV = 贷款余额 / 抵押物估值。
 - 五级分类：按 LTV 阈值(config.CLASS_LTV_UPPER)分档。
-- 低置信(AC-04)：spatial_feat_missing_pct >= 25% → 标记 low_confidence，不触发自动预警。
-- 预警(AC-03)：LTV > 红线(0.85) 且非低置信 → 进入 ads_ltv_alerts。
+- 低置信(AC-04)：spatial_feat_missing_pct **严格大于** 75（0–100 标度，恰好=75 不低置信）
+  → 标记 low_confidence，不触发自动预警。
+- 预警(AC-03)：LTV 非空且非低置信时按两档触发——LTV 严格大于警示线 0.75 → 'warn'；
+  严格大于强预警线 0.85 → 'strong'（strong 覆盖 warn）；alert 布尔保持兼容下游。
 - 异常估值(R-UNW-03)：AVM 命中时按 |AVM 估值 - true_market_price| / true_market_price 算偏差，
   严格大于 30%（config.VALUATION_DEVIATION_THRESHOLD）→ abnormal_valuation，走人工核查。
 - 血缘(R-UBQ-01)：每行带 model_version，模型缺失/无版本号 → 'unknown' 并触发「不可溯源」告警。
@@ -37,6 +39,7 @@ def enrich_loan(
             "low_confidence": True,
             "is_high_risk_zone": None,
             "alert": False,
+            "alert_level": None,
             "dwd_hit": False,
             "avm_hit": False,
             # R-UBQ-01：每笔估值结论都带模型版本；无抵押物无估值，但血缘信息仍随行落库
@@ -72,13 +75,22 @@ def enrich_loan(
     )
 
     missing_pct = float(collateral.get("spatial_feat_missing_pct") or 0.0)
-    low_conf = missing_pct >= config.LOW_CONF_MISSING_PCT
+    # AC-04：缺失率**严格大于**阈值才低置信；恰好 = 75 不标记（与 B-04 边界口径一致）。
+    low_conf = missing_pct > config.LOW_CONF_MISSING_PCT
     risk_class = config.classify(ltv)
     # 高危区域叠加：LTV 处于「正常/关注」但处高危区，至少升到「关注」
     if collateral.get("is_high_risk_zone") and risk_class in ("正常", "关注"):
         risk_class = "关注"
 
-    alert = bool(ltv is not None and ltv > config.LTV_RED_LINE and not low_conf)
+    # AC-03 两档预警：LTV 非空且非低置信才判级。LTV 严格大于强预警线 → 'strong'；
+    # 严格大于警示线 → 'warn'；恰好 = 阈值不触发。strong 覆盖 warn，alert 布尔兼容下游。
+    alert_level = None
+    if ltv is not None and not low_conf:
+        if ltv > config.LTV_RED_LINE:
+            alert_level = "strong"
+        elif ltv > config.LTV_WARN_LINE:
+            alert_level = "warn"
+    alert = alert_level is not None
 
     return {
         **loan,
@@ -88,6 +100,7 @@ def enrich_loan(
         "low_confidence": low_conf,
         "is_high_risk_zone": collateral.get("is_high_risk_zone"),
         "alert": alert,
+        "alert_level": alert_level,
         "dwd_hit": dwd_hit,
         "avm_hit": avm_hit,
         "customer_id": loan.get("customer_id"),

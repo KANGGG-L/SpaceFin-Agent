@@ -91,11 +91,15 @@ def root_crawl_params(env: dict) -> dict:
 
 
 # ---------------- 风险阈值（可被环境变量覆盖，便于验收/压力测试调参）----------------
-LTV_RED_LINE = float(os.getenv("RISK_LTV_RED_LINE", "0.85"))  # AC-03：LTV>红线 → 预警
+# AC-03 两档 LTV 预警：警示级 0.75（warn）/ 强预警级 0.85（strong），均为「严格大于」触发。
+LTV_WARN_LINE = float(os.getenv("RISK_LTV_WARN_LINE", "0.75"))  # 警示线 0.75：LTV>警示线 → warn
+LTV_RED_LINE = float(
+    os.getenv("RISK_LTV_RED_LINE", "0.85")
+)  # 强预警线 0.85：LTV>强预警线 → strong（覆盖 warn）
 LOW_CONF_MISSING_PCT = float(
     os.getenv("RISK_LOW_CONF_MISSING", "75.0")
 )  # AC-04：空间特征缺失率阈值（0–100 百分数标度，见 store.load_collaterals 的标度统一）
-# 语义：缺失率 >= 阈值 → low_confidence → 抑制自动预警、转人工核查。
+# 语义：缺失率 **严格大于** 阈值 → low_confidence → 抑制自动预警、转人工核查（恰好=75 不标记）。
 # 取值 75 与 tools/spatial/main.py 的 missing_ge75「严重缺失」口径一致，全项目只用一个
 # 「空间特征严重缺失」标准。旧默认 25 在合成种子上会把半数抵押物打成低置信、
 # 全量屏蔽 AC-03 预警——25 对应的是「任一特征缺失」，75 才是「空间特征几乎不可用」。
