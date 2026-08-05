@@ -10,11 +10,11 @@
 
 ## 解决的核心问题
 
-| 问题 | 当前困境 | 本方案目标 |
-|------|---------|-----------|
-| 抵押物估值靠人工 | 评估师主观判断，周期长、成本高，难以高频重估 | 数据驱动的自动化估值与风险预警 |
-| 风控结论缺业务共鸣 | 仅输出干瘪的概率得分 | 可交互、可推演的策略沙盒 |
-| 用户画像被美化偏见污染 | 通用模型生成粉饰过的画像 | 真实、可审计的合成行为仿真 |
+| 问题                   | 当前困境                                     | 本方案目标                     |
+| ---------------------- | -------------------------------------------- | ------------------------------ |
+| 抵押物估值靠人工       | 评估师主观判断，周期长、成本高，难以高频重估 | 数据驱动的自动化估值与风险预警 |
+| 风控结论缺业务共鸣     | 仅输出干瘪的概率得分                         | 可交互、可推演的策略沙盒       |
+| 用户画像被美化偏见污染 | 通用模型生成粉饰过的画像                     | 真实、可审计的合成行为仿真     |
 
 ## 如何阅读本仓库
 
@@ -22,15 +22,15 @@
 
 > **阶段模型说明**：本仓库以 `docs/product/00`–`05` 的实际产物为权威阶段划分（机会识别 → 需求规划 → 技术可行性 → PRD → 设计/研发评审 → 测试验收），阶段 6（上线复盘）规划中。该划分与产品全流程角色框架（需求规划 / PRD / 设计研发评审 / 研发跟进 / 测试验收 / 上线复盘）一一对应，研发跟进体现为 `docs/开发计划.md` 的跨阶段执行计划。
 
-| 阶段 | 核心决策问题 | 交付物 | 开发产出 | 状态 | 文档 |
-|------|-------------|-------|---------|------|------|
-| 0 | 这个机会值得做吗？ | 机会描述 + 假设清单 + 不做清单 | — | ✅ 已完成 | [docs/product/00/](docs/product/00/README.md) |
-| 1 | 用户的真实痛点是什么？ | 用户画像、竞品分析、数据摸底、优先级 | — | ✅ 已完成 | [docs/product/01/](docs/product/01/README.md) |
-| 2 | 技术上是否可行？ | 技术评估 + 效果基线 | 数据底座 PoC 代码 | ✅ 已完成 | [docs/product/02/](docs/product/02/README.md) |
-| 3 | 具体做成什么样？ | PRD（含验收标准） | 核心功能原型实现 | ✅ 已完成 | [docs/product/03/](docs/product/03/README.md) |
-| 4 | 设计和技术方案对齐了吗？ | 评审纪要、待确认清单、设计规范 | 设计/研发评审材料（已组织评审回填） | ✅ 材料+纪要已产出（结论待干系人确认） | [docs/product/04/](docs/product/04/README.md) |
-| 5 | 测试验收与开发是否在轨道上？ | 测试用例、验收清单、上线风险、开发计划 | 测试框架 + 开发排期（待真实数据接入执行） | ⏳ 部分（测试框架就绪，系统集成/联调未开始） | [docs/product/05/](docs/product/05/README.md) · [docs/开发计划.md](docs/开发计划.md) |
-| 6 | 上线复盘（规划中） | 复盘报告、迭代 backlog | — | ⏳ 未开始 | [docs/product/06/](docs/product/06/README.md)（待建） |
+| 阶段 | 核心决策问题                 | 交付物                                 | 开发产出                                  | 状态                                         | 文档                                                                                 |
+| ---- | ---------------------------- | -------------------------------------- | ----------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------ |
+| 0    | 这个机会值得做吗？           | 机会描述 + 假设清单 + 不做清单         | —                                         | ✅ 已完成                                    | [docs/product/00/](docs/product/00/README.md)                                        |
+| 1    | 用户的真实痛点是什么？       | 用户画像、竞品分析、数据摸底、优先级   | —                                         | ✅ 已完成                                    | [docs/product/01/](docs/product/01/README.md)                                        |
+| 2    | 技术上是否可行？             | 技术评估 + 效果基线                    | 数据底座 PoC 代码                         | ✅ 已完成                                    | [docs/product/02/](docs/product/02/README.md)                                        |
+| 3    | 具体做成什么样？             | PRD（含验收标准）                      | 核心功能原型实现                          | ✅ 已完成                                    | [docs/product/03/](docs/product/03/README.md)                                        |
+| 4    | 设计和技术方案对齐了吗？     | 评审纪要、待确认清单、设计规范         | 设计/研发评审材料（已组织评审回填）       | ✅ 材料+纪要已产出（结论待干系人确认）       | [docs/product/04/](docs/product/04/README.md)                                        |
+| 5    | 测试验收与开发是否在轨道上？ | 测试用例、验收清单、上线风险、开发计划 | 测试框架 + 开发排期（待真实数据接入执行） | ⏳ 部分（测试框架就绪，系统集成/联调未开始） | [docs/product/05/](docs/product/05/README.md) · [docs/开发计划.md](docs/开发计划.md) |
+| 6    | 上线复盘（规划中）           | 复盘报告、迭代 backlog                 | —                                         | ⏳ 未开始                                    | [docs/product/06/](docs/product/06/README.md)（待建）                                |
 
 ## 方法论：从构想走向落地
 
@@ -58,28 +58,28 @@
 
 ### 已接入组件
 
-| 组件 | 层级 | 状态 | 引入 Sprint | 技术说明 |
-|------|------|------|------------|---------|
-| MySQL 业务源库 | L0 数据源头 | ✅ 已接入 | Sprint 0 | [mysql-source.md](docs/tech/components/mysql-source.md) |
-| 安居客采集器 | L0 公开数据获取 | ✅ 已接入 | 数据源探索 | [anjuke-crawler.md](docs/tech/components/anjuke-crawler.md) |
-| └ Redis 任务队列 | 采集中间件 | ✅ 代码集成 | 数据源探索 | [redis-task-queue.md](docs/tech/components/redis-task-queue.md) |
-| └ jhao104/proxy_pool 代理池 | 采集反爬（IP 轮换） | ✅ 客户端集成 | 数据源探索 | [proxy-pool.md](docs/tech/components/proxy-pool.md) |
-| └ 容器编排采集系统 | 分布式调度 + 宿主渲染 | ✅ 已接入（2026-08-03 全量跑通） | 数据源探索 | [crawler-orchestrator.md](docs/tech/components/crawler-orchestrator.md) |
-| └ Airflow 外层编排 | 每日定时触发 + 收尾（DAG 00:30） | ✅ 已接入 | 数据源探索 | [airflow/README.md](airflow/README.md) · [airflow.md](docs/tech/components/airflow.md) |
-| └ ETL 数据管道 | 跨日去重 + DWD 入库 + ODS 湖 | ✅ 已接入 | Sprint 1 | [crawler-etl.md](docs/tech/components/crawler-etl.md) |
-| └ Kubernetes 分布式集群 | 采集横向扩展 | ⏸ 清单齐备（待集群） | 数据源探索 | [k8s-crawler-cluster.md](docs/tech/components/k8s-crawler-cluster.md) |
-| MySQL binlog CDC（I-01） | L0 变更接入 | ✅ 已接入 | Sprint 1 | [cdc-downstream.md](docs/tech/components/cdc-downstream.md) |
-| └ CDC 下游消费链 | L0 增量同步 | ✅ 已接入（改一笔 loan 秒级同步：≤10s 验收线，实测 3s） | Sprint 1 | [cdc-downstream.md](docs/tech/components/cdc-downstream.md) |
-| Doris + MinIO 湖仓 | L0 分层 | ✅ 已接入（ODS/DWD/DWS/ADS 四层 24 表，与 MySQL 对账一致） | Sprint 1 | [doris-lake.md](docs/tech/components/doris-lake.md) |
-| Kafka + Flink 实时 | L1 | ✅ 已接入（CDC→Kafka→Flink 实时预警，3s 端到端；含 rebuild.sh 一键重建） | Sprint 2 | [kafka-flink-realtime.md](docs/tech/components/kafka-flink-realtime.md) |
-| AVM（GBDT+空间特征） | L3 | ✅ 已接入（精度@覆盖率：45% 覆盖 MAPE 9.88% ≤10% 达标；全量 14.59%；基线 20.6%；版本 2026-08-05-r11） | Sprint 2 | [avm.md](docs/tech/components/avm.md) · [tools/avm/README.md](tools/avm/README.md) · [cdc-downstream.md](docs/tech/components/cdc-downstream.md) |
-| 风险引擎（LTV 两档预警 / 五级分类 / 低置信） | L3 | ✅ 已接入（LTV 警示线 0.75 / 强预警线 0.85，均可配置，等号边界严格大于不触发；低置信：空间特征缺失率 >75） | Sprint 2 | [risk-engine.md](docs/tech/components/risk-engine.md) |
-| L2 空间特征（高危区/POI/通勤） | L2 | ✅ 已接入（单机近似，降级 Sedona） | Sprint 3 | [spatial-feature.md](docs/tech/components/spatial-feature.md) |
-| 预警推送（I-05 贷后保全） | L4 应用接口 | ✅ 已接入（T+1 推送） | Sprint 4 | [alerting-iv05.md](docs/tech/components/alerting-iv05.md) |
-| 1104 报送（G11 三出口校验） | L5 合规 | ✅ 已接入 | Sprint 4 | [reporting-1104.md](docs/tech/components/reporting-1104.md) |
-| 前端驾驶舱（S5） | L5 展示 | ✅ 已接入（端口 8500，零依赖插件架构） | Sprint 5 | [frontend README](tools/frontend/README.md) |
-| 运维（容器恢复 + 资源管家） | 运维 | ✅ 已接入 | — | [ops.md](docs/tech/components/ops.md) |
-| 倒排索引 / Superset 看板 | L5 | ⏳ 待接入 | Sprint 6 | — |
+| 组件                                         | 层级                             | 状态                                                                                                       | 引入 Sprint | 技术说明                                                                                                                                         |
+| -------------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| MySQL 业务源库                               | L0 数据源头                      | ✅ 已接入                                                                                                  | Sprint 0    | [mysql-source.md](docs/tech/components/mysql-source.md)                                                                                          |
+| 安居客采集器                                 | L0 公开数据获取                  | ✅ 已接入                                                                                                  | 数据源探索  | [anjuke-crawler.md](docs/tech/components/anjuke-crawler.md)                                                                                      |
+| └ Redis 任务队列                             | 采集中间件                       | ✅ 代码集成                                                                                                | 数据源探索  | [redis-task-queue.md](docs/tech/components/redis-task-queue.md)                                                                                  |
+| └ jhao104/proxy_pool 代理池                  | 采集反爬（IP 轮换）              | ✅ 客户端集成                                                                                              | 数据源探索  | [proxy-pool.md](docs/tech/components/proxy-pool.md)                                                                                              |
+| └ 容器编排采集系统                           | 分布式调度 + 宿主渲染            | ✅ 已接入（2026-08-03 全量跑通）                                                                           | 数据源探索  | [crawler-orchestrator.md](docs/tech/components/crawler-orchestrator.md)                                                                          |
+| └ Airflow 外层编排                           | 每日定时触发 + 收尾（DAG 00:30） | ✅ 已接入                                                                                                  | 数据源探索  | [airflow/README.md](airflow/README.md) · [airflow.md](docs/tech/components/airflow.md)                                                           |
+| └ ETL 数据管道                               | 跨日去重 + DWD 入库 + ODS 湖     | ✅ 已接入                                                                                                  | Sprint 1    | [crawler-etl.md](docs/tech/components/crawler-etl.md)                                                                                            |
+| └ Kubernetes 分布式集群                      | 采集横向扩展                     | ⏸ 清单齐备（待集群）                                                                                       | 数据源探索  | [k8s-crawler-cluster.md](docs/tech/components/k8s-crawler-cluster.md)                                                                            |
+| MySQL binlog CDC（I-01）                     | L0 变更接入                      | ✅ 已接入                                                                                                  | Sprint 1    | [cdc-downstream.md](docs/tech/components/cdc-downstream.md)                                                                                      |
+| └ CDC 下游消费链                             | L0 增量同步                      | ✅ 已接入（改一笔 loan 秒级同步：≤10s 验收线，实测 3s）                                                    | Sprint 1    | [cdc-downstream.md](docs/tech/components/cdc-downstream.md)                                                                                      |
+| Doris + MinIO 湖仓                           | L0 分层                          | ✅ 已接入（ODS/DWD/DWS/ADS 四层 24 表，与 MySQL 对账一致）                                                 | Sprint 1    | [doris-lake.md](docs/tech/components/doris-lake.md)                                                                                              |
+| Kafka + Flink 实时                           | L1                               | ✅ 已接入（CDC→Kafka→Flink 实时预警，3s 端到端；含 rebuild.sh 一键重建）                                   | Sprint 2    | [kafka-flink-realtime.md](docs/tech/components/kafka-flink-realtime.md)                                                                          |
+| AVM（GBDT+空间特征）                         | L3                               | ✅ 已接入（精度@覆盖率：45% 覆盖 MAPE 9.88% ≤10% 达标；全量 14.59%；基线 20.6%；版本 2026-08-05-r11）      | Sprint 2    | [avm.md](docs/tech/components/avm.md) · [tools/avm/README.md](tools/avm/README.md) · [cdc-downstream.md](docs/tech/components/cdc-downstream.md) |
+| 风险引擎（LTV 两档预警 / 五级分类 / 低置信） | L3                               | ✅ 已接入（LTV 警示线 0.75 / 强预警线 0.85，均可配置，等号边界严格大于不触发；低置信：空间特征缺失率 >75） | Sprint 2    | [risk-engine.md](docs/tech/components/risk-engine.md)                                                                                            |
+| L2 空间特征（高危区/POI/通勤）               | L2                               | ✅ 已接入（单机近似，降级 Sedona）                                                                         | Sprint 3    | [spatial-feature.md](docs/tech/components/spatial-feature.md)                                                                                    |
+| 预警推送（I-05 贷后保全）                    | L4 应用接口                      | ✅ 已接入（T+1 推送）                                                                                      | Sprint 4    | [alerting-iv05.md](docs/tech/components/alerting-iv05.md)                                                                                        |
+| 1104 报送（G11 三出口校验）                  | L5 合规                          | ✅ 已接入                                                                                                  | Sprint 4    | [reporting-1104.md](docs/tech/components/reporting-1104.md)                                                                                      |
+| 前端驾驶舱（S5）                             | L5 展示                          | ✅ 已接入（端口 8500，零依赖插件架构）                                                                     | Sprint 5    | [frontend README](tools/frontend/README.md)                                                                                                      |
+| 运维（容器恢复 + 资源管家）                  | 运维                             | ✅ 已接入                                                                                                  | —           | [ops.md](docs/tech/components/ops.md)                                                                                                            |
+| 倒排索引 / Superset 看板                     | L5                               | ⏳ 待接入                                                                                                  | Sprint 6    | —                                                                                                                                                |
 
 ## 当前状况（采集系统）
 
@@ -97,14 +97,14 @@
 
 采集系统主体（调度 / 每城 IP 预算 / 增量断点续爬 / ETL / Airflow 编排）已实现并合入 develop；剩余为 Linux 迁移与验收：
 
-| 项 | 状态 |
-|----|------|
-| 定时触发（Airflow DAG `guangdong_daily_crawl`，00:30） | ✅ 已实现并合入 develop |
-| ETL 跨日去重 / 入库 / 数据湖落盘（DAG 收尾自动执行） | ✅ 已实现 |
-| 轮次策略（取消 MAX_ROUNDS=3，读完/预算耗尽即终态） | ✅ 已实现 |
-| 每城 IP 预算（sale 600 / fangyuan 400+免费池，广深 15%） | ✅ 已实现 |
-| 增量断点续爬 + 回扫头部 2-3 页 | ✅ 已实现 |
-| Linux 新机部署（launchd → systemd、Airflow 同机、环境装依赖） | ⏳ 待执行 |
+| 项                                                            | 状态                    |
+| ------------------------------------------------------------- | ----------------------- |
+| 定时触发（Airflow DAG `guangdong_daily_crawl`，00:30）        | ✅ 已实现并合入 develop |
+| ETL 跨日去重 / 入库 / 数据湖落盘（DAG 收尾自动执行）          | ✅ 已实现               |
+| 轮次策略（取消 MAX_ROUNDS=3，读完/预算耗尽即终态）            | ✅ 已实现               |
+| 每城 IP 预算（sale 600 / fangyuan 400+免费池，广深 15%）      | ✅ 已实现               |
+| 增量断点续爬 + 回扫头部 2-3 页                                | ✅ 已实现               |
+| Linux 新机部署（launchd → systemd、Airflow 同机、环境装依赖） | ⏳ 待执行               |
 
 > 🔴 **最大风险**：fangyuan 渲染依赖宿主 Chrome。容器 Chrome（Linux/headless）已被反爬按指纹软拦截，Linux 宿主 Chrome 预期可行但**未实测**——新机部署第一步必须做渲染冒烟测试（`/render` 拿 zu-itemmod），失败则需决策降级方案。
 
@@ -144,7 +144,7 @@ make down              # 停止
 - 38% 异常估值经三分量归因查明为「基准自指」——`true_market_price` 由 08-04 版模型自己生成，真实模型误差仅 1/200 笔，故不做校正层
 - Kafka + Flink 3s 端到端实时预警
 
-**未验证假设**：H1/H5 已在数据侧实证；H3 以最小 Critic 原型验证中（见 `tools/`）。
+**未验证假设**：H1/H5 已在数据侧实证；H3 已由最小 Critic 原型验证达成（美化偏见 KS 可检测：0.257 → 校准后 0.028 ≤ 0.05，机制演示口径见 [tools/persona/README.md](tools/persona/README.md)，真实基准属商用前置）。
 
 ## 合规与数据
 
@@ -162,16 +162,16 @@ make down              # 停止
 
 > 开发环境 Python 统一到 **3.10**。宿主唯一 Python 环境 = **conda `spark`**（`tools/orchestrator/.venv` 是指向它的符号链接别名，脚本默认路径无需改动）；Docker worker / Airflow 目标机亦为 3.10。
 
-| 工具 | 版本 | 用途 |
-| --- | --- | --- |
-| Python（conda 环境 `spark`） | 3.10.18（`tools/orchestrator/.venv` 是其别名） | **唯一宿主环境**：ETL / 编排 / 测试 / 宿主渲染 / 钩子 / PySpark 产品栈；依赖见 `environment.yml` + `tools/orchestrator/requirements.txt` |
-| Python（worker/master 容器） | 3.10（`python:3.10-slim`） | 采集 worker / master 容器 |
-| Python（Airflow，Linux 目标机） | 3.10（apache-airflow 2.10.5） | 外层编排 DAG |
-| pre-commit | 4.6.1 | 提交前 / 提交信息钩子 |
-| Node.js | v24.16.0 | commitlint 运行环境 |
-| npm | 11.13.0 | 依赖安装 |
-| @commitlint/cli | 19.8.1 | 提交信息校验 |
-| @commitlint/config-conventional | 19.8.1 | Conventional Commits 规则 |
+| 工具                            | 版本                                           | 用途                                                                                                                                     |
+| ------------------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Python（conda 环境 `spark`）    | 3.10.18（`tools/orchestrator/.venv` 是其别名） | **唯一宿主环境**：ETL / 编排 / 测试 / 宿主渲染 / 钩子 / PySpark 产品栈；依赖见 `environment.yml` + `tools/orchestrator/requirements.txt` |
+| Python（worker/master 容器）    | 3.10（`python:3.10-slim`）                     | 采集 worker / master 容器                                                                                                                |
+| Python（Airflow，Linux 目标机） | 3.10（apache-airflow 2.10.5）                  | 外层编排 DAG                                                                                                                             |
+| pre-commit                      | 4.6.1                                          | 提交前 / 提交信息钩子                                                                                                                    |
+| Node.js                         | v24.16.0                                       | commitlint 运行环境                                                                                                                      |
+| npm                             | 11.13.0                                        | 依赖安装                                                                                                                                 |
+| @commitlint/cli                 | 19.8.1                                         | 提交信息校验                                                                                                                             |
+| @commitlint/config-conventional | 19.8.1                                         | Conventional Commits 规则                                                                                                                |
 
 > 注：本机有两套 anaconda（PATH 上是 `/opt/anaconda3`，env 实际在 `/Users/ethan/anaconda3/envs/`），用 `conda` 命令操作 `spark` 环境须先 `conda activate spark`，或直接使用 `/Users/ethan/anaconda3/envs/spark/bin/...` 路径。
 
