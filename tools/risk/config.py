@@ -95,6 +95,10 @@ LTV_RED_LINE = float(os.getenv("RISK_LTV_RED_LINE", "0.85"))  # AC-03：LTV>红�
 LOW_CONF_MISSING_PCT = float(
     os.getenv("RISK_LOW_CONF_MISSING", "25.0")
 )  # AC-04：空间特征缺失率阈值
+# R-UNW-03：AVM 估值与参考基准（业务库 true_market_price）偏差超过该阈值即标「异常估值」。
+# 阈值语义是「严格大于」——偏差恰好 = 阈值时不标记（B-04 边界用例按 PRD 约定，>30% 才标）。
+VALUATION_DEVIATION_THRESHOLD = float(os.getenv("RISK_VALUATION_DEV_PCT", "0.30"))
+
 # 五级分类 LTV 上界（> 上界进入下一级；超过「可疑」上界为「损失」）
 CLASS_LTV_UPPER = {
     "正常": float(os.getenv("RISK_LTV_NORMAL", "0.60")),

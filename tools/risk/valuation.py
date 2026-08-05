@@ -55,6 +55,20 @@ def load_avm_model() -> object | None:
         return None
 
 
+def model_version(model: object | None) -> str:
+    """取 AVM 模型产物版本号；模型缺失或产物无 version 键 → 'unknown'（R-UBQ-01）。
+
+    版本号是血缘分组的锚点：Worker A 重训后在产物 dict 加 version 键，这里只读兼容。
+    产物没有 version 说明估值结论无法追溯到具体训练版本，正是 E-06「不可溯源」的触发条件。
+    """
+    if model is None:
+        return "unknown"
+    if not isinstance(model, dict):
+        return "unknown"
+    ver = model.get("version")
+    return str(ver) if ver else "unknown"
+
+
 def valuation_from_avm(model, collateral: dict, city_map: dict) -> float | None:
     """用 AVM 估抵押物总价（元）。城市码缺失（如合成地址）返回 None，保持原回退语义。
 

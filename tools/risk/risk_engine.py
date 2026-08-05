@@ -5,6 +5,9 @@
 - 五级分类：按 LTV 阈值(config.CLASS_LTV_UPPER)分档。
 - 低置信(AC-04)：spatial_feat_missing_pct >= 25% → 标记 low_confidence，不触发自动预警。
 - 预警(AC-03)：LTV > 红线(0.85) 且非低置信 → 进入 ads_ltv_alerts。
+- 异常估值(R-UNW-03)：AVM 命中时按 |AVM 估值 - true_market_price| / true_market_price 算偏差，
+  严格大于 30%（config.VALUATION_DEVIATION_THRESHOLD）→ abnormal_valuation，走人工核查。
+- 血缘(R-UBQ-01)：每行带 model_version，模型缺失/无版本号 → 'unknown' 并触发「不可溯源」告警。
 """
 
 from __future__ import annotations
@@ -36,6 +39,10 @@ def enrich_loan(
             "alert": False,
             "dwd_hit": False,
             "avm_hit": False,
+            # R-UBQ-01：每笔估值结论都带模型版本；无抵押物无估值，但血缘信息仍随行落库
+            "model_version": valuation.model_version(avm_model),
+            "valuation_deviation_pct": None,
+            "abnormal_valuation": False,
         }
 
     val = valuation.valuation_from_avm(avm_model, collateral, city_map)
@@ -50,6 +57,19 @@ def enrich_loan(
         val = float(collateral.get("true_market_price") or 0.0)  # 回退业务库价格
     balance = float(loan.get("balance") or 0.0)
     ltv = round(balance / val, 4) if val and val > 0 else None
+
+    # R-UNW-03 异常估值：只对 AVM 估值算偏差，参考基准是业务库 true_market_price。
+    # 回退链（DWD/true_market_price）本身不产生「模型判断」，其值与基准同源，偏差恒为 0，
+    # 算了只会把异常噪声化，故 avm 未命中时偏差置 None（无法判别）而非 0。
+    deviation_pct = None
+    if avm_hit and val and val > 0:
+        baseline = float(collateral.get("true_market_price") or 0.0)
+        if baseline > 0:
+            deviation_pct = round(abs(val - baseline) / baseline, 4)
+    # 严格大于阈值才标记（B-04：偏差恰好 = 30% 不标）
+    abnormal_valuation = bool(
+        deviation_pct is not None and deviation_pct > config.VALUATION_DEVIATION_THRESHOLD
+    )
 
     missing_pct = float(collateral.get("spatial_feat_missing_pct") or 0.0)
     low_conf = missing_pct >= config.LOW_CONF_MISSING_PCT
@@ -71,6 +91,9 @@ def enrich_loan(
         "dwd_hit": dwd_hit,
         "avm_hit": avm_hit,
         "customer_id": loan.get("customer_id"),
+        "model_version": valuation.model_version(avm_model),
+        "valuation_deviation_pct": deviation_pct,
+        "abnormal_valuation": abnormal_valuation,
     }
 
 
