@@ -101,7 +101,7 @@ handler 签名统一为 `handler(ctx) -> dict | (int, dict)`；`ctx` 只暴露 `
 
 ## 5. RBAC 角色矩阵（登录 + 服务端强制校验）
 
-内置账号共 **4 个角色**（PRD §7.3 语义；凭据 dev-only 写死在 `app.py` 的 `USERS`，不落库）：
+内置账号共 **4 个角色**（PRD §7.3 的 MVP 子集；凭据 dev-only 写死在 `app.py` 的 `USERS`，不落库）：
 
 | 角色 | 账号 | 说明 |
 |------|------|------|
