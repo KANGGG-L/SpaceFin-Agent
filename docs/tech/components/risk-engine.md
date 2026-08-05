@@ -14,7 +14,7 @@
 2. **LTV（AC-02）**：贷款余额 / 抵押物估值，是贷后风险的核心标尺；
 3. **五级分类**：按 LTV 分 正常/关注/次级/可疑/损失，供 1104 G11 报送（见 reporting-1104.md）；
 4. **贷后预警（AC-03）**：LTV 超强预警线（0.85）且非低置信 → 写 `ads_ltv_alerts` 推贷后保全；
-5. **低置信（AC-04）**：空间特征严重缺失（缺失率 ≥75）→ 抑制自动预警、转人工核查；
+5. **低置信（AC-04）**：空间特征严重缺失（缺失率 > 75，严格大于，恰好=75 不标记）→ 抑制自动预警、转人工核查；
 6. **异常估值（R-UNW-03）**：AVM 估值与参考基准偏差 >30% → 写人工核查告警；
 7. **血缘（R-UBQ-01）**：每行带 `model_version`，模型缺失/无版本号 → 「不可溯源」告警。
 
@@ -54,9 +54,10 @@ alert = LTV > LTV_RED_LINE(0.85) 且 非 low_confidence
 
 - **严格大于**：LTV 恰好 = 0.85 压线不触发（B-01 等号边界）。
 - 阈值环境变量 `RISK_LTV_RED_LINE`（默认 0.85）。
-- ⚠️ **PRD 定义两档预警**（警示线 0.75 警示级 / 强预警线 0.85 强预警级，R-EVT-02），
-  **当前实现只有强预警一档**，0.75 仅作为五级分类「关注」上界存在（`RISK_LTV_ATTN`），
-  代码中不存在 `RISK_LTV_WARN_LINE` 环境变量与「警示级」分支——见「已知局限」。
+- **PRD 两档预警已实现**（警示线 0.75 警示级 / 强预警线 0.85 强预警级，R-EVT-02）：
+  `tools/risk/config.py` 中 `LTV_WARN_LINE=0.75`（warn）与 `LTV_RED_LINE=0.85`（strong）
+  均已存在且可配置；`risk_engine.py` 含两分支逻辑（LTV > 警示线 → warn，LTV > 强预警线
+  → strong 覆盖 warn），`alert` 布尔保持兼容下游。两份阈值均为严格大于（B-01/B-02 等号边界满足）。
 
 ### 3.2 五级分类（`config.CLASS_LTV_UPPER`）
 
@@ -73,15 +74,15 @@ alert = LTV > LTV_RED_LINE(0.85) 且 非 low_confidence
 ### 3.3 低置信（AC-04）
 
 ```
-low_confidence = spatial_feat_missing_pct >= LOW_CONF_MISSING_PCT(75)
+low_confidence = spatial_feat_missing_pct > LOW_CONF_MISSING_PCT(75.0)
 ```
 
-- 阈值 0–100 百分数标度，`RISK_LOW_CONF_MISSING`（默认 75），**含等号**（缺失率 = 75 也标记）。
+- 阈值 0–100 百分数标度，`RISK_LOW_CONF_MISSING`（默认 75.0），**严格大于**（缺失率恰好 = 75 **不标记**，与 AC-04/B-04 边界一致）。
 - 触发后**抑制自动预警**：`alert` 恒 False，不写 `ads_ltv_alerts`，转人工核查。
 - 取值 75 与 tools/spatial 的 missing_ge75「严重缺失」口径一致；旧默认 25 在合成种子上
   会把半数抵押物打成低置信、全量屏蔽 AC-03 预警——25 对应「任一特征缺失」，75 才是
   「空间特征几乎不可用」。
-- ⚠️ 模块 docstring（risk_engine.py）仍写着「>= 25%」，是陈旧注释，实际默认 75。
+- 模块 docstring（risk_engine.py）已说明实际阈值 75（严格大于）：「空间特征缺失率**严格大于** 75（0–100 标度，恰好=75 不低置信）」，旧「>= 25%」为过期注释。
 
 ### 3.4 高危区叠加（S3 接入）
 
@@ -215,15 +216,13 @@ $PY tools/cdc/consumer.py --once --from-offset 0 # 从头重放对账
 
 ## 9. 已知局限
 
-- **PRD 两档预警未完整实现**：R-EVT-02/TC-03 定义「警示线 0.75 警示级 / 强预警线 0.85
-  强预警级，两档可配置、严格大于」，当前 tools/risk **只有 0.85 强预警一档**
-  （`RISK_LTV_RED_LINE`），0.75 仅作为五级分类「关注」上界（`RISK_LTV_ATTN`）；
-  代码与 .env 中均不存在 `RISK_LTV_WARN_LINE`。B-01 等号边界对 0.85 已满足，
-  B-02 两档可配置尚未满足——如需过 TC-03/B-02 需补第二档（本次仅文档，不改代码）。
-- **低置信边界是「≥75」含等号**：`missing_pct >= config.LOW_CONF_MISSING_PCT`。
-  若 PRD 要求严格大于（恰好 75 不算低置信），需确认是否调整代码比较符。
-- **陈旧注释**：risk_engine.py 模块 docstring 仍写「缺失率 >= 25%」，与 config 默认 75
-  不一致，属注释未随阈值更新，后续建议顺手修正（本次只改文档）。
+- **PRD 两档预警已实现**：R-EVT-02/TC-03 定义「警示线 0.75 警示级 / 强预警线 0.85
+  强预警级，两档可配置、严格大于」，`tools/risk` 已实现双档——`config.LTV_WARN_LINE=0.75`
+  （warn）与 `config.LTV_RED_LINE=0.85`（strong）均存在且可配置，`risk_engine.py` 含两分支
+  逻辑（LTV 严格大于警示线 → warn，严格大于强预警线 → strong 覆盖 warn）。B-01/B-02 等号边界均满足。
+- **低置信边界是「严格大于 75」**：`missing_pct > config.LOW_CONF_MISSING_PCT(75.0)`，
+  缺失率恰好 = 75 不标记，与 AC-04/B-04 边界一致。
+- **docstring 已更新**：risk_engine.py 模块 docstring 已说明「缺失率严格大于 75（恰好=75 不低置信）」，与 config 默认 75 一致。
 - **估值基准自指**：参考基准 `true_market_price` 本身由模型版本自产（08-04 版），
   R-UNW-03 的偏差本质是「版本漂移」信号而非绝对市场误差，**勿据此做估值校正层**。
 - **合成地址下估值链退化**：200 笔地址均为上海合成值、无广东城市码，AVM/DWD 大量 miss，
