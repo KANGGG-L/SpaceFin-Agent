@@ -19,7 +19,7 @@ import json
 import time
 
 import pytest
-from conftest import get_json, running_master, seed_tasks
+from orchmods import get_json, running_master, seed_tasks
 
 RUN = "2026-08-04"
 STALE_HB = 1.0  # 远古心跳 → now - hb 必然 > WORKER_TTL

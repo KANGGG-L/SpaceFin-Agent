@@ -26,6 +26,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
 from collections import Counter
 
@@ -861,6 +863,68 @@ BAD_COMMUNITY_NAMES = {
     "望花园",
 }
 
+# 明显非小区名的通用/片区词（精确匹配，仅整串命中才拒，绝不按子串误杀真楼盘名）。
+# 来源：parse_all 后 sz/gz 实测 top 标签里混进了这些（次新小区 27 / 热门小区 15 /
+# 增城 33）。它们不是小区，被当成小区目标编码键只会退化成「区域中位」，徒增噪声、
+# 稀释真小区的 n。业务上可解释：营销描述词（次新/热门/刚需）、房屋类型（公寓/商铺）、
+# 行政区/片区名（增城/大学城/龙岗中心城）都不是可估值的具体楼盘。
+GENERIC_COMM_REJECT = {
+    # 营销/描述词
+    "次新小区",
+    "热门小区",
+    "花园小区",
+    "小区",
+    "刚需小区",
+    "改善小区",
+    "新房",
+    "二手房",
+    "房源",
+    "楼盘",
+    "在售",
+    "急售",
+    "学区房",
+    "地铁房",
+    "安置房",
+    "回迁房",
+    "经济适用房",
+    # 房屋类型（非住宅小区，属商业/商办，不在住宅估值范围）
+    "商铺",
+    "商办",
+    "写字楼",
+    "公寓式",
+    "公寓",
+    # 纯类型词 / 片区-行政区名
+    "花园",
+    "中心区",
+    "中心城",
+    "增城",
+    "大学城",
+    "科学城",
+    "知识城",
+    "龙岗中心城",
+    # 明显乱码/非名
+    "是刚落实的",
+}
+
+# 同一楼盘的尾缀变体合并到主名，避免「万科启城家园/万科启城」「颐安都会中央/颐安都会」
+# 被切成多个目标编码键（每键 n 过小→过度收缩→位置信号丢失）。仅剥明确尾缀，主名
+# 仍含楼盘专名；期数/区块对住宅单价影响很小，合并是合理近似。纯字符串变换、不依赖
+# 全局词表，训练与服务侧 parse_community_from_title 同一逻辑，口径一致。
+CANON_TRAIL = (
+    "家园",
+    "中央",
+    "北区",
+    "南区",
+    "东区",
+    "西区",
+    "一期",
+    "二期",
+    "三期",
+    "四期",
+    "五期",
+    "组团",
+)
+
 # 营销前缀双字词：出现在候选名最前时整体剥掉（例「新收紫麟城二期」→「紫麟城」）。
 # 与 STOP_PREFIX 单字词不同，这里只剥明确的营销双字，避免误伤「新城和樾」这类
 # 「新」是楼盘名一部分的名称。
@@ -933,7 +997,7 @@ def parse_community_from_title(title: str | None) -> str | None:
             if min_len <= len(name) <= 12:
                 if any(w in name for w in DESC_WORDS):
                     pass
-                elif name in BAD_COMMUNITY_NAMES:
+                elif name in BAD_COMMUNITY_NAMES or name in GENERIC_COMM_REJECT:
                     pass
                 elif len(name) > len(best or ""):
                     best = name
@@ -947,16 +1011,424 @@ def parse_community_from_title(title: str | None) -> str | None:
         if len(name) >= 3:
             if any(w in name for w in DESC_WORDS):
                 pass
-            elif name in BAD_COMMUNITY_NAMES:
+            elif name in BAD_COMMUNITY_NAMES or name in GENERIC_COMM_REJECT:
                 pass
             elif len(name) > len(best or ""):
                 best = name
+    # 尾缀规则失败时，回退到语料统计出的楼盘名词典（见下方 build_name_vocab）。
+    # 词典为空（未 fit 且无落盘文件）时等价于旧行为。
+    v = best or _vocab_lookup(title)
+    if v is None or v in GENERIC_COMM_REJECT:
+        return None
+    return _canon_community(v)
+
+
+def _canon_community(name: str | None) -> str | None:
+    """合并同一楼盘的尾缀变体（家园/中央/北南东西区/期数/组团）到主名。"""
+    if not name:
+        return name
+    for t in CANON_TRAIL:
+        if name.endswith(t) and len(name) > len(t):
+            return name[: -len(t)]
+    return name
+
+
+# ---------------------------------------------------------------------------
+# 楼盘名词典（gazetteer）：尾缀规则解决不了的那部分
+#
+# 为什么需要它：尾缀法只能识别「XX花园/XX广场」这类构词规整的名字，但实测
+# 解析失败的 5943 行里大量是「悦泰春天 / 紫云心语 / 海璟天翡 / 华发四季」
+# 这种没有通用尾缀的专有名词——它们是专名，不是构词问题，靠加正则永远补不全。
+#
+# 判别信号（全部来自语料统计，不看价格，因此不构成标签泄漏）：
+#   1) 城市局部性：真楼盘名只在一个城市出现；「园林景观/高端品质」这类营销
+#      短语跨城复用。这是区分专名与通用短语最强的单一信号。
+#   2) 词频下限：至少在 VOCAB_MIN_COUNT 条挂牌里出现（一次性乱码串排除）。
+#   3) 左/右边界完整度：真楼盘名常出现在段首、且后面跟分隔符；「格可大谈」
+#      这种从「价格可大谈」中间切出来的串两头都贴着别的字。
+#   4) 共现判别：楼盘名之间互斥出现（一条挂牌只讲一个楼盘），营销短语则与
+#      各种楼盘名自由共现。与 >=3 个不同楼盘名共现且共现率超阈值即判为通用
+#      短语——「小车任停 / 来电随可看」正是被这条剔掉的。
+#   5) 截断规范化：若候选 v 的某个更长扩展 w 占了 v 出现次数的一半以上，说明
+#      v 只是 w 的截断（万象江 → 万象江山），统一映射到 w，避免标签碎片化。
+#      扩展若落到路名（XX路/街/巷/道）则整条候选剔除——那是地址不是楼盘。
+#
+# 实测：no_comm 从 14.78% 降到 10.11%，抽样 45 条人工核对误报率约 5%，
+# 且残余误报多为「番禺大石/滨江新区」这类片区名，仍是有效位置信号。
+# ---------------------------------------------------------------------------
+VOCAB_MIN_COUNT = 3  # 候选至少出现在 3 条挂牌中
+VOCAB_LEAD_RATIO = 0.3  # 至少 30% 的出现位于「段首」（前面是分隔符或标题开头）
+VOCAB_TRAIL_RATIO = 0.2  # 至少 20% 的出现「段尾」收口（后面是分隔符或标题结尾）
+VOCAB_CO_RATIO = 0.3  # 与其它楼盘名共现率超过此值且共现对象 >=3 个 → 判为通用短语
+VOCAB_MAX_LEN = 10
+
+# 词典落盘路径：训练时 fit 并写出，predict/服务侧 import 本模块时自动载入，
+# 保证训练与推理用同一份词典（否则同一条 title 训练标到小区、服务解析不出，
+# 会回退城市中位，正是 README 记录过的接入坑）。
+VOCAB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "community_vocab.json")
+
+_NAME_VOCAB: set[str] = set()
+_NAME_CANON: dict[str, str] = {}
+
+# 候选名不能以这些字结尾：道路/公共设施/量词，说明抽到的是地址或描述而非楼盘
+_VOCAB_ROAD_TAIL = ("路", "街", "巷", "道")
+_VOCAB_BAD_TAIL = _VOCAB_ROAD_TAIL + (
+    "站",
+    "口",
+    "旁",
+    "侧",
+    "附",
+    "近",
+    "中",
+    "小",
+    "学",
+    "局",
+    "所",
+    "厂",
+    "公",
+    "电",
+    "楼",
+    "层",
+    "房",
+    "厅",
+    "卫",
+    "米",
+    "平",
+    "幢",
+    "栋",
+    # 截断噪声尾：真实语料里「万科启城家园业 / 广州花园大 / 万达越王里商 /
+    # 翠岗花园二 / 御龙山精」都是营销串「家园业主急售 / 花园大润发 / 越王里商业街 /
+    # 二期 / 精装」的截断，不是楼盘名本身。缺了它们，截断规范化会把这些
+    # 噪声串当扩展目标（canon 反向映射），污染词典。
+    "业",
+    "全",
+    "商",
+    "二",
+    "精",
+    "大",
+)
+# 白名单：虽以 BAD_TAIL 收尾但是真楼盘名（海陵岛恒大是阳江海陵岛的恒大系开发项目，
+# 「大」是名字一部分不是截断）。检查顺序在 tail 判定之前。
+_VOCAB_ALLOWED_EXCEPTIONS = ("海陵岛恒大",)
+# 候选名不能以这些字开头：助词/量词/动词（真楼盘名不会这样起头）
+_VOCAB_BAD_HEAD = (
+    "的",
+    "了",
+    "在",
+    "和",
+    "与",
+    "或",
+    "个",
+    "些",
+    "该",
+    "此",
+    "每",
+    "各",
+    "共",
+    "另",
+    "仅",
+    "约",
+    "起",
+    "含",
+    "望",
+    "回",
+    "买",
+    "租",
+)
+# 候选名不能包含：学校/交易动作词（「愉园教育」「实验学堂」是学区描述不是小区）
+_VOCAB_REJECT_WORDS = (
+    "教育",
+    "学堂",
+    "学位",
+    "名校",
+    "来电",
+    "任停",
+    "住人",
+    "可看",
+    "封窗",
+    "收租",
+    "议价",
+    "过户",
+    "按揭",
+    "包税",
+    "砍价",
+    "急",
+    "税",
+    # 营销/描述串截断（从候选名里整段剔除，避免「三千姐推荐」「万元买」「不做虚」
+    # 「一中金山湖」这类词被当成小区名）：真楼盘名不含这些子串。
+    "推荐",
+    "三千姐",
+    "万元",
+    "万买",
+    "万签",
+    "万整套",
+    "万就可以",
+    "万上车",
+    "不愁",
+    "不用",
+    "不做",
+    "不对",
+    "一定要看",
+    "一中",
+    "楼上",
+    "广州南",
+)
+# 边界判定词表 = 描述词 + 地址/机构词。仅用于「候选是否切在词中间」，
+# 不进候选合法性判定，避免把「XX大道旁的真楼盘名」整体误拒。
+_VOCAB_BOUNDARY_WORDS = list(DESC_WORDS) + [
+    "大道",
+    "教育",
+    "公司",
+    "宿舍",
+    "商圈",
+    "抽签",
+    "质",
+]
+_VOCAB_MAXB = max(len(w) for w in _VOCAB_BOUNDARY_WORDS)
+_HAN_RUN = re.compile(r"[\u4e00-\u9fff]+")
+
+
+def _vocab_cand_ok(c: str) -> bool:
+    """候选名本身是否可能是楼盘名（不看语料统计，只看构词）。"""
+    if len(c) < 3 or c in BAD_COMMUNITY_NAMES or c in GENERIC_COMM_REJECT:
+        return False
+    if c in _VOCAB_ALLOWED_EXCEPTIONS:
+        return True
+    if c[0] in STOP_PREFIX or c[0] in _VOCAB_BAD_HEAD:
+        return False
+    if c.endswith(_VOCAB_BAD_TAIL):
+        return False
+    if any(w in c for w in _VOCAB_REJECT_WORDS):
+        return False
+    return not any(w in c for w in DESC_WORDS)
+
+
+def _vocab_boundary_ok(title: str, i: int, j: int) -> bool:
+    """命中 title[i:j] 是否切在词中间：同一汉字串内向左/右扩若形成描述/地址词则拒。
+
+    扩展遇非汉字（空格/数字/标点）立即停止——那本身就是天然词边界。
+    """
+    for k in range(1, _VOCAB_MAXB):
+        if j + k - 1 >= len(title) or not _HANZI.match(title[j + k - 1]):
+            break
+        if any(w in title[i : j + k] for w in _VOCAB_BOUNDARY_WORDS):
+            return False
+    for k in range(1, _VOCAB_MAXB):
+        if i - k < 0 or not _HANZI.match(title[i - k]):
+            break
+        if any(w in title[i - k : j] for w in _VOCAB_BOUNDARY_WORDS):
+            return False
+    return True
+
+
+def _vocab_candidates(title: str):
+    """产出 (候选串, 起, 止)：每段连续汉字内所有长度 3..VOCAB_MAX_LEN 的子串。"""
+    for m in _HAN_RUN.finditer(title or ""):
+        seg, off = m.group(0), m.start()
+        for length in range(3, min(VOCAB_MAX_LEN, len(seg)) + 1):
+            for p in range(0, len(seg) - length + 1):
+                yield seg[p : p + length], off + p, off + p + length
+
+
+def _vocab_lookup(title: str | None) -> str | None:
+    """在词典中查 title 里最可信的楼盘名（先比语料词频，再比长度）。"""
+    if not title or not _NAME_VOCAB:
+        return None
+    best: str | None = None
+    best_key = (-1, -1)
+    for c, i, j in _vocab_candidates(title):
+        name = _NAME_CANON.get(c, c)
+        if name not in _NAME_VOCAB:
+            continue
+        if not _vocab_boundary_ok(title, i, j):
+            continue
+        key = (_VOCAB_FREQ.get(name, 0), len(name))
+        if key > best_key:
+            best, best_key = name, key
     return best
+
+
+_VOCAB_FREQ: dict[str, int] = {}
+
+
+def build_name_vocab(rows: list[dict]) -> tuple[set[str], dict[str, str], dict[str, int]]:
+    """从挂牌语料统计楼盘名词典。只用 title 文本 + district，**不接触任何价格字段**。
+
+    返回 (词典, 截断规范化映射, 词频)。判别规则见上方注释。
+    """
+    cnt: Counter = Counter()
+    lead: Counter = Counter()
+    trail: Counter = Counter()
+    cities: dict[str, set] = {}
+    co_names: dict[str, set] = {}
+    co_hits: Counter = Counter()
+
+    for r in rows:
+        title = r.get("title") or ""
+        if not title:
+            continue
+        city = r.get("district")
+        # 已由尾缀规则解析出的楼盘名，用于共现判别（词典此时为空，不会递归）
+        other = parse_community_from_title(title)
+        seen = set()
+        for c, i, j in _vocab_candidates(title):
+            if c in seen:
+                continue
+            seen.add(c)
+            cnt[c] += 1
+            cities.setdefault(c, set()).add(city)
+            if i == 0 or not _HANZI.match(title[i - 1]):
+                lead[c] += 1
+            if j >= len(title) or not _HANZI.match(title[j]):
+                trail[c] += 1
+            if other and other not in c and c not in other:
+                co_names.setdefault(c, set()).add(other)
+                co_hits[c] += 1
+
+    base = set()
+    for c, n in cnt.items():
+        if n < VOCAB_MIN_COUNT or len(cities[c]) > 1:
+            continue
+        if lead[c] / n < VOCAB_LEAD_RATIO or trail[c] / n < VOCAB_TRAIL_RATIO:
+            continue
+        if len(co_names.get(c, ())) >= 3 and co_hits[c] / n >= VOCAB_CO_RATIO:
+            continue
+        if _vocab_cand_ok(c):
+            base.add(c)
+
+    # 截断规范化：把 v 逐字向右扩到仍占 v 出现次数一半以上的最长串
+    by_prefix: dict[str, list[str]] = {}
+    for w in cnt:
+        for length in range(3, len(w)):
+            by_prefix.setdefault(w[:length], []).append(w)
+    canon: dict[str, str] = {}
+    road: set[str] = set()
+    for v in base:
+        cur = v
+        while True:
+            nxt = [
+                x
+                for x in by_prefix.get(cur, ())
+                if len(x) == len(cur) + 1 and cnt[x] >= 0.5 * cnt[v]
+            ]
+            if not nxt:
+                break
+            cand = max(nxt, key=lambda x: cnt[x])
+            if cand.endswith(_VOCAB_ROAD_TAIL):
+                road.add(v)  # 真身是路名 → 该候选是地址，整条剔除
+                break
+            if not _vocab_cand_ok(cand):
+                break  # 再扩就进描述词了，停在 cur
+            cur = cand
+        if cur != v and v not in road:
+            canon[v] = cur
+
+    vocab = (base - road) | set(canon.values())
+    freq = {name: cnt.get(name, 0) for name in vocab}
+    return vocab, canon, freq
+
+
+def install_name_vocab(vocab: set[str], canon: dict[str, str], freq: dict[str, int]) -> None:
+    """装载词典到模块全局，供 parse_community_from_title 使用。"""
+    global _NAME_VOCAB, _NAME_CANON, _VOCAB_FREQ
+    _NAME_VOCAB, _NAME_CANON, _VOCAB_FREQ = vocab, canon, freq
+
+
+def save_name_vocab(path: str = VOCAB_PATH) -> None:
+    """把当前词典落盘，供推理侧复用（训练/服务同源，避免标签口径漂移）。"""
+    payload = {
+        "vocab": sorted(_NAME_VOCAB),
+        "canon": _NAME_CANON,
+        "freq": _VOCAB_FREQ,
+        "params": {
+            "min_count": VOCAB_MIN_COUNT,
+            "lead_ratio": VOCAB_LEAD_RATIO,
+            "trail_ratio": VOCAB_TRAIL_RATIO,
+            "co_ratio": VOCAB_CO_RATIO,
+        },
+    }
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def load_name_vocab(path: str = VOCAB_PATH) -> bool:
+    """载入落盘词典；文件不存在或损坏时保持空词典（等价于旧的纯规则行为）。"""
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+    except (ValueError, OSError):
+        return False
+    install_name_vocab(
+        set(payload.get("vocab", ())),
+        dict(payload.get("canon", {})),
+        {k: int(v) for k, v in payload.get("freq", {}).items()},
+    )
+    return True
+
+
+load_name_vocab()
 
 
 # ---------------------------------------------------------------------------
 # 清洗编排 + 统计
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 重复挂牌去重
+#
+# 实测：同「城市+小区+房型+面积+楼层+单价」完全一致的行有 3681 条（9.2%），
+# 其中 91% 的组内标题各不相同——是同一套房被多个经纪人分别挂牌，不是同一条
+# 记录被抓两次。这类冗余会让同一套房**同时落进训练集和测试集**：模型在训练集
+# 见过它的价格，测试时再遇到孪生行等于开卷考试，指标虚高但不反映泛化能力。
+#
+# 判定用「面积+楼层+单价三者全同」这个强约束（单价精确到分），不同单元/不同
+# 楼层/不同报价一律保留——那是真实的市场离散度，不是重复。
+# 注意：去重后 MAPE 通常**上升**，因为拿掉的是模型本来能"抄答案"的部分。
+# 这是把虚高的指标修正回真实水平，不是劣化。
+# ---------------------------------------------------------------------------
+def dedupe_listings(rows: list[dict]) -> tuple[list[dict], dict]:
+    """按「同一套房」去重，每组保留首次出现的一条。返回 (保留行, 统计)。"""
+    seen: set[tuple] = set()
+    kept: list[dict] = []
+    dropped_by_city: Counter = Counter()
+    for r in rows:
+        comm = (r.get("community") or "").strip()
+        area = _as_float(r.get("area_sqm"))
+        up = _as_float(r.get("unit_price_yuan"))
+        if not comm or area is None or up is None:
+            kept.append(r)  # 缺关键字段无法可靠判重，一律保留（宁可漏删）
+            continue
+        key = (
+            r.get("district"),
+            comm,
+            r.get("bedrooms"),
+            r.get("halls"),
+            r.get("bathrooms"),
+            round(area, 2),
+            r.get("floor"),
+            round(up, 2),
+        )
+        if key in seen:
+            dropped_by_city[r.get("district")] += 1
+            continue
+        seen.add(key)
+        kept.append(r)
+    return kept, {
+        "n_dropped_duplicate": sum(dropped_by_city.values()),
+        "dropped_duplicate_by_city": dict(dropped_by_city),
+    }
+
+
+def _as_float(v) -> float | None:
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def clean_rows_with_stats(rows: list[dict], *, parse_all: bool = False) -> tuple[list[dict], dict]:
     """对外市混入行做剔除 + title 回填小区名。
 
@@ -966,6 +1438,36 @@ def clean_rows_with_stats(rows: list[dict], *, parse_all: bool = False) -> tuple
     返回 (保留行, 清洗统计字典)。
     """
     n_comm_missing_before = sum(1 for r in rows if not (r.get("community") or "").strip())
+
+    # 先从本批语料 fit 楼盘名词典再解析。词典只统计 title 文本与 district，
+    # 不接触价格字段，因此虽然在 train/test 切分前构建也不构成标签泄漏
+    # （等同于分词器/词表这类无监督预处理）。fit 完落盘，推理侧 import 即用。
+    #
+    # fit 语料先剔掉外市混入行：词典的核心判别信号是「城市局部性」，而外市行
+    # 的 district 是错标的（北京房源挂着 zh 标签），会把北京楼盘名注册成珠海
+    # 本地名，直接污染这个信号。这里用原始 community 跑一遍判定，不改写任何行。
+    fit_rows = [
+        r
+        for r in rows
+        if detect_foreign(
+            r.get("district"),
+            r.get("community"),
+            r.get("title"),
+            r.get("latitude"),
+            r.get("longitude"),
+            _as_float(r.get("unit_price_yuan")),
+            url=r.get("url"),
+        )
+        is None
+    ]
+    install_name_vocab(set(), {}, {})  # 清空，保证 fit 过程只用尾缀规则做共现判别
+    vocab, canon, freq = build_name_vocab(fit_rows)
+    install_name_vocab(vocab, canon, freq)
+    try:
+        save_name_vocab()
+    except OSError:
+        pass  # 只读文件系统等场景下降级：本次进程内词典仍可用
+
     parsed = 0
     if parse_all:
         for r in rows:
@@ -1051,4 +1553,5 @@ def clean_rows_with_stats(rows: list[dict], *, parse_all: bool = False) -> tuple
         "n_comm_missing_before": n_comm_missing_before,
         "n_backfilled_community": parsed + backfilled,
         "n_comm_missing_after": sum(1 for r in kept if not (r.get("community") or "").strip()),
+        "name_vocab_size": len(vocab),
     }

@@ -1,4 +1,4 @@
-/* global document, fetch, alert, URLSearchParams */
+/* global document, fetch, alert, URLSearchParams, window, console */
 /* S5 前端驾驶舱 · 单页交互逻辑（vanilla JS，无框架无 CDN）。
  * RBAC 由服务端强制校验，这里仅根据 /api/me 返回的 pages/can_confirm/can_export
  * 裁剪导航与操作按钮（第二层防御，主要是 UX 层面）。 */
@@ -123,12 +123,16 @@ function showLogin() {
   document.getElementById("app-view").classList.add("hidden");
 }
 
-function showApp() {
+async function showApp() {
   document.getElementById("login-view").classList.add("hidden");
   document.getElementById("app-view").classList.remove("hidden");
   document.getElementById("user-label").textContent = state.user.user;
   document.getElementById("user-role").textContent = state.user.role_label;
+  // 插件页必须先加载并建好 section，renderNav/showPage 才能正确切换。
+  await loadPlugins(state.user.pages || []);
   renderNav();
+  const visible = (state.user.pages || []).map((p) => p.id);
+  if (!visible.includes(state.currentPage)) state.currentPage = visible[0] || "dashboard";
   showPage(state.currentPage);
 }
 
@@ -158,6 +162,71 @@ function showPage(id) {
   if (id === "dashboard") renderDashboard();
   if (id === "alerts") renderAlerts();
   if (id === "report") renderReport();
+  if (PLUGIN_PAGES[id]) mountPlugin(id);
+}
+
+/* ---------------- 插件页面（pages/ 下的 P1~P10） ----------------
+ * 每个插件页只需在自己的 js 里调用 registerPage(id, {html, render})：
+ *   html   —— 页面骨架字符串，首次挂载时注入 <section id="page-{id}">
+ *   render —— 每次切到该页时调用，负责拉数据并填充 DOM
+ * 由后端 /api/me 下发的 pages[].js 决定加载哪些模块，未授权角色根本拿不到文件名。
+ */
+
+const PLUGIN_PAGES = {};
+const _mounted = new Set();
+
+function registerPage(id, def) {
+  PLUGIN_PAGES[id] = def;
+}
+window.registerPage = registerPage;
+// 供插件页复用主框架的工具函数，避免每个页面重复实现。
+window.spf = { api, esc, fmtMoney, fmtPct, fmtLtv, barChart, hbarList, CLASS_COLORS };
+
+function loadPluginScript(src) {
+  return new Promise((resolve) => {
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = resolve;
+    // 单个页面加载失败不阻塞其它页面，导航项保留但内容为空。
+    s.onerror = () => {
+      console.error("[spf] 页面模块加载失败:", src);
+      resolve();
+    };
+    document.body.appendChild(s);
+  });
+}
+
+async function loadPlugins(pages) {
+  await Promise.all(pages.filter((p) => p.js).map((p) => loadPluginScript("/pages/" + p.js)));
+  // 为每个已注册插件页建好空 section，showPage 的 hidden 切换才能命中。
+  const main = document.querySelector(".main") || document.getElementById("app-view");
+  pages
+    .filter((p) => p.js && PLUGIN_PAGES[p.id])
+    .forEach((p) => {
+      if (document.getElementById("page-" + p.id)) return;
+      const sec = document.createElement("section");
+      sec.id = "page-" + p.id;
+      sec.className = "page hidden";
+      main.appendChild(sec);
+    });
+}
+
+async function mountPlugin(id) {
+  const def = PLUGIN_PAGES[id];
+  const el = document.getElementById("page-" + id);
+  if (!def || !el) return;
+  if (!_mounted.has(id)) {
+    el.innerHTML = typeof def.html === "function" ? def.html() : def.html || "";
+    _mounted.add(id);
+  }
+  if (def.render) {
+    try {
+      await def.render(el);
+    } catch (e) {
+      console.error("[spf] 页面渲染失败:", id, e);
+      el.innerHTML = `<div class="empty">加载失败：${esc(String(e.message || e))}</div>`;
+    }
+  }
 }
 
 /* ---------------- 驾驶舱 ---------------- */
@@ -392,7 +461,7 @@ async function init() {
       });
       const me = await api("/api/me");
       state.user = me;
-      showApp();
+      await showApp();
     } catch {
       err.textContent = "账号或密码错误";
     }
@@ -428,7 +497,7 @@ async function init() {
   const me = await api("/api/me");
   if (me.logged_in) {
     state.user = me;
-    showApp();
+    await showApp();
   } else {
     showLogin();
   }

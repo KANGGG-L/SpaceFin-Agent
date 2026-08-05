@@ -93,8 +93,17 @@ def root_crawl_params(env: dict) -> dict:
 # ---------------- 风险阈值（可被环境变量覆盖，便于验收/压力测试调参）----------------
 LTV_RED_LINE = float(os.getenv("RISK_LTV_RED_LINE", "0.85"))  # AC-03：LTV>红线 → 预警
 LOW_CONF_MISSING_PCT = float(
-    os.getenv("RISK_LOW_CONF_MISSING", "25.0")
-)  # AC-04：空间特征缺失率阈值
+    os.getenv("RISK_LOW_CONF_MISSING", "75.0")
+)  # AC-04：空间特征缺失率阈值（0–100 百分数标度，见 store.load_collaterals 的标度统一）
+# 语义：缺失率 >= 阈值 → low_confidence → 抑制自动预警、转人工核查。
+# 取值 75 与 tools/spatial/main.py 的 missing_ge75「严重缺失」口径一致，全项目只用一个
+# 「空间特征严重缺失」标准。旧默认 25 在合成种子上会把半数抵押物打成低置信、
+# 全量屏蔽 AC-03 预警——25 对应的是「任一特征缺失」，75 才是「空间特征几乎不可用」。
+# DWD 行情键的最小样本量：少于该行数的 (city, community) 不足以支撑「区域中位单价」。
+# 取 20 与 tools/spatial 的 SPATIAL_MIN_ZONE_SAMPLES 一致（同一个「样本量够不够撑起一个
+# 价格画像」的判断，全项目只用一个标准）。库里 78% 的键只有 1 行，不设门槛会让单条挂牌
+# 冒充区域行情——实测 (dg, 东城) 就是 1 行 57,066 元/㎡ 的同名小区，估值高出基准 7.4 倍。
+DWD_MIN_SAMPLES = int(os.getenv("RISK_DWD_MIN_SAMPLES", "20"))
 # R-UNW-03：AVM 估值与参考基准（业务库 true_market_price）偏差超过该阈值即标「异常估值」。
 # 阈值语义是「严格大于」——偏差恰好 = 阈值时不标记（B-04 边界用例按 PRD 约定，>30% 才标）。
 VALUATION_DEVIATION_THRESHOLD = float(os.getenv("RISK_VALUATION_DEV_PCT", "0.30"))

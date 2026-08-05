@@ -11,14 +11,10 @@ HEAD_REWIND ...），所以测试要换配置必须按 env 重新加载一份独
 用 importlib 按唯一模块名加载，互不干扰。
 """
 
-import contextlib
 import importlib.util
 import itertools
-import json
 import os
 import sys
-import threading
-import urllib.request
 
 import pytest
 
@@ -108,61 +104,3 @@ def load_worker():
         return _load(WORKER_PY, "worker", env)
 
     return _loader
-
-
-@contextlib.contextmanager
-def running_master(master_mod, rdb, port=15100):
-    """在后台线程真起 master 的 HTTPServer（绑定 db 15 的 rdb），yield base url。"""
-    srv = None
-    last = None
-    for p in (port, 0):
-        try:
-            srv = master_mod.MasterServer(("127.0.0.1", p), rdb)
-            break
-        except OSError as e:  # 端口被占用 → 退化到临时端口
-            last = e
-    if srv is None:
-        raise last
-    srv.role = "leader"
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    try:
-        yield f"http://127.0.0.1:{srv.server_address[1]}"
-    finally:
-        srv.shutdown()
-        srv.server_close()
-
-
-def get_json(base, path):
-    """打真实 HTTP 请求。必须显式禁代理：macOS 系统代理会拦截 python urllib。"""
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(base + path, timeout=10) as r:
-        return json.loads(r.read().decode("utf-8"))
-
-
-def seed_pool(rdb, pool_key, proxies, source):
-    """向代理池注入若干可弹出的代理（结构与 master 注入格式一致）。"""
-    for p in proxies:
-        rdb.hset(pool_key, p, json.dumps({"proxy": p, "source": source, "https": True}))
-
-
-def seed_tasks(master_mod, rdb, finished=False, **extra):
-    """按 master 的 42 任务定义写 task hash（默认 finished=0）。"""
-    for t in master_mod.DEFAULT_TASKS:
-        key = master_mod._task_key(t["city"], t["type"])
-        state = {
-            "city": t["city"],
-            "type": t["type"],
-            "pages": t["pages"],
-            "target": t["target"],
-            "round": 0,
-            "status": "pending",
-            "finished": "1" if finished else "0",
-            "finish_reason": "",
-            "worker": "",
-            "count": 0,
-            "new_count": 0,
-            "dup_count": 0,
-            "worker_hb": 0,
-        }
-        state.update(extra)
-        rdb.hset(key, mapping=state)

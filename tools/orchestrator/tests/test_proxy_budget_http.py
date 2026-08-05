@@ -5,7 +5,7 @@ free 不计入 ip_used、random 回落 free、池空时预扣回滚、无 city/t
 """
 
 import pytest
-from conftest import get_json, running_master, seed_pool
+from orchmods import get_json, running_master, seed_pool
 
 SMALL_BUDGET = '{"gz": {"sale": 3, "fangyuan": 2}, "sz": {"sale": 2, "fangyuan": 1}}'
 

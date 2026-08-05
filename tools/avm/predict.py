@@ -130,8 +130,13 @@ def _build_row(
     cv = enc["city"].get(city_code, (g, g, 0))
     cmv = enc["comm"].get((city_code, community)) if community else None
     if cmv:
-        # 与 train.py 一致的小区目标编码经验贝叶斯收缩（老模型无 smooth_k 键 → 不收缩）
-        k = float(artifact.get("smooth_k", 0.0))
+        # 与 train.py 一致的小区目标编码经验贝叶斯收缩（老模型无 smooth_k 键 → 不收缩）。
+        # smooth_mode="eb" 时 k 按城市取训练期估的 σ²组内/τ²组间（encoders["eb_k"]），
+        # 与训练时同公式——否则推理侧用固定 k 会与训练分布错位（README 记录的接入坑）。
+        if artifact.get("smooth_mode") == "eb":
+            k = float((enc.get("eb_k") or {}).get(city_code, artifact.get("smooth_k", 0.0)))
+        else:
+            k = float(artifact.get("smooth_k", 0.0))
         n = cmv[2]
         if k > 0 and n > 0:
             sm_mean = (n * cmv[0] + k * cv[0]) / (n + k)

@@ -4,7 +4,7 @@ Airflow Sensor 只认这个接口，误判会让「一页没跑」直接走到 E
 """
 
 import pytest
-from conftest import get_json, running_master, seed_tasks
+from orchmods import get_json, running_master, seed_tasks
 
 RUN = "2026-08-04"
 

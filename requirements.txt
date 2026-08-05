@@ -17,3 +17,7 @@ beautifulsoup4
 selenium
 pre-commit==4.6.1
 pytest
+# 分布式层测试用的 Redis 替身：tools/anjuke_crawler/tests/test_distributed.py 在模块级
+# import，缺失会让 `pytest tools/` 直接收集失败；orchestrator 的 conftest 也用它在无
+# 真实 Redis 时降级。
+fakeredis
