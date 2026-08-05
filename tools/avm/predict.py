@@ -130,7 +130,15 @@ def _build_row(
     cv = enc["city"].get(city_code, (g, g, 0))
     cmv = enc["comm"].get((city_code, community)) if community else None
     if cmv:
-        cat = [cmv[0], cmv[1], cmv[2], cmv[0] - cv[0]]
+        # 与 train.py 一致的小区目标编码经验贝叶斯收缩（老模型无 smooth_k 键 → 不收缩）
+        k = float(artifact.get("smooth_k", 0.0))
+        n = cmv[2]
+        if k > 0 and n > 0:
+            sm_mean = (n * cmv[0] + k * cv[0]) / (n + k)
+            sm_med = (n * cmv[1] + k * cv[1]) / (n + k)
+        else:
+            sm_mean, sm_med = cmv[0], cmv[1]
+        cat = [sm_mean, sm_med, n, sm_mean - cv[0]]
     else:
         cat = [np.nan, np.nan, 0.0, np.nan]
     cat += [cv[0], cv[1], cv[2]]
