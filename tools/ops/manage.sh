@@ -145,6 +145,42 @@ cmd_watch() {
     done
 }
 
+# ---------------------------------------------------------------- 健康度探测
+# 探测前端 /api/metrics（G8 新增）：需前端已启动且可登录拿到 token。
+# 默认连 127.0.0.1:8500；可用环境变量覆盖：SPF_HOST / SPF_PORT / SPF_USER / SPF_PASS。
+cmd_health() {
+    local host="${SPF_HOST:-127.0.0.1}"
+    local port="${SPF_PORT:-8500}"
+    local user="${SPF_USER:-risk}"
+    local pass="${SPF_PASS:-risk123}"
+    local base="http://${host}:${port}"
+
+    # 1) 登录拿 token（HttpOnly cookie，curl 用 -c 存到临时文件）。
+    local ck
+    ck=$(mktemp)
+    local login_code
+    login_code=$(curl -s -o /dev/null -w '%{http_code}' -c "$ck" \
+        -X POST "$base/api/login" \
+        -H 'Content-Type: application/json' \
+        -d "{\"username\":\"${user}\",\"password\":\"${pass}\"}")
+    if [ "$login_code" != "200" ]; then
+        echo "[health] 登录失败：HTTP $login_code（请检查前端是否启动 / 凭据是否正确）" >&2
+        rm -f "$ck"
+        return 1
+    fi
+
+    # 2) 带 cookie 调 /api/metrics。
+    local body
+    body=$(curl -s -b "$ck" "$base/api/metrics")
+    rm -f "$ck"
+    if [ -z "$body" ]; then
+        echo "[health] 无法获取 /api/metrics（空响应）" >&2
+        return 1
+    fi
+    echo "[health] $base/api/metrics =>"
+    echo "$body" | python3 -m json.tool 2>/dev/null || echo "$body"
+}
+
 cmd_help() {
     cat <<'EOF'
 SpaceFin 资源管家 manage.sh 用法:
@@ -153,6 +189,7 @@ SpaceFin 资源管家 manage.sh 用法:
   manage.sh start <tier>          启动整个 tier（t0 恒驻层 / t1 可降级层，含前置检查）
   manage.sh stop  <tier>          停止整个 tier（stop t1 一键释放约 4.7G）
   manage.sh watch [seconds]       每 N 秒(默认30)监控内存，available<2.5G 时告警
+  manage.sh health                探测前端 /api/metrics 健康度（需前端已启动+登录态 token）
   manage.sh help                  显示本帮助
 
 Tier 组件清单:
@@ -183,6 +220,7 @@ case "$cmd" in
         tier_action "$cmd" "$tier"
         ;;
     watch) cmd_watch "${1:-30}" ;;
+    health) cmd_health ;;
     help|-h|--help) cmd_help ;;
     *)
         echo "未知命令: $cmd" >&2

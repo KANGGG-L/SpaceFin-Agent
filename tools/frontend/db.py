@@ -9,15 +9,22 @@
 连接策略：每请求开短连接（autocommit），200 行级数据毫秒级返回；DDL（建确认表）走 root。
 """
 
+import importlib.util
 import os
 import sys
 
 import pymysql
 
 # 复用 tools/risk/config：连接参数与业务日口径必须全仓一致。
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "risk"))
+_RISK_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "risk")
+sys.path.insert(0, _RISK_DIR)
 
-import config  # noqa: E402
+# 显式按路径加载 risk/config，避免被同名顶层模块（如 tools/spatial/config）抢注
+# sys.modules['config'] 导致 CLASS_ORDER 取错——测试混合跑 frontend/spatial 时会踩到。
+_config_path = os.path.join(_RISK_DIR, "config.py")
+_spec = importlib.util.spec_from_file_location("risk_config", _config_path)
+config = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(config)  # noqa: E402
 
 # 五级固定顺序：与 config.CLASS_ORDER 保持一致，前端排序依赖此顺序。
 CLASS_ORDER = config.CLASS_ORDER
