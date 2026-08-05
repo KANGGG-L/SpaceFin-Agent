@@ -194,7 +194,7 @@ class SpaceFinApp(BaseHTTPRequestHandler):
         elif path == "/api/alerts/export":
             user = self._require(CAN_EXPORT)
             if user:
-                self._handle_export(parsed)
+                self._handle_export(parsed, user)
         elif path == "/api/report":
             user = self._require(CAN_VIEW_REPORT)
             if user:
@@ -320,7 +320,7 @@ class SpaceFinApp(BaseHTTPRequestHandler):
         )
         self._send_json(200, result)
 
-    def _handle_export(self, parsed):
+    def _handle_export(self, parsed, user):
         qs = parse_qs(parsed.query)
         risk_class = qs.get("risk_class", [None])[0]
         source = qs.get("source", [None])[0]
@@ -360,6 +360,26 @@ class SpaceFinApp(BaseHTTPRequestHandler):
                 )
             )
         body = ("\n".join(lines) + "\n").encode("utf-8")
+        # TC-06：导出留痕（who/role/when/what=筛选参数/result/ip），CSV 返回后写审计。
+        db.write_audit(
+            "export",
+            user["user"],
+            user["role"],
+            json.dumps(
+                {
+                    "risk_class": risk_class,
+                    "source": source,
+                    "ltv_min": qs.get("ltv_min", [None])[0],
+                    "ltv_max": qs.get("ltv_max", [None])[0],
+                    "date_from": qs.get("date_from", [None])[0],
+                    "date_to": qs.get("date_to", [None])[0],
+                    "rows": result["total"],
+                },
+                ensure_ascii=False,
+            ),
+            "success",
+            self.client_address[0],
+        )
         self._send(
             200,
             body,
@@ -375,10 +395,34 @@ class SpaceFinApp(BaseHTTPRequestHandler):
         loan_id = body.get("loan_id")
         alert_date = body.get("alert_date")
         source = body.get("source")
+        ip = self.client_address[0]
         if loan_id is None or not alert_date or source not in db.ALERT_SOURCES:
+            # 参数缺失也留痕（result=failure），方便追溯异常调用来源。
+            db.write_audit(
+                "confirm",
+                user["user"],
+                user["role"],
+                json.dumps(
+                    {"loan_id": loan_id, "alert_date": alert_date, "source": source},
+                    ensure_ascii=False,
+                ),
+                "failure",
+                ip,
+            )
             self._send_error(400, "参数缺失：loan_id / alert_date / source")
             return
         db.confirm_alert(int(loan_id), alert_date, source, user["user"])
+        db.write_audit(
+            "confirm",
+            user["user"],
+            user["role"],
+            json.dumps(
+                {"loan_id": int(loan_id), "alert_date": alert_date, "source": source},
+                ensure_ascii=False,
+            ),
+            "success",
+            ip,
+        )
         self._send_json(200, {"ok": True, "confirmed_by": user["user"]})
 
 
@@ -388,8 +432,9 @@ def main():
     ap.add_argument("--port", type=int, default=8500, help="监听端口（默认 8500）")
     args = ap.parse_args()
 
-    # 启动时幂等建确认表，避免首个「确认」请求报表不存在。
+    # 启动时幂等建确认表/审计表，避免首个「确认」/「导出」请求报表不存在。
     db.ensure_alert_confirm_table()
+    db.ensure_export_audit_table()
 
     server = ThreadingHTTPServer((args.host, args.port), SpaceFinApp)
     print(f"[frontend] S5 驾驶舱启动 http://{args.host}:{args.port} (dev-only 账号见 README)")

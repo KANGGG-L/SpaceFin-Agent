@@ -49,7 +49,7 @@ pkill -f "tools/frontend/app.py"
 
 - 默认端口 **8500**（已避开 MySQL 3306 / Redis 6379 / Airflow 8080 / Flink 8081 / Doris 9030 / Kafka 9092 / MinIO 9000 等占用）。
 - 默认仅监听 `127.0.0.1`；如需局域网访问加 `--host 0.0.0.0`（开发环境自行评估暴露面）。
-- 首次启动会用 root 凭证幂等建前端自用表 `ads_alert_confirm`（预警确认留痕，不改动预警链路既有表）。
+- 首次启动会用 root 凭证幂等建前端自用表 `ads_alert_confirm`（预警确认留痕，不改动预警链路既有表）与 `ads_export_audit`（操作审计：导出/确认留 who/role/when/what/result/ip，对应 TC-06「审计日志已记录」）。
 
 ## 默认账号（dev-only，上线前必须接统一认证）
 
