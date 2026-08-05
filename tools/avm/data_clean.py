@@ -1335,7 +1335,11 @@ def install_name_vocab(vocab: set[str], canon: dict[str, str], freq: dict[str, i
 
 
 def save_name_vocab(path: str = VOCAB_PATH) -> None:
-    """把当前词典落盘，供推理侧复用（训练/服务同源，避免标签口径漂移）。"""
+    """把当前词典落盘，供推理侧复用（训练/服务同源，避免标签口径漂移）。
+
+    sort_keys=True + indent=2 保证 canon/freq 键序不依赖 DB 行序、与仓库版格式一致，
+    重跑字节级一致，不弄脏工作树。
+    """
     payload = {
         "vocab": sorted(_NAME_VOCAB),
         "canon": _NAME_CANON,
@@ -1349,7 +1353,7 @@ def save_name_vocab(path: str = VOCAB_PATH) -> None:
     }
     tmp = f"{path}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False)
+        json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
     os.replace(tmp, path)
 
 
