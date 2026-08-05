@@ -35,6 +35,11 @@ CREATE TABLE cdc_events (
   'topic' = 'spacefin.cdc.log',
   'properties.bootstrap.servers' = 'kafka:9093',
   'properties.group.id' = 'flink-ltv-realtime',
+  -- 关键修复（2026-08-05 故障根因）：Flink Kafka source 在无事件时会长时间不发送任何
+  -- 请求，客户端/broker 两侧默认 connections.max.idle.ms=9min 会把连接断开；此后该
+  -- 连接不会自动重建（实测作业仍 RUNNING 但 source 静默停摆）。这里把客户端侧拉长到
+  -- 24h，broker 侧在 docker-compose 里同步配置 KAFKA_CONNECTIONS_MAX_IDLE_MS。
+  'properties.connections.max.idle.ms' = '86400000',
   'scan.startup.mode' = 'latest-offset',
   'format' = 'json',
   'json.ignore-parse-errors' = 'true'

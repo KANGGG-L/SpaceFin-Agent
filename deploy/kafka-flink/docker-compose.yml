@@ -40,6 +40,10 @@ services:
       KAFKA_NUM_PARTITIONS: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # 连接空闲存活时间（实测坑）：Flink source 静默期不发包，默认 9min 会把连接断开
+      # 且不再重建（作业 RUNNING 但停摆）。两侧都拉长到 24h：broker 侧在这配，
+      # 客户端侧在 tools/stream/sql/ltv_realtime.sql 的 properties.connections.max.idle.ms。
+      KAFKA_CONNECTIONS_MAX_IDLE_MS: "86400000"
       # broker JVM 上限 1G，容器再留一点余量给页缓存，见下 mem_limit。
       KAFKA_HEAP_OPTS: -Xms512m -Xmx1024m
     ports:
