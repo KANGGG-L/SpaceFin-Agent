@@ -65,15 +65,20 @@
 | └ Redis 任务队列 | 采集中间件 | ✅ 代码集成 | 数据源探索 | [redis-task-queue.md](docs/tech/components/redis-task-queue.md) |
 | └ jhao104/proxy_pool 代理池 | 采集反爬（IP 轮换） | ✅ 客户端集成 | 数据源探索 | [proxy-pool.md](docs/tech/components/proxy-pool.md) |
 | └ 容器编排采集系统 | 分布式调度 + 宿主渲染 | ✅ 已接入（2026-08-03 全量跑通） | 数据源探索 | [crawler-orchestrator.md](docs/tech/components/crawler-orchestrator.md) |
-| └ Airflow 外层编排 | 每日定时触发 + 收尾（DAG 00:30） | ✅ 已接入 | 数据源探索 | [airflow/README.md](airflow/README.md) |
+| └ Airflow 外层编排 | 每日定时触发 + 收尾（DAG 00:30） | ✅ 已接入 | 数据源探索 | [airflow/README.md](airflow/README.md) · [airflow.md](docs/tech/components/airflow.md) |
 | └ ETL 数据管道 | 跨日去重 + DWD 入库 + ODS 湖 | ✅ 已接入 | Sprint 1 | [crawler-etl.md](docs/tech/components/crawler-etl.md) |
 | └ Kubernetes 分布式集群 | 采集横向扩展 | ⏸ 清单齐备（待集群） | 数据源探索 | [k8s-crawler-cluster.md](docs/tech/components/k8s-crawler-cluster.md) |
 | MySQL binlog CDC（I-01） | L0 变更接入 | ✅ 已接入 | Sprint 1 | [cdc-downstream.md](docs/tech/components/cdc-downstream.md) |
-| └ CDC 下游消费链 | L0 增量同步 | ✅ 已接入（改一笔 loan 20s 内下游同步） | Sprint 1 | [cdc-downstream.md](docs/tech/components/cdc-downstream.md) |
+| └ CDC 下游消费链 | L0 增量同步 | ✅ 已接入（改一笔 loan 秒级同步：≤10s 验收线，实测 3s） | Sprint 1 | [cdc-downstream.md](docs/tech/components/cdc-downstream.md) |
 | Doris + MinIO 湖仓 | L0 分层 | ✅ 已接入（ODS/DWD/DWS/ADS 四层 24 表，与 MySQL 对账一致） | Sprint 1 | [doris-lake.md](docs/tech/components/doris-lake.md) |
 | Kafka + Flink 实时 | L1 | ✅ 已接入（CDC→Kafka→Flink 实时预警，3s 端到端；含 rebuild.sh 一键重建） | Sprint 2 | [kafka-flink-realtime.md](docs/tech/components/kafka-flink-realtime.md) |
-| AVM（GBDT+空间特征） | L3 | ✅ 已接入（MAPE 16.6% vs 基线 22.6%，数据质量修复后可达 10% 目标） | Sprint 2 | [tools/avm/README.md](tools/avm/README.md) · [cdc-downstream.md](docs/tech/components/cdc-downstream.md) |
+| AVM（GBDT+空间特征） | L3 | ✅ 已接入（精度@覆盖率：45% 覆盖 MAPE 9.88% ≤10% 达标；全量 14.59%；基线 20.6%；版本 2026-08-05-r11） | Sprint 2 | [avm.md](docs/tech/components/avm.md) · [tools/avm/README.md](tools/avm/README.md) · [cdc-downstream.md](docs/tech/components/cdc-downstream.md) |
+| 风险引擎（LTV 两档预警 / 五级分类 / 低置信） | L3 | ✅ 已接入（LTV 警示线 0.75 / 强预警线 0.85，均可配置，等号边界严格大于不触发；低置信：空间特征缺失率 >75） | Sprint 2 | [risk-engine.md](docs/tech/components/risk-engine.md) |
 | L2 空间特征（高危区/POI/通勤） | L2 | ✅ 已接入（单机近似，降级 Sedona） | Sprint 3 | [spatial-feature.md](docs/tech/components/spatial-feature.md) |
+| 预警推送（I-05 贷后保全） | L4 应用接口 | ✅ 已接入（T+1 推送） | Sprint 4 | [alerting-iv05.md](docs/tech/components/alerting-iv05.md) |
+| 1104 报送（G11 三出口校验） | L5 合规 | ✅ 已接入 | Sprint 4 | [reporting-1104.md](docs/tech/components/reporting-1104.md) |
+| 前端驾驶舱（S5） | L5 展示 | ✅ 已接入（端口 8500，零依赖插件架构） | Sprint 5 | [frontend README](tools/frontend/README.md) |
+| 运维（容器恢复 + 资源管家） | 运维 | ✅ 已接入 | — | [ops.md](docs/tech/components/ops.md) |
 | 倒排索引 / Superset 看板 | L5 | ⏳ 待接入 | Sprint 6 | — |
 
 ## 当前状况（采集系统）
@@ -115,6 +120,31 @@ make down              # 停止
 ```
 
 更多入口见根目录 `Makefile`（`make help`）。合成 seed 由 `seed/generate_seed.py` 生成（确定性、可复现），说明见 [seed/README.md](seed/README.md)。
+
+## 作品集范围说明
+
+> 本仓库是**校招作品集，非商业部署**。以下显式声明定位、前置条件与降级，避免把作品集边界误读为生产系统承诺。
+
+**定位**：校招作品集，验收口径为技术验收 + 可复现 + 测试 + 文档自洽，而非商业 SLA。
+
+**商用部署前置（设计已就绪，非本作品集验收项）**：真实银行数据授权（Q1/Q2）、试点行接入、算法备案、H4 机构试用意向、生产级高可用与亿级数据压测。
+
+**工程简化（已声明的降级）**：
+
+- Sedona → cKDTree 单机近似
+- Hive → MinIO + S3 TVF
+- POI 以挂牌密度代理
+- 通勤以直线距离近似（低估）
+- Doris 单副本 + TRUNCATE 重灌
+- Flink 无 checkpoint
+
+**亮点 / 已实证**：
+
+- AC-07 精度@覆盖率达标：45% 覆盖下 MAPE 9.88% ≤ 10%（模型版本 2026-08-05-r11；全量 14.59%，基线 20.6%）
+- 38% 异常估值经三分量归因查明为「基准自指」——`true_market_price` 由 08-04 版模型自己生成，真实模型误差仅 1/200 笔，故不做校正层
+- Kafka + Flink 3s 端到端实时预警
+
+**未验证假设**：H1/H5 已在数据侧实证；H3 以最小 Critic 原型验证中（见 `tools/`）。
 
 ## 合规与数据
 

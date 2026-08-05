@@ -8,7 +8,7 @@
 
 ## 1. 它解决什么问题
 
-I-01 的 binlog CDC（`tools/cdc/main.py`）只做到「业务变更 1 分钟内落进 ODS」，ODS 之后是断的：
+I-01 的 binlog CDC（`tools/cdc/main.py`）只做到「业务变更 ≤10s 秒级落进 ODS」，ODS 之后是断的：
 改一笔 loan，`ods_cdc_log` 里能查到事件，但 `dws_risk_class` / `ads_ltv_alerts` 还是旧值，
 风险视图与业务库长期漂移，必须靠人手跑一次全量重算才对得上。
 
@@ -121,8 +121,8 @@ tools/orchestrator/.venv/bin/python tools/pipeline/run_pipeline.py --dry-run
 
 | 项 | 结果 |
 |---|---|
-| 改一笔 loan → ODS 可见 | **3s**（`ods_cdc_log` + `data_lake/cdc/ods/loan/dt=*/`） |
-| 改一笔 loan → DWS/ADS 同步（常驻服务全自动） | **20s**（要求 ≤60s） |
+| 改一笔 loan → ODS 可见 | **3s**（验收线 ≤10s 秒级；`ods_cdc_log` + `data_lake/cdc/ods/loan/dt=*/`） |
+| 改一笔 loan → DWS/ADS 同步（常驻服务全自动） | **20s**（属下游 ETL，非 AC-01 验收线） |
 | 是否全量重算 | 否，`recalc_loans=1`（全库 200 笔） |
 | 增量与全量结果互证 | 一致（均为 2 条预警、`total_balance` 相同） |
 
