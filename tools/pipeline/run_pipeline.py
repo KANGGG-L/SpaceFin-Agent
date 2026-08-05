@@ -11,8 +11,9 @@ tools/risk 风险引擎）此前各有各的入口，调度方要自己记住顺
     2. geocode  DWD 坐标补全（可选，--skip-geocode 关闭）
     3. cdc      消费 ODS 变更 → DWS/ADS 增量同步
     4. risk     风险全量重算（对账兜底；--skip-risk 可只跑增量）
-    5. g11      1104 G11 资产质量报送（三出口校验 + 模板落库 + CSV/JSON 导出）
-    6. alert    LTV 预警推送（T+1 去重 + 失败重试状态机；驱动由 SPACEFIN_ALERT_DRIVER 指定）
+    5. snapshot 五级分类每日快照（迁徙矩阵的历史来源；--skip-snapshot 关闭）
+    6. g11      1104 G11 资产质量报送（三出口校验 + 模板落库 + CSV/JSON 导出）
+    7. alert    LTV 预警推送（T+1 去重 + 失败重试状态机；驱动由 SPACEFIN_ALERT_DRIVER 指定）
 
 用法：
     # 每日完整链（Airflow / 手动）
@@ -44,7 +45,7 @@ PYTHON_BIN = sys.executable
 sys.path.insert(0, os.path.join(REPO_ROOT, "tools", "risk"))
 import config  # noqa: E402  (tools/risk 模块，须在 sys.path 注入之后导入)
 
-STEP_ORDER = ["etl", "geocode", "cdc", "risk", "g11", "alert"]
+STEP_ORDER = ["etl", "geocode", "cdc", "risk", "snapshot", "g11", "alert"]
 
 
 def _steps(args) -> list[str]:
@@ -65,6 +66,8 @@ def _steps(args) -> list[str]:
         skip |= {"cdc"}
     if args.skip_risk:
         skip |= {"risk"}
+    if args.skip_snapshot:
+        skip |= {"snapshot"}
     if args.skip_g11:
         skip |= {"g11"}
     if args.skip_alert:
@@ -106,6 +109,16 @@ def _build_cmd(step: str, args) -> list[str]:
         if not args.risk_dry_run:
             cmd.append("--write-db")
         return cmd
+    if step == "snapshot":
+        # 必须排在 risk 之后：dws_risk_class 是主键覆盖写的「当前态」，risk 重算完成的那一刻
+        # 才是当日终态。早于 risk 拍快照会把昨天的分类记成今天的，迁徙矩阵直接失真。
+        return [
+            PYTHON_BIN,
+            "tools/frontend/pages/p3_migration.py",
+            "--snapshot",
+            "--date",
+            args.date,
+        ]
     if step == "g11":
         # 报送必须排在 risk 之后：ads_risk_class 五级汇总是 risk 写好的产物，顺序错了
         # 会拿到昨天或空的汇总；三出口校验不过时 g11 自带 exit 非 0，pipeline 自然中断。
@@ -147,6 +160,7 @@ def main() -> None:
     ap.add_argument("--skip-geocode", action="store_true")
     ap.add_argument("--skip-cdc", action="store_true")
     ap.add_argument("--skip-risk", action="store_true")
+    ap.add_argument("--skip-snapshot", action="store_true")
     ap.add_argument("--skip-g11", action="store_true")
     ap.add_argument("--skip-alert", action="store_true")
     ap.add_argument(

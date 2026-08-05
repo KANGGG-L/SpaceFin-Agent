@@ -7,7 +7,7 @@ crawl_progress:* / crawled_urls:* 一旦被误删 → 次日全量重爬 + 跨�
 import json
 
 import pytest
-from conftest import seed_tasks
+from orchmods import seed_tasks
 
 PREV = "2026-08-03"
 NEW = "2026-08-04"

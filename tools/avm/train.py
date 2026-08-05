@@ -230,6 +230,41 @@ def base_features(
     return np.array(mat, dtype=float), names
 
 
+def eb_k_by_city(comm_d: dict, fallback: float) -> dict:
+    """按城市估经验贝叶斯收缩强度 k = σ²_within / τ²_between（只用传入折内统计）。
+
+    动机：固定 smooth_k 对所有城市一刀切，但城市之间「小区间价差」的量级差了
+    好几倍——gz 全城 log 单价标准差 0.68，yj 只有 0.25。对 gz/sz 这种小区间
+    价差极大的城市，固定 k=10 会把 n 小的小区狠狠拉回城市均值，等于抹掉了
+    最有价值的位置信号；对同质城市 k=10 又偏松。
+
+    正态层次模型 y_ij = μ_c + b_i + e_ij，b_i~N(0,τ²)、e_ij~N(0,σ²) 下，
+    小区 i 的后验均值恰为 (n_i·ȳ_i + k·μ_c)/(n_i + k)，k = σ²/τ²——
+    与代码里已有的收缩公式同形，只是把 k 从手调常数换成按城市估出来的值。
+    矩估计：σ² = 组内合并方差，τ² = Var(ȳ_i) − σ²/n̄（截断到正数）。
+    """
+    by_city: dict[str, list[tuple[float, int, float]]] = {}
+    for (city, _comm), v in comm_d.items():
+        arr = np.asarray(v, dtype=float)
+        ss = float(np.sum((arr - arr.mean()) ** 2)) if len(arr) > 1 else 0.0
+        by_city.setdefault(city, []).append((float(arr.mean()), len(arr), ss))
+    out = {}
+    for city, items in by_city.items():
+        if len(items) < 5:  # 小区太少，估不出 τ²，退回全局固定值
+            continue
+        means = np.array([m for m, _, _ in items])
+        ns = np.array([n for _, n, _ in items])
+        dof = float(np.sum(ns - 1))
+        if dof <= 0:
+            continue
+        sigma2 = float(np.sum([s for _, _, s in items])) / dof  # 组内合并方差
+        tau2 = float(np.var(means)) - sigma2 / float(np.mean(ns))  # 组间方差（矩估计）
+        if sigma2 <= 0 or tau2 <= 1e-6:
+            continue
+        out[city] = float(np.clip(sigma2 / tau2, 0.5, 200.0))
+    return out
+
+
 def fit_encoders(rows: list[dict], y: np.ndarray) -> dict:
     """从给定行统计目标编码字典（只允许传训练折内的行！）。
 
@@ -237,6 +272,7 @@ def fit_encoders(rows: list[dict], y: np.ndarray) -> dict:
         global   全局 log 单价中位数
         city     {city: (mean, median, n)}
         comm     {(city, community): (mean, median, n)}
+        eb_k     {city: 经验贝叶斯收缩强度}（--smooth-mode eb 时启用，附加键不影响旧读法）
         nn       (NearestNeighbors, 训练坐标对应的 y 值, k 列表) | None
     """
     city_d, comm_d = {}, {}
@@ -247,6 +283,7 @@ def fit_encoders(rows: list[dict], y: np.ndarray) -> dict:
     enc = {"global": float(np.median(y))}
     enc["city"] = {k: (float(np.mean(v)), float(np.median(v)), len(v)) for k, v in city_d.items()}
     enc["comm"] = {k: (float(np.mean(v)), float(np.median(v)), len(v)) for k, v in comm_d.items()}
+    enc["eb_k"] = eb_k_by_city(comm_d, 0.0)
     pts = [(r["lat"], r["lng"], yy) for r, yy in zip(rows, y, strict=True) if r["lat"] == r["lat"]]
     if pts:
         from sklearn.neighbors import NearestNeighbors
@@ -261,7 +298,11 @@ def fit_encoders(rows: list[dict], y: np.ndarray) -> dict:
 
 
 def apply_encoders(
-    enc: dict, rows: list[dict], exclude_self: bool = False, smooth_k: float = 0.0
+    enc: dict,
+    rows: list[dict],
+    exclude_self: bool = False,
+    smooth_k: float = 0.0,
+    smooth_mode: str = "fixed",
 ) -> np.ndarray:
     """把编码特征映射到行。exclude_self=True 用于训练折内 OOF 计算（邻域不含自身）。
 
@@ -270,13 +311,17 @@ def apply_encoders(
     smooth_k>0 时对小区目标编码做经验贝叶斯收缩（向城市均值/中位靠拢）：
     sm = (n*val + k*ref)/(n+k)。n 小的新小区统计噪声大，收缩能显著降低其对
     预测的方差贡献；n 大的成熟小区几乎不受影响。
+
+    smooth_mode="eb" 时 k 改为按城市估的 σ²组内/τ²组间（见 eb_k_by_city），
+    小区间价差大的城市自动少收缩；估不出的城市回退 smooth_k。
     """
     g = enc["global"]
-    k = smooth_k
+    eb = enc.get("eb_k", {}) if smooth_mode == "eb" else {}
     feat = []
     for r in rows:
         cv = enc["city"].get(r["city"], (g, g, 0))
         cmv = enc["comm"].get((r["city"], r["comm"])) if r["comm"] else None
+        k = eb.get(r["city"], smooth_k) if smooth_mode == "eb" else smooth_k
         if cmv:
             n = cmv[2]
             if k > 0 and n > 0:
@@ -346,10 +391,13 @@ def build_features(
     encoders: dict,
     exclude_self: bool = False,
     smooth_k: float = 0.0,
+    smooth_mode: str = "fixed",
 ) -> np.ndarray:
     """组装全部特征（基础 + 编码 + 空间）。供训练与测试两用。"""
     base_feat, _ = base_features(rows)
-    enc_feat = apply_encoders(encoders, rows, exclude_self=exclude_self, smooth_k=smooth_k)
+    enc_feat = apply_encoders(
+        encoders, rows, exclude_self=exclude_self, smooth_k=smooth_k, smooth_mode=smooth_mode
+    )
     return np.hstack([base_feat, enc_feat])
 
 
@@ -463,6 +511,129 @@ def decompose_by_city(rows: list[dict], y_true: np.ndarray, y_pred: np.ndarray) 
 
 
 # ---------------------------------------------------------------------------
+# 置信度评分 + MAPE@coverage（AC-07 收口口径：精度 @ 覆盖率）
+#
+# 商用 AVM（Zillow/RICS/IAAO 系）不报裸 MAPE，而是报「精度 @ 覆盖率」：可比案例
+# 充足的估值放行、不足的主动弃权转人工（对应风险侧 AC-04 的 low_confidence）。
+# 全量 MAPE 的噪声下界 ≈12%（留一法实测），AC-07 的 ≤10% 只可能在可比案例充足的
+# 高置信子集上达成。本函数给出这个子集的最小覆盖率。
+# ---------------------------------------------------------------------------
+
+
+def city_log_sd(rows: list[dict]) -> dict[str, float]:
+    """每城 log(单价) 标准差，只用传入行统计（调用方传训练集 → 预测时可得）。"""
+    from collections import defaultdict
+
+    buf: dict[str, list[float]] = defaultdict(list)
+    for r in rows:
+        buf[r["city"]].append(float(np.log(r["up"])))
+    return {c: float(np.std(v)) for c, v in buf.items()}
+
+
+def confidence_score(
+    rows: list[dict], enc: dict, city_sd: dict[str, float], tr: list[dict]
+) -> np.ndarray:
+    """每笔预测的置信分（**只用训练集统计，预测时可得，无泄漏**）。
+
+    信号：**可比案例支撑度**——训练集内同 (城市, 小区, 房型) 且面积落在 ±5% / ±2%
+    区间内的挂牌数。这是留一法噪声下界实验（同城同小区同房型面积相近互相预测：
+    ±5% 下界 10.09%、±2% 下界 9.40%）的直接操作化：可比案例越足，小区中位对单套房
+    的代表性越强，越该放行。无小区或无可比案例 → 0 分（弃权转人工）。
+    """
+    import bisect
+    from collections import defaultdict
+
+    # 训练集按 (城市, 小区, 房型) 分组，面积排序，供区间计数
+    groups: dict[tuple, list[float]] = defaultdict(list)
+    for r in tr:
+        if r["comm"]:
+            groups[(r["city"], r["comm"], r["bed"])].append(float(r["area"]))
+    for k in groups:
+        groups[k].sort()
+
+    def _near(areas: list[float], a: float, frac: float) -> int:
+        i = bisect.bisect_left(areas, a * (1 - frac))
+        j = bisect.bisect_right(areas, a * (1 + frac))
+        return j - i
+
+    scores = []
+    for r in rows:
+        if not r["comm"]:
+            scores.append(0.0)
+            continue
+        areas = groups.get((r["city"], r["comm"], r["bed"]))
+        if not areas:
+            scores.append(0.0)
+            continue
+        cnt5 = _near(areas, r["area"], 0.05)
+        cnt2 = _near(areas, r["area"], 0.02)
+        if cnt5 <= 0:
+            scores.append(0.0)
+            continue
+        # 严格可比（±2%）是主信号：留一法里 ±2% 子集噪声下界最低（9.40% vs ±5% 的 10.09%）。
+        # ±5% 的宽可比做次级加分。log1p 饱和避免大桶霸榜。
+        scores.append(float(np.log1p(cnt2) + 0.5 * np.log1p(cnt5)))
+    return np.array(scores, dtype=float)
+
+
+def coverage_curve(
+    y_true: np.ndarray, y_pred: np.ndarray, score: np.ndarray, step: int = 5
+) -> list[dict]:
+    """按置信分从高到低取前 k 行，算累计 MAPE@coverage。coverage 从 100% 降到 30%。"""
+    n = len(score)
+    order = np.argsort(score)  # 升序：最不置信在前
+    pts = []
+    for pct in range(100, 29, -step):
+        k = max(1, int(round(n * pct / 100)))
+        idx = order[n - k :]
+        m = metrics(y_true[idx], y_pred[idx])
+        pts.append(
+            {
+                "coverage_pct": pct,
+                "mape": m["mape"],
+                "mdape": m["mdape"],
+                "n": int(k),
+            }
+        )
+    return pts
+
+
+def ac07_coverage_at_10pct(curve: list[dict]) -> dict | None:
+    """MAPE 首次 ≤10% 的最大覆盖率（对应最小弃权率），永不达标则 None。"""
+    return next((p for p in curve if p["mape"] <= 10.0), None)
+
+
+def confidence_tiers(rows: list[dict], tr: list[dict]) -> dict:
+    """三档可比支撑度：高=±5% 可比≥10 条，中=1–9 条，低=无可比（含无小区）。"""
+    import bisect
+    from collections import defaultdict
+
+    groups: dict[tuple, list[float]] = defaultdict(list)
+    for r in tr:
+        if r["comm"]:
+            groups[(r["city"], r["comm"], r["bed"])].append(float(r["area"]))
+    for k in groups:
+        groups[k].sort()
+
+    tiers = {"high": {"n": 0}, "mid": {"n": 0}, "low": {"n": 0}}
+    for r in rows:
+        areas = groups.get((r["city"], r["comm"], r["bed"])) if r["comm"] else None
+        if not areas:
+            tiers["low"]["n"] += 1
+            continue
+        i = bisect.bisect_left(areas, r["area"] * 0.95)
+        j = bisect.bisect_right(areas, r["area"] * 1.05)
+        cnt = j - i
+        if cnt >= 10:
+            tiers["high"]["n"] += 1
+        elif cnt >= 1:
+            tiers["mid"]["n"] += 1
+        else:
+            tiers["low"]["n"] += 1
+    return tiers
+
+
+# ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
 def main() -> None:
@@ -481,6 +652,30 @@ def main() -> None:
         type=int,
         default=MIN_TRAIN_SAMPLES,
         help="清洗后样本量下限，低于该值直接退出（降级人工，不训练）",
+    )
+    ap.add_argument(
+        "--drop-coords",
+        action="store_true",
+        help="消融实验：丢弃全部经纬度（含回填），用于量化空间特征的真实边际贡献",
+    )
+    ap.add_argument(
+        "--smooth-mode",
+        choices=("fixed", "eb"),
+        default="fixed",
+        help="小区目标编码收缩方式：fixed=统一 --smooth-k；eb=按城市估 σ²/τ²（分城市自适应）",
+    )
+    ap.add_argument(
+        "--loss",
+        choices=("squared_error", "absolute_error", "quantile"),
+        default="squared_error",
+        help="HistGBR 损失。log 空间 MAE≈相对误差中位数优化（改善 MdAPE，不改善 MAPE）",
+    )
+    ap.add_argument("--quantile", type=float, default=0.5, help="--loss quantile 时的分位数")
+    ap.add_argument(
+        "--city-weight-pow",
+        type=float,
+        default=0.0,
+        help="城市逆频样本权重指数（0=不加权）：w ∝ (N/(K*n_city))^pow，上调小样本城市",
     )
     ap.add_argument("--lr", type=float, default=0.03, help="HistGBR learning_rate")
     ap.add_argument("--max-leaves", type=int, default=150, help="HistGBR max_leaf_nodes")
@@ -513,7 +708,15 @@ def main() -> None:
     from coord_backfill import backfill_coords, load_coord_dict
 
     coord_stats = backfill_coords(rows, load_coord_dict(env))
-    if coord_stats["n_backfilled"]:
+    # 消融：把坐标全部抹掉再训练。目的是量化「空间特征到底值多少 MAPE」——
+    # 若 33% 覆盖率的坐标只值零点几个百分点，那么花配额把覆盖率补到 100%
+    # 的收益上界也就是它的两三倍，不足以支撑 15.5%→10% 的目标，应及早换方向。
+    if args.drop_coords:
+        for r in rows:
+            r["lat"], r["lng"] = np.nan, np.nan
+        print("[avm] 消融模式：已丢弃全部坐标（空间特征将全为 NaN）")
+
+    if coord_stats["n_backfilled"] and not args.drop_coords:
         print(
             f"[avm] 坐标回填 {coord_stats['n_backfilled']} 行"
             f"（词典 {coord_stats['by_source']['dict']} / 区中心 {coord_stats['by_source']['district']}）"
@@ -556,12 +759,30 @@ def main() -> None:
     for a, b in kf.split(np.arange(len(tr))):
         fold_enc = fit_encoders([tr[i] for i in a], ytr[a])
         enc_tr[b] = build_features(
-            [tr[i] for i in b], ytr[b], fold_enc, exclude_self=True, smooth_k=args.smooth_k
+            [tr[i] for i in b],
+            ytr[b],
+            fold_enc,
+            exclude_self=True,
+            smooth_k=args.smooth_k,
+            smooth_mode=args.smooth_mode,
         )
     # 测试集用完整训练集编码映射（新小区自动回退城市/全局中位）
     full_enc = fit_encoders(tr, ytr)
     train_mat = enc_tr
-    test_mat = build_features(te, yte, full_enc, exclude_self=False, smooth_k=args.smooth_k)
+    test_mat = build_features(
+        te,
+        yte,
+        full_enc,
+        exclude_self=False,
+        smooth_k=args.smooth_k,
+        smooth_mode=args.smooth_mode,
+    )
+    if args.smooth_mode == "eb":
+        ebk = full_enc.get("eb_k", {})
+        print(
+            "[avm] EB 收缩强度（k 越小=越信小区自身价）: "
+            + " ".join(f"{c}={ebk[c]:.1f}" for c in sorted(ebk, key=lambda c: ebk[c]))
+        )
 
     # HistGBR 原生支持 NaN（无坐标/无小区行保留，特征列有缺失不剔除）
     # 参数：max_leaf_nodes=150 + 更强 L2 正则 在本轮清洗/回填数据上 MAPE 最低
@@ -573,13 +794,24 @@ def main() -> None:
         max_leaf_nodes=args.max_leaves,
         min_samples_leaf=args.min_leaf,
         l2_regularization=args.l2,
+        loss=args.loss,
+        quantile=args.quantile if args.loss == "quantile" else None,
         early_stopping=True,
         validation_fraction=0.1,
         n_iter_no_change=40,
         random_state=args.seed,
         categorical_features=[FEATURE_NAMES.index("city_code")],
     )
-    model.fit(train_mat, ytr)
+    # 城市逆频权重：gz/sz 训练样本各仅 ~1.1k（其余城市 ~2.2k），却是误差最大的两城。
+    # pow=0 时全 1（默认，行为不变）。
+    sw = None
+    if args.city_weight_pow > 0:
+        from collections import Counter
+
+        cnt = Counter(r["city"] for r in tr)
+        sw = np.array([(len(tr) / (len(cnt) * cnt[r["city"]])) ** args.city_weight_pow for r in tr])
+        sw /= sw.mean()
+    model.fit(train_mat, ytr, sample_weight=sw)
     print(f"[avm] 训练完成（{model.n_iter_} iters，{time.time() - t0:.1f}s）")
 
     # 评估：模型 vs 基线，都换算成总价（元）比口径
@@ -613,6 +845,29 @@ def main() -> None:
     for c, v in list(city_metrics.items())[:8]:
         print(f"    {c:<5} n={v['n']:>5} MAPE={v['mape']}%")
 
+    # 置信度分层 + MAPE@coverage（AC-07 收口口径）。置信分只用训练集统计 → 无泄漏。
+    city_sd = city_log_sd(tr)
+    conf = confidence_score(te, full_enc, city_sd, tr)
+    curve = coverage_curve(tp_te, pred_tp, conf)
+    ac07 = ac07_coverage_at_10pct(curve)
+    tiers = confidence_tiers(te, tr)
+    print("\n[avm] 置信度分层（测试集）:")
+    for t, v in tiers.items():
+        print(f"    {t:<4} n={v['n']}")
+    print("[avm] MAPE@coverage（按置信分从高到低累计）:")
+    for p in curve:
+        mark = "  <- AC-07" if ac07 and p["coverage_pct"] == ac07["coverage_pct"] else ""
+        print(
+            f"    覆盖 {p['coverage_pct']:>3}%  n={p['n']:>5}  MAPE={p['mape']}%  MdAPE={p['mdape']}%{mark}"
+        )
+    if ac07:
+        print(
+            f"[avm] AC-07 口径：覆盖 {ac07['coverage_pct']}% 时 MAPE={ac07['mape']}% ≤10%"
+            f"（全量 MAPE={model_met['mape']}%，oracle 下界≈12.65%）"
+        )
+    else:
+        print("[avm] AC-07 口径：30% 以上覆盖率均无法达成 MAPE≤10%")
+
     # 特征缺失率（说明空间特征可用性，写入报告）
     miss = {}
     for name, col in zip(FEATURE_NAMES, test_mat.T, strict=True):
@@ -630,6 +885,9 @@ def main() -> None:
         "feature_names": FEATURE_NAMES,
         "spatial_k": list(SPATIAL_K),
         "smooth_k": args.smooth_k,  # 小区目标编码收缩强度（predict 复用同一公式）
+        # 收缩方式。"fixed"=predict.py 现有读法（用 smooth_k）即可；"eb" 时 k 改按城市取
+        # encoders["eb_k"][city]，predict 侧需同步（老产物无此键 → 视为 fixed，向后兼容）。
+        "smooth_mode": args.smooth_mode,
         "version": version,  # 模型版本（如 2026-08-05-r1），供 predict/运营侧追踪
         "trained_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "n_train": len(tr),
@@ -656,6 +914,10 @@ def main() -> None:
             "l2_regularization": args.l2,
             "max_iter": 2000,
             "early_stopping": True,
+            "loss": args.loss,
+            "quantile": args.quantile if args.loss == "quantile" else None,
+            "smooth_mode": args.smooth_mode,
+            "city_weight_pow": args.city_weight_pow,
         },
         "feature_names": FEATURE_NAMES,
         "feature_missing_pct_test": miss,
@@ -694,6 +956,16 @@ def main() -> None:
         "error_decomposition": {
             "by_segment": seg_metrics,
             "by_city_mape": {c: v for c, v in city_metrics.items()},
+        },
+        "confidence": {
+            "method": "可比案例支撑度 log1p(cnt±2%)+0.5·log1p(cnt±5%)，同(城市,小区,房型)且面积±X%；严格可比(±2%)为主信号；只用训练集统计（无泄漏）；无小区/无可比=0",
+            "tiers": tiers,
+            "coverage_curve": curve,
+            "ac07_coverage_at_10pct": ac07,
+            "note": (
+                "AC-07 收口为「精度@覆盖率」：全量 MAPE 受挂牌价噪声下界(≈12%, 留一法)"
+                "限制无法≤10%，高置信子集（可比案例充足）可达成；弃权笔转 AC-04 低置信人工核查。"
+            ),
         },
     }
     with open(report_path, "w", encoding="utf-8") as f:

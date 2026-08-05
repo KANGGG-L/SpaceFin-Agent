@@ -11,8 +11,11 @@
 """
 
 import os
+import re
 import statistics
 import sys
+
+import config
 
 _AVM_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "avm")
 _avm_predict = None  # 模块级惰性加载：AVM 依赖缺失时首次调用返回 None，不炸风险引擎
@@ -102,27 +105,38 @@ def valuation_from_avm(model, collateral: dict, city_map: dict) -> float | None:
 
 
 def load_dwd_unit_prices(conn) -> dict:
-    """从 spacefin_crawler 读 sale DWD，按 (city, district) 聚合单位价中位数。
+    """从 spacefin_crawler 读 sale DWD，按 (城市码, 地名) 聚合单位价中位数。
 
-    返回 {(city, district): median_unit_price_yuan}。
+    返回 {(city_code, name): median_unit_price_yuan}。
+
+    **列名陷阱**：`crawl_housing_sale.district` 存的是**城市码**（gz/sz/fs…），
+    `community` 存的才是市内地名——两列的名字都和内容对不上，SELECT 里的 AS 别名
+    按真实语义重命名，不要照列名理解。
+
+    `community` 绝大多数是**小区名**（去重 1 万个，如「恒大城」「保利紫云府」），
+    只有极少数是区/镇级聚合（禅城 / 惠城 / 清城…）。抵押物地址解析出的是**区名**，
+    与小区名不同粒度，故本级回退天然低命中——见 `valuation_from_dwd`。
+
+    `DWD_MIN_SAMPLES` 门槛过滤掉样本不足的键：库里 78% 的键只有 1 行，
+    单条挂牌的「中位数」不是行情，放进来只会造出离谱估值。
     """
     out = {}
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT district AS city, community AS district, unit_price_yuan
+        SELECT district AS city_code, community AS name, unit_price_yuan
         FROM crawl_housing_sale
         WHERE district IS NOT NULL AND unit_price_yuan > 0
         """
     )
     buckets: dict[tuple, list] = {}
-    for city, district, up in cur.fetchall():
-        if not district:
+    for city, name, up in cur.fetchall():
+        if not name:
             continue
-        buckets.setdefault((city, district), []).append(float(up))
+        buckets.setdefault((city, name), []).append(float(up))
     cur.close()
     for k, vals in buckets.items():
-        if vals:
+        if len(vals) >= config.DWD_MIN_SAMPLES:
             out[k] = statistics.median(vals)
     return out
 
@@ -137,19 +151,49 @@ def _city_code_from_addr(addr: str, city_map: dict) -> str | None:
     return None
 
 
+# 地址解析三段式：剥市名前缀 → 取首个政区 token → 剥政区后缀。
+# 分三步而不是一条大正则，是因为「后缀要不要剥」依赖剥完后剩几个字（见下方 ≥2 字守卫）。
+_CITY_PREFIX_RE = re.compile(r"^[\u4e00-\u9fa5]{2,4}市")
+_ADMIN_TOKEN_RE = re.compile(r"^([\u4e00-\u9fa5]{1,6}?(?:区|县|市|街道|镇))")
+_ADMIN_SUFFIX_RE = re.compile(r"(?:区|县|市|街道|镇)$")
+
+
 def _district_from_addr(addr: str) -> str | None:
-    """从地址文本提取区域：形如「XX市天河区」→ 天河。合成地址返回 None。"""
+    """从地址文本提取区/县/镇级地名：「广州市天河区体育西路 1 号」→「天河」。合成地址返回 None。
+
+    去掉政区后缀是为了对齐 DWD 键——`crawl_housing_sale.community` 里的粗粒度地名一律
+    不带后缀（禅城 / 惠城 / 清城，库里不存在任何「…区」形式的 community）。
+
+    **≥2 字守卫**：剥完后缀若只剩 1 个字，说明后缀本身是地名的一部分，退回不剥的原 token。
+    中国没有单字区名——「西区」(中山)、「城区」(汕尾)、「梅县」(梅州) 剥成「西」「城」「梅」
+    都不再是地名。这条守卫不是为凑命中，是为不造出假地名。
+
+    命中率的天花板不在本函数：见 `valuation_from_dwd` 的说明。
+    """
     if not addr or addr.startswith("合成地址"):
         return None
-    # 匹配「X区」（不含「X市X区」里的市字干扰，直接找第一个…区）
-    import re
-
-    m = re.search(r"([\u4e00-\u9fa5]{1,8}?区)", addr)
-    return m.group(1) if m else None
+    body = _CITY_PREFIX_RE.sub("", addr, count=1)
+    m = _ADMIN_TOKEN_RE.match(body)
+    if not m:
+        return None
+    token = m.group(1)
+    stripped = _ADMIN_SUFFIX_RE.sub("", token)
+    return stripped if len(stripped) >= 2 else token
 
 
 def valuation_from_dwd(dwd_unit: dict, collateral: dict, city_map: dict) -> float | None:
-    """用 DWD 行情估抵押物：unit_price × area。命中返回元/㎡×㎡，未命中返回 None。"""
+    """用 DWD 行情估抵押物：unit_price × area。命中返回元/㎡×㎡，未命中返回 None。
+
+    **本级命中率天然很低，这是数据粒度差异，不是 bug**（2026-08-05 实测 22/200 → 11%）：
+    抵押物地址只能解析到**区级**（天河 / 南海 / 斗门…，200 笔覆盖 64 个 (城市,区) 组合），
+    而 DWD 的 `community` 是**小区级**（1 万个去重值）。两套地名体系只在少数几个
+    「区名恰好被当作 community 落库」的键上相交——实测仅 6 个键（惠城 / 清城 / 榕城 /
+    源城 / 江城 / 禅城），且这 6 个都是 255–919 行的真区级聚合，命中质量可靠
+    （DWD 估值 / true_market_price 中位 0.95）。
+
+    要提高本级命中率，正确做法是补齐 DWD 的行政区字段（爬虫侧解析 city+district），
+    而不是在这里维护「区名 → 小区名」的映射表——那是用假映射掩盖数据缺口。
+    """
     addr = (collateral.get("property_addr") or "").strip()
     code = _city_code_from_addr(addr, city_map)
     district = _district_from_addr(addr)

@@ -89,6 +89,14 @@ def load_collaterals(conn, collateral_ids: list | None = None) -> dict:
     cols = [d[0] for d in cur.description]
     rows = [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
     cur.close()
+    for r in rows:
+        # 标度统一（SPF-AC04）：collateral.spatial_feat_missing_pct 存的是 0–1 小数，
+        # 而 dws_spatial_feature 同名列与 config.LOW_CONF_MISSING_PCT 都是 0–100 百分数。
+        # 旧实现不做换算，`0.30 >= 25.0` 恒 False → AC-04 低置信路径全库从未触发。
+        # 在唯一的数据入口统一成 0–100，业务逻辑（risk_engine）不再感知标度差异。
+        if r.get("spatial_feat_missing_pct") is not None:
+            v = float(r["spatial_feat_missing_pct"])
+            r["spatial_feat_missing_pct"] = v * 100.0 if v <= 1.0 else v
     return {r["collateral_id"]: r for r in rows}
 
 
@@ -179,12 +187,16 @@ def apply_spatial(collaterals: dict, spatial_map: dict, zone_risk_map: dict) -> 
 
     覆盖规则分两档：
     - poi_density / commute_min：空间表有有效值即覆盖（距离/密度是连续量，稀疏也有信息量）。
-    - spatial_feat_missing_pct / is_high_risk_zone：**仅在 zone 命中时覆盖**——zone_id 非空
-      说明抵押物落在有样本的价格区块内，空间归属可信。zone 为空（如种子随机坐标落在房源
-      聚集区外）时维持 collateral 表占位缺失率与高危标记，否则会把整批贷款打成低置信、
-      屏蔽预警——这不是空间特征应有的语义。
+    - spatial_feat_missing_pct：**空间表有该实体的特征即覆盖**，不再以 zone 命中为前提——
+      缺失率是空间特征自身的质量度量，与抵押物是否落入某个价格区块无关；抵押物该落在
+      网格里却没落上，恰恰说明空间信息不足、缺失率应当如实上报（SPF-AC04 修复）。
+    - is_high_risk_zone：**仅在 zone 命中时覆盖**——zone_id 非空说明抵押物落在有样本的
+      价格区块内，区块风险归属可信。zone 为空（如种子随机坐标落在房源聚集区外）时维持
+      collateral 表占位高危标记，否则会把整批贷款打成高危区。
 
-    真实广东抵押物命中 zone 后上述两档自动全部生效。
+    低置信语义（AC-04）：缺失率 >= config.LOW_CONF_MISSING_PCT(75) 的笔被标记
+    low_confidence，**抑制自动预警转人工核查**。合成种子里 200 笔缺失率中位落在
+    50–75 区间、约半数 >=75，与「合成坐标大多是随机撒点、空间特征先天不足」一致。
     """
     if not spatial_map or not collaterals:
         return
@@ -196,8 +208,10 @@ def apply_spatial(collaterals: dict, spatial_map: dict, zone_risk_map: dict) -> 
             col["poi_density"] = feat["poi_density"]
         if feat["commute_min"] is not None:
             col["commute_min"] = feat["commute_min"]
-        if feat["zone_id"]:
+        # 缺失率：空间表有该实体即覆盖（不再依赖 zone 命中，见 docstring）
+        if feat["spatial_feat_missing_pct"] is not None:
             col["spatial_feat_missing_pct"] = feat["spatial_feat_missing_pct"]
+        if feat["zone_id"]:
             col["is_high_risk_zone"] = zone_risk_map.get(feat["zone_id"], 0)
 
 

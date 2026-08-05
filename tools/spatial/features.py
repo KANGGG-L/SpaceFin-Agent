@@ -151,10 +151,21 @@ def build_ltv_zones(collaterals: list[dict]) -> tuple[list[dict], dict]:
     规则 B：网格内抵押物 LTV 中位 > 红线且样本足够 → 该网格为高危区。
     抵押物当前为上海合成坐标，与广东 DWD 网格不重叠，故 LTV 区块与价格区块
     分属两套网格体系，各自独立画像（zone_type 区分）。
+
+    **LTV 为 None 的抵押物排除出网格统计，不计入分母**（`enrich_ltv` 在
+    true_market_price 缺失或为 0 时会置 None）。理由：`MIN_LTV_ZONE_SAMPLES`
+    这个门槛的语义是「有多少条**真实 LTV 观测**支撑这个中位数」。市值缺失的抵押物
+    贡献不了任何 LTV 观测，把它计入分母会让「1 条真实 LTV + 2 条未知」也能通过
+    样本量门槛，用单点撑起一个区块画像——那正是这个门槛要防的事。语义上与上面
+    「无坐标就跳过」同源：定不了位 / 测不出值 → 不构成样本。
+
+    副作用是市值缺失的抵押物不会体现在高危区判定里。这是有意的：市值缺失本身是
+    **数据质量问题**，该由 spatial_feat_missing_pct → 低置信标记（AC-04）承接，
+    而不是混进 LTV 分布里冒充一个风险观测。
     """
     bucket: dict[tuple, list[float]] = {}
     for c in collaterals:
-        if c.get("lat") is None or c.get("lng") is None:
+        if c.get("lat") is None or c.get("lng") is None or c.get("ltv") is None:
             continue
         glng, glat = config.grid_key(c["lng"], c["lat"])
         bucket.setdefault((glng, glat), []).append(float(c["ltv"]))

@@ -31,6 +31,7 @@ from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import db  # noqa: E402
+import pages as page_registry  # noqa: E402
 
 # ---------------- 用户与 RBAC ----------------
 # 仅开发环境内置账号；凭据写死在代码里并标注 dev-only，上线前必须接统一认证。
@@ -85,6 +86,31 @@ MIME = {
     ".css": "text/css; charset=utf-8",
     ".ico": "image/x-icon",
 }
+
+
+def _nav_for(role):
+    """导航 = 内置三页（dashboard/alerts/report）+ pages/ 插件页，按 order 排序。
+
+    内置页无 js 字段（渲染逻辑在 app.js 里），插件页带 js 供前端动态加载。
+    """
+    builtin = [dict(p, js=None) for p in PAGE_VISIBILITY.get(role, [])]
+    return builtin + page_registry.nav_for(role)
+
+
+class RouteCtx:
+    """插件页面 handler 的入参：只暴露 query / body / user / ip，隔离 HTTP 细节。
+
+    ip 由框架统一下发而非让页面自己去掏 client_address：写操作审计（R-UNW-02）要求
+    可追溯到来源，逐页自取必然有人漏写，漏了还不会报错——审计缺字段是静默失败。
+    """
+
+    __slots__ = ("query", "body", "user", "ip")
+
+    def __init__(self, query, body, user, ip="-"):
+        self.query = query
+        self.body = body
+        self.user = user
+        self.ip = ip
 
 
 def _json_default(o):
@@ -181,6 +207,9 @@ class SpaceFinApp(BaseHTTPRequestHandler):
             self._serve_static("index.html")
         elif path in ("/style.css", "/app.js"):
             self._serve_static(path.lstrip("/"))
+        elif path.startswith("/pages/") and path.endswith(".js"):
+            # 插件页面的前端模块；_serve_static 已做目录穿越防护。
+            self._serve_static(path.lstrip("/"))
         elif path == "/api/me":
             self._handle_me()
         elif path == "/api/dashboard":
@@ -204,7 +233,7 @@ class SpaceFinApp(BaseHTTPRequestHandler):
             user = self._require(CAN_VIEW_REPORT)
             if user:
                 self._send_json(200, {"dates": db.report_dates()})
-        else:
+        elif not self._dispatch_plugin("GET", parsed):
             self._send_error(404, "not found")
 
     def do_POST(self):
@@ -218,8 +247,38 @@ class SpaceFinApp(BaseHTTPRequestHandler):
             user = self._require(CAN_CONFIRM)
             if user:
                 self._handle_confirm(user)
-        else:
+        elif not self._dispatch_plugin("POST", parsed):
             self._send_error(404, "not found")
+
+    # ---------- 插件页面分发 ----------
+
+    def _dispatch_plugin(self, method, parsed):
+        """把请求交给 pages/ 下的插件页面。
+
+        返回 True 表示已受理（无论成功或已回错误响应），False 表示无此路由，
+        由调用方回 404。权限用页面声明的 roles 统一校验，页面模块不必自己判角色。
+        """
+        page, handler = page_registry.resolve(method, parsed.path)
+        if handler is None:
+            return False
+        user = self._require(page["roles"] or None)
+        if not user:
+            return True  # _require 已发 401/403
+        body = self._parse_body() if method == "POST" else {}
+        ctx = RouteCtx(parse_qs(parsed.query), body, user, self.client_address[0])
+        try:
+            result = handler(ctx)
+        except ValueError as exc:
+            # 页面用 ValueError 表达「参数不合法」，统一转 400。
+            self._send_error(400, str(exc))
+            return True
+        except Exception as exc:  # noqa: BLE001 —— 单页异常不应打挂整个服务
+            sys.stderr.write(f"[frontend] page {page['id']} error: {exc}\n")
+            self._send_error(500, "internal error")
+            return True
+        code, data = result if isinstance(result, tuple) else (200, result)
+        self._send_json(code, data)
+        return True
 
     # ---------- 静态与页面 ----------
 
@@ -252,7 +311,7 @@ class SpaceFinApp(BaseHTTPRequestHandler):
                 "user": user["user"],
                 "role": user["role"],
                 "role_label": user["label"],
-                "pages": PAGE_VISIBILITY.get(user["role"], []),
+                "pages": _nav_for(user["role"]),
                 "can_confirm": user["role"] in CAN_CONFIRM,
                 "can_export": user["role"] in CAN_EXPORT,
             },
