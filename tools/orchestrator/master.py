@@ -48,6 +48,7 @@ HB_KEY = "spacefin:master:heartbeat"  # leader heartbeat ts
 WORKER_HB_PREFIX = "spacefin:worker_hb:"  # worker 心跳 key 前缀
 QG_CONSUMED_KEY = "spacefin:qg_consumed"  # 青果提取侧计数（停止条件）
 QG_LAST_POP_KEY = "spacefin:qg_last_pop"  # 最近一次成功发放青果的时间戳（需求闸门）
+QG_REFILL_KEY = "spacefin:qg_last_refill"  # 最近一次青果提取时间戳（提取限流窗口）
 FREE_USED_KEY = "spacefin:free_used"  # 本轮已发放的免费代理计数（免费池总上限）
 LOCK_PREFIX = "spacefin:task_lock:"  # 任务独占锁前缀
 PHASE_KEY = "spacefin:phase"  # 阶段：sale(先出售) / fangyuan(后出租)
@@ -66,6 +67,12 @@ WORKER_HB_TTL = int(os.getenv("WORKER_HB_TTL", 120))  # worker 心跳 key TTL
 MASTER_PORT = int(os.getenv("MASTER_PORT", 5100))
 QG_BUDGET = int(os.getenv("QG_BUDGET", 1000))  # 青果 IP 总预算（跑满 1000）
 QG_SALE_BUDGET = int(os.getenv("QG_SALE_BUDGET", 600))  # sale 阶段青果配额（前 600）
+# 青果提取限流窗口（秒）：两次提取至少间隔该时长，让提取速率匹配 worker 消耗速率
+# （5 worker × 60s 寿命 ≈ 60s 消耗 5 个 → 窗口 60s 正好无缝续供、池子无滞留过期）。
+# 2026-08-05 实测原 25 池目标 + 无限流曾 5 分钟烧 980/1000，其中大部分是
+# 「提 25 用 1-5，滞留池中 55s 过期」的浪费；窗口 60s + QG_TARGET=5 后
+# 日供给上限 720/天 > 1000 配额，配额成为硬闸门而非限流成为瓶颈。
+QG_REFILL_INTERVAL = int(os.getenv("QG_REFILL_INTERVAL", 60))
 FREE_BUDGET = int(
     os.getenv("FREE_BUDGET", 1000)
 )  # 本轮免费代理发放总上限（到限后本轮不再用免费池）
@@ -376,11 +383,27 @@ def refill_qg(rdb, on_demand=False):
     （num=deficit，缺多少拉多少，不浪费配额）；提取侧计数 `qg_consumed` 累计，
     达 QG_BUDGET 后停止补拉（跑满配额），worker 转免费池。
 
-    on_demand=True（HTTP 请求路径，存在即时需求）忽略需求闸门强制补拉；
-    维护线程补拉（on_demand=False）仅当近期有实际青果发放时才提取，避免
-    worker 空闲/掉进 free 失败循环时「提取→55s 过期」白白烧配额。
+    配额守恒（2026-08-05 加）：时间窗口限流 QG_REFILL_INTERVAL 秒内最多提取一次，
+    on_demand 同样受限（防止 5 worker 并发把「池空即补」压成密集提取循环，
+    实测曾 5 分钟烧掉 980/1000 配额）。窗口用 Redis SET NX EX 原子占位，
+    并发请求只有一个能通过，其余本轮跳过（池空时 worker 转免费池兜底，慢点没关系）。
+
+    on_demand=True（HTTP 请求路径，存在即时需求）忽略需求闸门强制补拉，
+    但仍受提取限流窗口约束；维护线程补拉（on_demand=False）仅当近期有实际青果发放时
+    才提取，避免 worker 空闲/掉进 free 失败循环时「提取→55s 过期」白白烧配额。
     """
     if not QG_ENABLED:
+        return 0
+    # 提取限流窗口：距上次提取不足 QG_REFILL_INTERVAL 秒则跳过（配额守恒优先）
+    now = time.time()
+    refill_key = QG_REFILL_KEY
+    acquired = rdb.set(refill_key, now, nx=True, ex=QG_REFILL_INTERVAL)
+    if not acquired:
+        last = rdb.get(refill_key)
+        log(
+            f"qg refill throttled (last={float(last or 0):.0f}, "
+            f"interval={QG_REFILL_INTERVAL}s), skip extraction"
+        )
         return 0
     consumed = int(rdb.get(QG_CONSUMED_KEY) or 0)
     if consumed >= QG_BUDGET:
@@ -664,40 +687,24 @@ def _all_type_done(rdb, typ):
 
 
 def _check_phase_transition(rdb):
-    """sale -> fangyuan：sale 全部完成 或 青果配额耗尽 时切换，并初始化 fangyuan 任务。"""
+    """sale -> fangyuan：**所有 sale 城都已完成** 才切换，并初始化 fangyuan 任务。
+
+    2026-08-05 改（诉求：每城配额兑现 + 每城有数据）：
+    原逻辑在 `consumed >= QG_SALE_BUDGET` 时整体截断并 phase_ended 封存未完成任务——
+    先到先得抢全局池的城市提前烧完 500 配额，其余城市即使还有自己的 18/75 预算
+    也被「别人把配额吃完」拖累封存，本轮不再调度 → 每城数据不保证。
+    现改为：切换只依赖 `_all_type_done`（所有 sale 城 finished）。
+    每城的收敛由 worker 端保障：该城预算耗尽（used>=budget）→ 转免费池 →
+    免费池也空 → `budget_exhausted` 终态（NO_PROXY_MAX_CYCLES 后写 finished）；
+    页面持续被拦 → `fail_budget` 终态（requeue MAX_REQUEUE 次后收敛）。
+    只要每城在自己的预算内跑完（配额足够），全部 finished 自然成立，绝不提前截断。
+    """
     if _get_phase(rdb) != "sale":
         return
-    consumed = int(rdb.get(QG_CONSUMED_KEY) or 0)
-    if consumed >= QG_SALE_BUDGET:
-        reason = f"sale qg quota consumed ({consumed}/{QG_SALE_BUDGET})"
-    elif _all_type_done(rdb, "sale"):
-        reason = "all sale tasks finished"
-    else:
+    if not _all_type_done(rdb, "sale"):
         return
+    reason = "all sale tasks finished"
     log(f"phase transition sale -> fangyuan: {reason}")
-    # 盖终态：sale 阶段已结束，残留未完成（且不在跑）的 sale 任务本 run 内不会再被调度，
-    # 不盖则 /crawl_status 的 42 分母永远凑不齐、all_done 只能依赖 STOP。running 跳过（让 worker 自己写）。
-    sealed = 0
-    for t in DEFAULT_TASKS:
-        if t["type"] != "sale":
-            continue
-        key = _task_key(t["city"], t["type"])
-        if not rdb.exists(key):
-            continue
-        st = rdb.hgetall(key)
-        if st.get("finished") == "1" or st.get("status") == "running":
-            continue
-        rdb.hset(
-            key,
-            mapping={
-                "status": "done",
-                "finished": "1",
-                "finish_reason": "phase_ended",
-            },
-        )
-        sealed += 1
-    if sealed:
-        log(f"phase transition: sealed {sealed} unfinished sale tasks with phase_ended")
     rdb.set(PHASE_KEY, "fangyuan")
     _init_phase_tasks(rdb, "fangyuan")
 
@@ -911,6 +918,7 @@ def _bootstrap_run(rdb):
     rdb.delete(EMPTY_CYCLES_KEY)
     rdb.set(PHASE_KEY, "sale")
     rdb.delete(QG_CONSUMED_KEY)
+    rdb.delete(QG_REFILL_KEY)  # 新 run 重置提取限流窗口（否则上一 run 的窗口残留会卡首轮提取）
     rdb.delete(FREE_USED_KEY)
     rdb.delete(TASK_QUEUE)
     for t in DEFAULT_TASKS:
@@ -1218,6 +1226,17 @@ class Handler(BaseHTTPRequestHandler):
             self._json(crawl_status(rdb))
         elif path == "/proxy/qg":
             city, typ = _resolve_scope(query.get("city", ""), query.get("type", ""))
+            # sale 阶段发放闸门：consumed 达 QG_SALE_BUDGET 后不再向 sale 任务发青果
+            # （转免费池继续，不封存任务）——保证 sale/fangyuan 各用约 500 配额，
+            # 同时不因「某城烧完配额」整体截断其他城。见 _check_phase_transition 注释。
+            if typ == "sale" and _get_phase(rdb) == "sale":
+                _sale_consumed = int(rdb.get(QG_CONSUMED_KEY) or 0)
+                if _sale_consumed >= QG_SALE_BUDGET:
+                    used, budget, _ = _budget_state(rdb, city, typ)
+                    self._proxy_json(
+                        None, None, city, typ, used, budget, False, "sale qg quota spent, use free"
+                    )
+                    return
             allowed, used, budget = try_consume_ip(rdb, city, typ)
             if not allowed:
                 self._proxy_json(None, None, city, typ, used, budget, True, "ip budget exhausted")
@@ -1256,7 +1275,16 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/proxy/random":
             # 青果优先（受预算约束），青果不可用（池空或预算耗尽）则回落免费池
             city, typ = _resolve_scope(query.get("city", ""), query.get("type", ""))
-            allowed, used, budget = try_consume_ip(rdb, city, typ)
+            allowed = True
+            used, budget = 0, 0
+            # sale 阶段发放闸门（同 /proxy/qg）：consumed 达 QG_SALE_BUDGET 后
+            # sale 任务不再尝试青果，直接走免费池——保证 fangyuan 阶段有 QG 可用。
+            if typ == "sale" and _get_phase(rdb) == "sale":
+                _sale_consumed = int(rdb.get(QG_CONSUMED_KEY) or 0)
+                if _sale_consumed >= QG_SALE_BUDGET:
+                    allowed = False
+            if allowed:
+                allowed, used, budget = try_consume_ip(rdb, city, typ)
             if allowed:
                 p = pop_proxy(rdb, POOL_QG)
                 if not p:

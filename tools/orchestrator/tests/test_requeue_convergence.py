@@ -322,44 +322,74 @@ def test_requeue_stale_tasks_runs_the_orphan_sweep(master, rdb):
 
 
 # ================= 第 4 组：切换瞬间盖章 =================
-def test_phase_transition_seals_pending_skips_running_keeps_reason(master, rdb):
+def test_phase_transition_waits_all_sale_done_even_quota_spent(master, rdb):
+    """2026-08-05 新语义：sale 阶段**不再因 consumed >= QG_SALE_BUDGET 截断**。
+
+    诉求是「每城配额兑现 + 每城有数据」——原逻辑在全局配额耗尽时 phase_ended
+    封存未完成任务，先到先得抢池的城市提前烧完 500，其余城市即使还有自己的
+    18/75 预算也被整体截断。新逻辑：切换只由 _all_type_done 驱动，配额闸门
+    改在 /proxy/qg 与 /proxy/random 发放侧（sale 任务转免费池继续，不封存）。
+    """
     set_phase(master, rdb, "sale")
     seed_tasks(master, rdb)
     put_task(
         master, rdb, "gz", "sale", status="done", finished="1", finish_reason="pages_exhausted"
     )
+    # sz 仍 pending，即使 QG 配额已耗尽，也不得切阶段/封存
     put_task(master, rdb, "sz", "sale", status="pending", finished="0", finish_reason="")
-    make_alive_running(master, rdb, "zh", "sale")
-    rdb.set(master.QG_CONSUMED_KEY, master.QG_SALE_BUDGET)  # 触发条件：sale 配额耗尽
-
-    master._check_phase_transition(rdb)
-
-    assert rdb.get(master.PHASE_KEY) == "fangyuan"
-    assert state(master, rdb, "gz", "sale")["finish_reason"] == "pages_exhausted"  # 不覆写
-    sz = state(master, rdb, "sz", "sale")
-    assert sz["finished"] == "1" and sz["finish_reason"] == "phase_ended"
-    zh = state(master, rdb, "zh", "sale")
-    assert zh["finished"] == "0" and zh["status"] == "running"  # 交给 worker
-
-
-def test_running_task_missed_by_transition_is_caught_by_orphan_sweep(master, rdb):
-    """P1-A 的完整复现链：切阶段时 running 被跳过 → worker 死掉 → 收尾扫描兜住。"""
-    set_phase(master, rdb, "sale")
-    seed_tasks(master, rdb)
-    make_alive_running(master, rdb, "gz", "sale")
     rdb.set(master.QG_CONSUMED_KEY, master.QG_SALE_BUDGET)
 
     master._check_phase_transition(rdb)
-    assert state(master, rdb, "gz", "sale")["finished"] == "0"  # 切换瞬间确实漏掉了
 
-    # worker 撞 fail budget → requeue_task 写回 pending（不写 finished），队列项被 purge 清掉
-    put_task(master, rdb, "gz", "sale", status="pending", worker="", worker_hb=0)
-    master._purge_queue(rdb, "fangyuan")
+    assert rdb.get(master.PHASE_KEY) == "sale"  # 未切：还有 sale 城未完成
+    assert state(master, rdb, "sz", "sale")["finished"] == "0"  # 未封存
+    assert state(master, rdb, "sz", "sale")["finish_reason"] == ""
 
-    master.requeue_stale_tasks(rdb)
+    # 补齐所有 sale 城后，切换才发生
+    for t in master.DEFAULT_TASKS:
+        if t["type"] == "sale":
+            put_task(
+                master,
+                rdb,
+                t["city"],
+                "sale",
+                status="done",
+                finished="1",
+                finish_reason="empty_pages",
+            )
+    master._check_phase_transition(rdb)
+    assert rdb.get(master.PHASE_KEY) == "fangyuan"
+
+
+def test_running_task_missed_by_transition_is_caught_by_orphan_sweep(master, rdb):
+    """P1-A 的完整复现链：切阶段时 running 被跳过 → worker 死掉 → 收尾扫描兜住。
+
+    2026-08-05 更新：sale 阶段不再因 QG 配额耗尽截断，切换由 _all_type_done 驱动。
+    这里直接构造「sale 全完成 → 已切 fangyuan」后的现场：一个 sale 任务仍 running
+    但 worker 已死，由 seal_orphan_tasks 兜底写终态。
+    """
+    mark_run_ready(master, rdb)
+    set_phase(master, rdb, "fangyuan")
+    seed_tasks(master, rdb)
+    # 除 gz:sale 外全部 finished（模拟已切阶段）
+    for t in master.DEFAULT_TASKS:
+        if (t["city"], t["type"]) == ("gz", "sale"):
+            continue
+        put_task(
+            master,
+            rdb,
+            t["city"],
+            t["type"],
+            status="done",
+            finished="1",
+            finish_reason="pages_exhausted",
+        )
+    make_dead_running(master, rdb, "gz", "sale")
+
+    master.seal_orphan_tasks(rdb)
     st = state(master, rdb, "gz", "sale")
     assert st["finished"] == "1", "P1-A 未修复：孤儿 sale 任务永远凑不齐 42 分母"
-    assert st["finish_reason"] == "phase_ended"
+    assert st["finish_reason"] == "stale_abandoned"
 
 
 def test_phase_transition_by_all_sale_done(master, rdb):
