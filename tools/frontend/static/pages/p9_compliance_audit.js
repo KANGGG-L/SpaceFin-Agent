@@ -47,7 +47,7 @@
     </div>
 
     <div class="card" style="margin-top:16px">
-      <h2 class="card-title">特征归因 · SHAP（output/avm/attribution_report.json · R-UNW-03）</h2>
+      <h2 class="card-title">特征归因 · permutation importance（output/avm/attribution_report.json · R-UNW-03）</h2>
       <div id="p9-attr-body"><div class="empty">加载中…</div></div>
     </div>
   `;
@@ -120,7 +120,7 @@
     if (!attr.available) {
       body.innerHTML =
         `<div class="check-line" style="color:var(--warn)">⚠ ${attr.message || "归因报告未生成。"}</div>` +
-        `<div class="check-line">归因报告由 <code>tools/avm</code> 训练链路产出（SHAP 特征重要性 + 三分量归因）；` +
+        `<div class="check-line">归因报告由 <code>tools/avm</code> 训练链路产出（permutation importance 特征重要性 + 三分量归因）；` +
         `本页仅展示产物，不参与计算。待报告生成后自动填充，无需改前端。</div>`;
       return;
     }
@@ -136,8 +136,16 @@
         value: escHtml(meta.generated_at || rep.generated_at || "-"),
         sub: attr.path,
       },
-      { label: "方法", value: escHtml(meta.method || summary.method || "SHAP"), sub: "特征归因" },
-      { label: "样本量", value: escHtml(summary.n_samples ?? summary.n ?? "-"), sub: "归因样本" },
+      {
+        label: "方法",
+        value: escHtml(meta.method || summary.method || rep.method || "-"),
+        sub: "特征归因",
+      },
+      {
+        label: "样本量",
+        value: escHtml(summary.n_samples ?? summary.n ?? rep.n_test ?? "-"),
+        sub: "归因样本",
+      },
     ];
     kpiHtml = `<div class="kpi-row">${kpis
       .map(
@@ -148,21 +156,21 @@
       )
       .join("")}</div>`;
 
-    // SHAP 特征重要性表：features 数组优先，字典其次。
+    // 特征重要性表：top_features 数组优先（真实报告结构），旧 features 形态向后兼容。
     let featureHtml = "";
-    const feats = summary.features || summary.shap_values || rep.features || [];
+    const feats = rep.top_features || summary.features || summary.shap_values || rep.features || [];
     if (Array.isArray(feats) && feats.length) {
       featureHtml =
         `<table class="table" style="margin-top:12px"><thead><tr>` +
-        `<th>特征</th><th>SHAP 重要性</th><th>方向 / 备注</th></tr></thead><tbody>` +
+        `<th>特征</th><th>重要性</th><th>说明 / 备注</th></tr></thead><tbody>` +
         feats
           .map((f) => {
             if (typeof f === "string") {
               return `<tr><td>${esc(f)}</td><td>-</td><td>-</td></tr>`;
             }
-            const name = f.name || f.feature || f["0"];
-            const val = f.importance ?? f.value ?? f.shap ?? f["1"];
-            const note = f.note || f.sign || f.direction || "";
+            const name = f.feature || f.name || f.feature_name || f["0"];
+            const val = f.importance_mean ?? f.importance ?? f.value ?? f.shap ?? f["1"];
+            const note = f.chinese_name || f.description || f.note || f.sign || f.direction || "";
             return (
               `<tr><td>${esc(name)}</td>` +
               `<td>${val == null ? "-" : esc(val)}</td>` +
@@ -171,14 +179,24 @@
           })
           .join("") +
         `</tbody></table>`;
-    } else if (feats && typeof feats === "object") {
-      const entries = Object.entries(feats).sort((a, b) => Number(b[1]) - Number(a[1]));
-      if (entries.length) {
-        featureHtml =
-          `<table class="table" style="margin-top:12px"><thead><tr>` +
-          `<th>特征</th><th>SHAP 重要性</th></tr></thead><tbody>` +
-          entries.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join("") +
-          `</tbody></table>`;
+    } else {
+      // 字典形态：{特征: 数值} 或 {特征: {importance_mean, importance_std}}（full_importances）。
+      const obj = rep.full_importances || (feats && typeof feats === "object" ? feats : null);
+      if (obj) {
+        const entries = Object.entries(obj).map(([k, v]) => [
+          k,
+          v && typeof v === "object" ? (v.importance_mean ?? v.importance ?? v.value) : v,
+        ]);
+        entries.sort((a, b) => Number(b[1]) - Number(a[1]));
+        if (entries.length) {
+          featureHtml =
+            `<table class="table" style="margin-top:12px"><thead><tr>` +
+            `<th>特征</th><th>重要性</th></tr></thead><tbody>` +
+            entries
+              .map(([k, v]) => `<tr><td>${esc(k)}</td><td>${v == null ? "-" : esc(v)}</td></tr>`)
+              .join("") +
+            `</tbody></table>`;
+        }
       }
     }
     if (!featureHtml) {

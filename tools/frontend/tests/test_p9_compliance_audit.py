@@ -98,6 +98,46 @@ def _write_attribution(monkeypatch, tmp_path, payload):
     monkeypatch.setattr(mod, "_ATTRIBUTION_FILE", str(p))
 
 
+# 与 output/avm/attribution_report.json 的真实结构一致（dev-attrib 2026-08-05-r11 产物：
+# method=permutation_importance，top_features 数组含 importance_mean，full_importances 字典）。
+_REAL_ATTR_PAYLOAD = {
+    "version": "2026-08-05-r11",
+    "method": "permutation_importance",
+    "n_repeats": 5,
+    "seed": 42,
+    "n_test": 8041,
+    "generated_at": "2026-08-05T20:14:00+08:00",
+    "top_features": [
+        {
+            "feature": "comm_mean",
+            "importance_mean": 11.312702,
+            "importance_std": 0.271125,
+            "chinese_name": "小区目标编码均值",
+            "description": "同(城市,小区)训练折内 log 单价均值（OOF，防泄漏）",
+        },
+        {
+            "feature": "comm_median",
+            "importance_mean": 10.309426,
+            "importance_std": 0.18751,
+            "chinese_name": "小区目标编码中位数",
+            "description": "同(城市,小区)训练折内 log 单价中位数",
+        },
+        {
+            "feature": "city_code",
+            "importance_mean": 7.123482,
+            "importance_std": 0.124236,
+            "chinese_name": "城市编码",
+            "description": "广东 21 城码，HistGBR 类别特征",
+        },
+    ],
+    "full_importances": {
+        "comm_mean": {"importance_mean": 11.312702, "importance_std": 0.271125},
+        "comm_median": {"importance_mean": 10.309426, "importance_std": 0.18751},
+        "city_code": {"importance_mean": 7.123482, "importance_std": 0.124236},
+    },
+}
+
+
 # ---------------------------------------------------------------- PAGE 契约
 def test_page_contract_admin_risk_and_route():
     assert mod.PAGE["id"] == "compliance_audit"
@@ -155,17 +195,44 @@ def test_attribution_missing_degrades_not_500(monkeypatch, conn, ctx, tmp_path):
     assert "tools/avm" in out["attribution"]["message"]
 
 
-def test_attribution_available_returns_report(monkeypatch, conn, ctx, tmp_path):
+def test_attribution_available_returns_real_report(monkeypatch, conn, ctx, tmp_path):
+    """真实报告结构：top_features 数组（importance_mean）+ full_importances 字典。"""
+    monkeypatch.setattr(mod.db, "crawl_conn", lambda: _audit_conn(conn))
+    _write_attribution(monkeypatch, tmp_path, _REAL_ATTR_PAYLOAD)
+    out = mod.get_compliance_audit(ctx)
+
+    assert out["attribution"]["available"] is True
+    report = out["attribution"]["report"]
+    # 方法字段动态来自报告本身，不硬编码。
+    assert report["method"] == "permutation_importance"
+    top = report["top_features"]
+    assert len(top) == 3
+    assert top[0]["feature"] == "comm_mean"
+    assert top[0]["importance_mean"] > 0
+    assert "importance_std" in top[0]
+    # full_importances 是 {特征: {importance_mean, importance_std}} 字典形态。
+    assert report["full_importances"]["city_code"]["importance_mean"] == 7.123482
+
+
+def test_attribution_old_summary_shape_still_supported(monkeypatch, conn, ctx, tmp_path):
+    """旧形态（summary.features）保留向后兼容，方法字段同样动态。"""
     monkeypatch.setattr(mod.db, "crawl_conn", lambda: _audit_conn(conn))
     _write_attribution(
         monkeypatch,
         tmp_path,
-        {"summary": {"method": "SHAP", "features": [{"name": "area", "importance": 0.42}]}},
+        {
+            "summary": {
+                "method": "permutation_importance",
+                "features": [{"name": "area", "importance": 0.42}],
+            }
+        },
     )
     out = mod.get_compliance_audit(ctx)
 
     assert out["attribution"]["available"] is True
-    assert out["attribution"]["report"]["summary"]["method"] == "SHAP"
+    summary = out["attribution"]["report"]["summary"]
+    assert summary["method"] == "permutation_importance"
+    assert summary["features"][0]["name"] == "area"
 
 
 # ---------------------------------------------------------------- detail rows 工具
