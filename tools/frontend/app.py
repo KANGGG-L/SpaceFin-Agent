@@ -72,7 +72,12 @@ def _resolve_passwords() -> dict:
     # 2) dev 模式回退弱口令
     if os.environ.get("SF_DEV_MODE") == "1":
         return {
-            r: {"admin": "admin123", "risk": "risk123", "da": "da123", "postloan": "post123"}[r]
+            r: {
+                "admin": "admin20020309",
+                "risk": "risk20020309",
+                "da": "da20020309",
+                "postloan": "postloan20020309",
+            }[r]
             for r in _ROLE_LABELS
         }
     # 3) 读持久化文件（若存在且含全部角色）
@@ -288,6 +293,9 @@ class SpaceFinApp(BaseHTTPRequestHandler):
         elif path.startswith("/pages/") and path.endswith(".js"):
             # 插件页面的前端模块；_serve_static 已做目录穿越防护。
             self._serve_static(path.lstrip("/"))
+        elif path.startswith("/vendor/"):
+            # 第三方前端库（本地自托管，如 Leaflet）；_serve_static 已做目录穿越防护。
+            self._serve_static(path.lstrip("/"))
         elif path == "/api/me":
             self._handle_me()
         elif path == "/api/dashboard":
@@ -302,6 +310,10 @@ class SpaceFinApp(BaseHTTPRequestHandler):
             user = self._require(CAN_EXPORT)
             if user:
                 self._handle_export(parsed, user)
+        elif path == "/api/alerts/detail":
+            user = self._require()  # 单笔详情只读，登录即可
+            if user:
+                self._handle_detail(parsed)
         elif path == "/api/report":
             user = self._require(CAN_VIEW_REPORT)
             if user:
@@ -332,6 +344,11 @@ class SpaceFinApp(BaseHTTPRequestHandler):
             user = self._require(CAN_CONFIRM)
             if user:
                 self._handle_confirm(user)
+        elif path == "/api/alerts/dispose":
+            # 处置（处置中/已恢复）与确认同权限：admin / risk。
+            user = self._require(CAN_CONFIRM)
+            if user:
+                self._handle_dispose(user)
         elif not self._dispatch_plugin("POST", parsed):
             self._send_error(404, "not found")
 
@@ -459,6 +476,7 @@ class SpaceFinApp(BaseHTTPRequestHandler):
             date_from=first("date_from"),
             date_to=first("date_to"),
             source=first("source"),
+            city=first("city"),
             page=max(1, page),
             page_size=20,
         )
@@ -475,6 +493,7 @@ class SpaceFinApp(BaseHTTPRequestHandler):
             date_from=qs.get("date_from", [None])[0],
             date_to=qs.get("date_to", [None])[0],
             source=source,
+            city=qs.get("city", [None])[0],
             page=1,
             page_size=100000,
         )
@@ -595,6 +614,57 @@ class SpaceFinApp(BaseHTTPRequestHandler):
             ip,
         )
         self._send_json(200, {"ok": True, "confirmed_by": user["user"]})
+
+    def _handle_dispose(self, user):
+        """处置动作：把预警置为处置中（disposed）或已恢复（recovered）。
+
+        与确认同权限（admin/risk）。参数不合法也留审计（result=failure），
+        与 _handle_confirm 的失败留痕口径一致。
+        """
+        body = self._parse_body()
+        loan_id = body.get("loan_id")
+        alert_date = body.get("alert_date")
+        source = body.get("source")
+        status = (body.get("status") or "").strip()
+        ip = self.client_address[0]
+        detail = json.dumps(
+            {"loan_id": loan_id, "alert_date": alert_date, "source": source, "status": status},
+            ensure_ascii=False,
+        )
+        if (
+            loan_id is None
+            or not alert_date
+            or source not in db.ALERT_SOURCES
+            or status not in ("disposed", "recovered")
+        ):
+            db.write_audit("dispose", user["user"], user["role"], detail, "failure", ip)
+            self._send_error(
+                400, "参数缺失或不合法：loan_id / alert_date / source / status(disposed|recovered)"
+            )
+            return
+        db.dispose_alert(int(loan_id), alert_date, source, status, user["user"])
+        db.write_audit("dispose", user["user"], user["role"], detail, "success", ip)
+        self._send_json(200, {"ok": True, "disposed_by": user["user"], "status": status})
+
+    def _handle_detail(self, parsed):
+        """单笔预警详情（行内展开）：基础 + 风险因子 + 地址 + 确认/处置记录。"""
+        qs = parse_qs(parsed.query)
+
+        def first(name):
+            v = qs.get(name, [None])[0]
+            return v if v not in (None, "") else None
+
+        loan_id = first("loan_id")
+        alert_date = first("alert_date")
+        source = first("source")
+        if loan_id is None or not alert_date or source not in db.ALERT_SOURCES:
+            self._send_error(400, "参数缺失：loan_id / alert_date / source")
+            return
+        result = db.alert_detail(int(loan_id), alert_date, source)
+        if result is None:
+            self._send_error(404, "未找到该预警")
+            return
+        self._send_json(200, result)
 
     # ---------------- G8 健康度 ----------------
 

@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SpaceFin · S5 资产风险驾驶舱</title>
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css" />
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
@@ -42,6 +43,13 @@
       <section id="page-dashboard" class="page hidden">
         <h1 class="page-title">资产质量监控驾驶舱</h1>
         <div id="kpi-cards" class="kpi-row"></div>
+        <!-- 数据底座信任卡：爬取规模 / 新鲜度 / 解析成功率 / 模型版本 -->
+        <div id="trust-cards" class="trust-row"></div>
+        <!-- 预警处置闭环漏斗（与 7 天剧本呼应） -->
+        <div class="card funnel-card">
+          <h2 class="card-title">预警处置闭环 · 7 天剧本</h2>
+          <div id="alert-funnel" class="funnel"></div>
+        </div>
         <div class="grid-2">
           <div class="card">
             <h2 class="card-title">五级分类分布（余额/笔数/占比）</h2>
@@ -60,6 +68,8 @@
             <div id="alert-overview" class="alert-overview"></div>
           </div>
         </div>
+        <!-- 诚实标注：演示数据边界 -->
+        <div id="demo-note" class="demo-note"></div>
       </section>
 
       <!-- LTV 预警列表 -->
@@ -78,6 +88,11 @@
               <option value="">全部</option>
               <option value="offline">离线 T+1</option>
               <option value="stream">实时</option>
+            </select>
+          </label>
+          <label>城市
+            <select name="city" id="f-city">
+              <option value="">全部</option>
             </select>
           </label>
           <label>LTV ≥
@@ -102,7 +117,7 @@
               <tr>
                 <th>来源</th><th>贷款号</th><th>客户号</th><th>LTV</th><th>贷款余额</th>
                 <th>市场估值</th><th>风险类</th><th>高危区</th><th>预警等级</th><th>预警日期</th>
-                <th>抵押物地址</th><th>确认</th><th></th>
+                <th>抵押物地址</th><th>确认</th><th>处置状态</th><th></th>
               </tr>
             </thead>
             <tbody></tbody>
@@ -145,6 +160,7 @@
     </main>
   </div>
 
+  <script src="/vendor/leaflet/leaflet.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

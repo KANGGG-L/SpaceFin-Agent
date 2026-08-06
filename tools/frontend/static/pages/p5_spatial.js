@@ -1,4 +1,4 @@
-/* global window, URLSearchParams */
+/* global window, URLSearchParams, document, L, setTimeout */
 /* P5 空间风险画像（插件页）。
  *
  * 为什么地图是手写 SVG 而不是 Leaflet/ECharts：
@@ -106,120 +106,6 @@
     };
   }
 
-  /* ---------------- SVG 地图 ---------------- */
-
-  function niceStep(span) {
-    // 经纬网格线间隔：让整幅图上有 4~8 条线，太密看不清、太疏失去参照。
-    for (const s of [0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5]) {
-      if (span / s <= 8) return s;
-    }
-    return 10;
-  }
-
-  function buildMap(zones, loans, layer, showLoans) {
-    const pts = zones.filter((z) => z.center_lng != null && z.center_lat != null);
-    const lo = showLoans ? loans.filter((l) => l.lat != null && l.lng != null) : [];
-    const all = pts.map((z) => [z.center_lng, z.center_lat]).concat(lo.map((l) => [l.lng, l.lat]));
-    if (!all.length) return { svg: "", empty: true };
-
-    let minLng = Math.min(...all.map((p) => p[0]));
-    let maxLng = Math.max(...all.map((p) => p[0]));
-    let minLat = Math.min(...all.map((p) => p[1]));
-    let maxLat = Math.max(...all.map((p) => p[1]));
-    // 单点或极小范围时给一个最小视野，避免除零 + 一个点占满全屏。
-    if (maxLng - minLng < 0.08) {
-      const c = (maxLng + minLng) / 2;
-      minLng = c - 0.04;
-      maxLng = c + 0.04;
-    }
-    if (maxLat - minLat < 0.08) {
-      const c = (maxLat + minLat) / 2;
-      minLat = c - 0.04;
-      maxLat = c + 0.04;
-    }
-    const mLng = (maxLng - minLng) * 0.06;
-    const mLat = (maxLat - minLat) * 0.06;
-    minLng -= mLng;
-    maxLng += mLng;
-    minLat -= mLat;
-    maxLat += mLat;
-
-    const spanLng = maxLng - minLng;
-    const spanLat = maxLat - minLat;
-    // 等距圆柱投影：1° 经度的实际长度随纬度收缩 cos(lat)，不校正会把广东压扁。
-    const k = Math.cos((((minLat + maxLat) / 2) * Math.PI) / 180);
-    const W = 980;
-    const PADX = 46;
-    const PADY = 26;
-    const plotW = W - PADX * 2;
-    let plotH = (plotW * spanLat) / (spanLng * k);
-    plotH = Math.max(280, Math.min(620, plotH));
-    const H = plotH + PADY * 2;
-    const X = (lng) => PADX + ((lng - minLng) / spanLng) * plotW;
-    const Y = (lat) => PADY + ((maxLat - lat) / spanLat) * plotH;
-
-    let s = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;display:block">`;
-    s += `<rect x="${PADX}" y="${PADY}" width="${plotW}" height="${plotH}" fill="#f8fafc" stroke="#e3e8f0"/>`;
-
-    // 经纬网格线 + 刻度：没有底图，这是读图人判断绝对位置的唯一参照。
-    const stepLng = niceStep(spanLng);
-    const stepLat = niceStep(spanLat);
-    for (let v = Math.ceil(minLng / stepLng) * stepLng; v <= maxLng; v += stepLng) {
-      const x = X(v);
-      s += `<line x1="${x.toFixed(1)}" y1="${PADY}" x2="${x.toFixed(1)}" y2="${(PADY + plotH).toFixed(1)}" stroke="#e8edf5"/>`;
-      s += `<text x="${x.toFixed(1)}" y="${(PADY + plotH + 14).toFixed(1)}" text-anchor="middle" font-size="10" fill="#9ca3af">${v.toFixed(2)}°E</text>`;
-    }
-    for (let v = Math.ceil(minLat / stepLat) * stepLat; v <= maxLat; v += stepLat) {
-      const y = Y(v);
-      s += `<line x1="${PADX}" y1="${y.toFixed(1)}" x2="${(PADX + plotW).toFixed(1)}" y2="${y.toFixed(1)}" stroke="#e8edf5"/>`;
-      s += `<text x="${PADX - 6}" y="${(y + 3).toFixed(1)}" text-anchor="end" font-size="10" fill="#9ca3af">${v.toFixed(2)}°N</text>`;
-    }
-
-    // 比例尺：像素→公里换算，读图人才能判断「两个高危网格挨得近不近」。
-    const kmPerPx = (spanLng * k * 111.32) / plotW;
-    const targetKm = [1, 2, 5, 10, 20, 50, 100, 200].find((v) => v / kmPerPx > 60) || 200;
-    const barPx = targetKm / kmPerPx;
-    const bx = PADX + 10;
-    const by = PADY + plotH - 12;
-    s += `<line x1="${bx}" y1="${by}" x2="${(bx + barPx).toFixed(1)}" y2="${by}" stroke="#6b7280" stroke-width="2"/>`;
-    s += `<line x1="${bx}" y1="${by - 4}" x2="${bx}" y2="${by + 4}" stroke="#6b7280" stroke-width="2"/>`;
-    s += `<line x1="${(bx + barPx).toFixed(1)}" y1="${by - 4}" x2="${(bx + barPx).toFixed(1)}" y2="${by + 4}" stroke="#6b7280" stroke-width="2"/>`;
-    s += `<text x="${(bx + barPx / 2).toFixed(1)}" y="${by - 7}" text-anchor="middle" font-size="10" fill="#6b7280">${targetKm} km</text>`;
-
-    // 抵押物叠加层先画（在网格点下面），避免遮住主体。
-    for (const l of lo) {
-      const x = X(l.lng);
-      const y = Y(l.lat);
-      const c = CLASS_COLORS[l.risk_class] || "#6b7280";
-      s +=
-        `<rect data-lid="${l.loan_id}" x="${(x - 3).toFixed(1)}" y="${(y - 3).toFixed(1)}" width="6" height="6" ` +
-        `fill="${c}" fill-opacity="0.75" stroke="#fff" stroke-width="0.8" style="cursor:pointer"/>`;
-    }
-
-    const scale = makeScale(zones, layer);
-    const maxSample = Math.max(1, ...pts.map((z) => z.sample_count || 0));
-    // 点面积正比于样本量（半径取 sqrt），面积编码比半径编码更符合视觉量感。
-    const radius = (z) => 4 + 11 * Math.sqrt((z.sample_count || 0) / maxSample);
-    // 高危区最后画，保证压在正常网格之上不被盖住。
-    const ordered = pts.slice().sort((a, b) => a.is_high_risk_zone - b.is_high_risk_zone);
-    for (const z of ordered) {
-      const x = X(z.center_lng);
-      const y = Y(z.center_lat);
-      const r = radius(z);
-      const hi = z.is_high_risk_zone;
-      s +=
-        `<circle data-zid="${esc(z.zone_id)}" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${r.toFixed(1)}" ` +
-        `fill="${scale.color(z)}" fill-opacity="${hi ? 0.8 : 0.6}" ` +
-        `stroke="${hi ? "#7f1d1d" : "#94a3b8"}" stroke-width="${hi ? 1.6 : 0.8}" style="cursor:pointer"/>`;
-      if (hi) {
-        // 高危区加一圈光晕，图层切到 POI/通勤 着色时也能一眼认出来。
-        s += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${(r + 3.5).toFixed(1)}" fill="none" stroke="#b91c1c" stroke-opacity="0.45" stroke-dasharray="2 2"/>`;
-      }
-    }
-    s += "</svg>";
-    return { svg: s, scale, empty: false, maxSample };
-  }
-
   /* ---------------- 各区块渲染 ---------------- */
 
   function renderKpi(el, d) {
@@ -249,30 +135,115 @@
       .join("");
   }
 
-  function renderMap(el) {
+  let _map = null;
+  let _zoneLayer = null;
+  let _loanLayer = null;
+
+  function renderMap(el, fit) {
+    if (fit === undefined) fit = true;
     const d = state.data;
-    // 只重写 svg 子容器，不动 #p5-map 本身——tooltip 是它的子节点，
-    // 整体覆盖 innerHTML 会把 tooltip 一起删掉，事件回调里持有的引用就成了游离节点。
-    const box = el.querySelector("#p5-map-svg");
-    const built = buildMap(d.zones, d.collaterals, state.layer, state.showLoans);
-    if (built.empty) {
-      box.innerHTML = `<div class="empty">当前筛选下没有可绘制的网格（该城市可能尚未跑出价格面网格）</div>`;
+    const zones = (d.zones || []).filter((z) => z.center_lng != null && z.center_lat != null);
+    const loans = state.showLoans
+      ? (d.collaterals || []).filter((l) => l.lat != null && l.lng != null)
+      : [];
+    const container = el.querySelector("#p5-leaflet");
+
+    if (!zones.length && !loans.length) {
+      if (_map) {
+        _zoneLayer.clearLayers();
+        _loanLayer.clearLayers();
+      }
       el.querySelector("#p5-legend").innerHTML = "";
       return;
     }
-    box.innerHTML = built.svg;
+
+    // 若页面被 SPA 重新渲染过，旧容器已脱离 DOM，需销毁重建，否则 Leaflet 操作失效。
+    if (_map && (!_map.getContainer || !document.body.contains(_map.getContainer()))) {
+      try {
+        _map.remove();
+      } catch (e) {
+        void e; /* 旧容器已脱离 DOM，remove 失败可忽略 */
+      }
+      _map = _zoneLayer = _loanLayer = null;
+    }
+    if (!_map) {
+      _map = L.map(container, { preferCanvas: true }).setView([23.1, 113.3], 9);
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: "&copy; OpenStreetMap contributors",
+      }).addTo(_map);
+      L.control.scale({ imperial: false }).addTo(_map);
+      _zoneLayer = L.layerGroup().addTo(_map);
+      _loanLayer = L.layerGroup().addTo(_map);
+    }
+
+    _zoneLayer.clearLayers();
+    _loanLayer.clearLayers();
+
+    const scale = makeScale(zones, state.layer);
+    const maxSample = Math.max(1, ...zones.map((z) => z.sample_count || 0));
+    const radius = (z) => 4 + 11 * Math.sqrt((z.sample_count || 0) / maxSample);
+    const bounds = [];
+
+    for (const z of zones) {
+      const lat = z.center_lat,
+        lng = z.center_lng;
+      bounds.push([lat, lng]);
+      const r = radius(z);
+      const hi = z.is_high_risk_zone;
+      const m = L.circleMarker([lat, lng], {
+        radius: r,
+        color: hi ? "#7f1d1d" : "#94a3b8",
+        weight: hi ? 1.6 : 0.8,
+        fillColor: scale.color(z),
+        fillOpacity: hi ? 0.8 : 0.6,
+      });
+      m.bindTooltip(tooltipHtml(z), { sticky: true, direction: "top", opacity: 0.95 });
+      m.on("click", () => openZone(el, z.zone_id));
+      _zoneLayer.addLayer(m);
+      if (hi) {
+        L.circleMarker([lat, lng], {
+          radius: r + 3.5,
+          color: "#b91c1c",
+          weight: 1,
+          fill: false,
+          opacity: 0.45,
+          dashArray: "2 2",
+        }).addTo(_zoneLayer);
+      }
+    }
+
+    if (state.showLoans) {
+      for (const l of loans) {
+        bounds.push([l.lat, l.lng]);
+        const m = L.circleMarker([l.lat, l.lng], {
+          radius: 4,
+          color: "#fff",
+          weight: 0.8,
+          fillColor: CLASS_COLORS[l.risk_class] || "#6b7280",
+          fillOpacity: 0.75,
+        });
+        m.bindTooltip(loanTooltipHtml(l), { sticky: true, opacity: 0.95 });
+        _loanLayer.addLayer(m);
+      }
+    }
+
+    if (fit && bounds.length) {
+      _map.fitBounds(bounds, { padding: [24, 24], maxZoom: 15 });
+    }
+    setTimeout(() => _map.invalidateSize(), 30);
 
     let legend =
       `<span style="color:#374151;font-weight:600">${esc(LAYERS[state.layer].label)}：</span>` +
-      built.scale.stops
+      scale.stops
         .map((s) => `<span><i style="background:${s.color}"></i>${esc(s.label)}</span>`)
         .join("");
     legend +=
       `<span style="margin-left:12px"><i style="background:none;border:1px dashed #b91c1c"></i>高危网格（虚线圈）</span>` +
-      `<span>点面积 ∝ 网格样本量（最大 ${built.maxSample}）</span>`;
+      `<span>点面积 ∝ 网格样本量（最大 ${maxSample}）</span>`;
     if (state.showLoans) {
       legend +=
-        `<span style="margin-left:12px;color:#374151">抵押物（方块）：</span>` +
+        `<span style="margin-left:12px;color:#374151">抵押物（圆点）：</span>` +
         Object.keys(CLASS_COLORS)
           .map((c) => `<span><i style="background:${CLASS_COLORS[c]}"></i>${esc(c)}</span>`)
           .join("");
@@ -584,39 +555,6 @@
       renderMap(el);
     });
 
-    // 地图与列表都用事件委托：SVG 每次重绘都会换 DOM，逐点绑定会漏。
-    const map = el.querySelector("#p5-map");
-    const tip = el.querySelector("#p5-tip");
-    map.addEventListener("mousemove", (e) => {
-      const t = e.target.closest("[data-zid],[data-lid]");
-      if (!t) {
-        tip.style.display = "none";
-        return;
-      }
-      const rect = map.getBoundingClientRect();
-      if (t.dataset.zid) {
-        const z = state.data.zones.find((x) => x.zone_id === t.dataset.zid);
-        if (!z) return;
-        tip.innerHTML = tooltipHtml(z);
-      } else {
-        const l = state.data.collaterals.find((x) => String(x.loan_id) === t.dataset.lid);
-        if (!l) return;
-        tip.innerHTML = loanTooltipHtml(l);
-      }
-      tip.style.display = "block";
-      // 靠右/靠下时翻转，避免 tooltip 被容器裁掉。
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
-      tip.style.left = (x > rect.width - 260 ? x - 250 : x + 14) + "px";
-      tip.style.top = (y > rect.height - 200 ? Math.max(0, y - 200) : y + 14) + "px";
-    });
-    map.addEventListener("mouseleave", () => {
-      tip.style.display = "none";
-    });
-    map.addEventListener("click", (e) => {
-      const t = e.target.closest("[data-zid]");
-      if (t) openZone(el, t.dataset.zid);
-    });
     el.querySelector("#p5-hr-table").addEventListener("click", (e) => {
       const tr = e.target.closest("tr[data-zid]");
       if (tr) openZone(el, tr.dataset.zid);
@@ -648,10 +586,9 @@
 <div class="kpi-row" id="p5-kpi"></div>
 
 <div class="card" style="margin-top:16px">
-  <div class="card-title">空间分布图（纯 SVG 手绘 · 等距圆柱投影 · 无底图无外部依赖）</div>
-  <div id="p5-map" style="position:relative;min-height:300px">
-    <div id="p5-map-svg"></div>
-    <div id="p5-tip" style="display:none;position:absolute;z-index:10;pointer-events:none;background:#111827;color:#f9fafb;font-size:12px;line-height:1.7;padding:8px 10px;border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.25);max-width:280px"></div>
+  <div class="card-title">空间分布图（Leaflet 互动地图 · OpenStreetMap 底图）</div>
+  <div id="p5-map">
+    <div id="p5-leaflet" style="height:560px;width:100%"></div>
   </div>
   <div class="legend" id="p5-legend"></div>
   <div class="check-line">点面积表示网格挂牌样本量；点位为网格内样本的中心坐标，非行政区划边界。悬停看明细，点击下钻。</div>

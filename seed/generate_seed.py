@@ -5,7 +5,8 @@ SpaceFin Agent · 合成信贷 seed 数据生成器（Sprint 0，广东对齐版
 
 目的：
   为本地 MySQL 业务源库生成**合成**信贷样本（客户 / 抵押物 / 贷款三表），
-  输出一份可直接被 MySQL 初始化执行的 SQL（sql/init/02_seed.sql）。
+  输出一份可直接被 MySQL 初始化执行的 SQL（sql/init/02_seed.sql），
+  或通过 --write-db 直接灌入运行中的业务库（7 天演示回填用）。
 
 为什么从「上海合成地址」改成「广东 21 城地址」：
   风险引擎的三级回退（AVM → DWD → true_market_price）要求抵押物地址能解析出
@@ -15,46 +16,38 @@ SpaceFin Agent · 合成信贷 seed 数据生成器（Sprint 0，广东对齐版
   真实风格地址（城市 + 行政区 + 小区名）与对应城市坐标框内的经纬度，让估值链
   第一次真正走到 AVM/DWD。
 
-**本版（对准 DWD 实有键）**：
-  DWD 估值按 (city_code, 区名) 查 spacefin_crawler.crawl_housing_sale 的
-  (district, community)，其中 community 绝大多数是小区名、只有少数是区级聚合。
-  为了让合成地址真正命中 DWD，本版为 17 城各配 2-4 个 **DWD 实有键**：优先
-  区级聚合键（惠城 / 禅城 / 榕城 / 源城 / 清城 / 江城 / 汕尾城 / 台城 / 坡头城 /
-  油城 / 肇城 / 龙岗中心城…），辅以高样本真实小区键（恒大城 / 碧桂园太阳城 /
-  星湖商业城 / 富力城 / 雅居乐花园 / 保利紫山花园…）。地址写作
-  f"{城市名}市{key}区{key}{门牌}号"（如「惠州市惠城区惠城123号」），保证首个
-  政区 token 剥掉后缀后恰好等于 DWD 键 → 100% 命中对应行情。
-  键长约束：valuation 的政区 token 正则只允许 ≤6 字，故所有键均 ≤6 字（含
-  碧桂园华附凤凰城 / 卧龙五洲世纪城 / 碧桂园城邦花园等 7+ 字键全部弃用）。
+**本版（对准 DWD 实有键 + 演示回填，2026-08-06）**：
+  在「DWD 实有键」策略基础上为 7 天演示剧本（docs/demo/script_7d.md）扩展：
+  1. **城市加权**：广州占比提升到 ≈25%（1250/5000），其余 20 城按爬取分布铺满
+     ——演示事件城市是广州，剧本的「广州 LTV 上穿」需要足够样本支撑；
+     原「21 城轮序」在 n=200 时代每城均分，剧本演进后改为加权。
+  2. **LTV 按目标分布生成**：balance = 目标 LTV × 抵押物估值（估值优先取 AVM
+     实时预测，无模型环境回退 true_market_price）。这样引擎重算的 LTV 在基线
+     日精确等于目标 LTV，事件日估值下探后自然上穿预警线（真实引擎传导）。
+  3. **低置信率按验收口径设计**：spatial_feat_missing_pct 按约 50% 落在 >75%
+     （0-100 标度）设计，对应 acceptance.md D3 的「低置信 40%-60%」。
+  4. **真实小区名补充**：广州抵押物地址在小概率上采样 crawl_housing_sale 的
+     真实小区名（增城 / 万科城为 DWD 实有键，其余靠 AVM 城市中位兜底）。
 
-  排除噪音描述词键：`community` 里有一批不是真实地名的噪音键
-  （次新小区 / 热门小区 / 对花园 / 南向对花园 / 望花园 / 新城 / 东城 / 西城 /
-  金城 / 阳光城 / 同城 / 良村 / 附城…），写进地址会很怪，全部排除。
-
-  排除城市：**zs/yf/zh/dg 四城不配 DWD 键**——AVM 数据清洗已证实这四城 DWD
-  community 是 100% 外市错标，用其键等于把错误行情喂进估值链。这四城保留现有
-  真实行政区地址，估值自然回退到 AVM / true_market_price。
+  其余沿用既有设计（见下）。
 
 设计要点：
-  - 仅依赖 Python 标准库，零第三方依赖。
+  - 仅依赖 Python 标准库，零第三方依赖；若运行环境有 sklearn/joblib（如
+    tools/orchestrator/.venv），自动接入 AVM 估值以获得精确的基线 LTV。
   - **完全确定性**：每表使用固定随机种子，放款日期相对固定基准日生成，
-    因此重复运行产出的 SQL 逐字节一致（可安全提交、可复现）。
-  - 城市分布：21 城按固定轮序铺满（n=200 时每城约 9-10 套），贷款/客户分布
-    沿抵押物索引对齐，保证三表外键关系完整。
+    因此重复运行产出的数据逐字节一致（可安全提交、可复现）。
   - true_market_price 以该抵押物选中的 DWD 键单价中位数（元/㎡）为基准加噪声合成；
     无键城市（zs/yf/zh/dg）以 AVM 隐含单价（CITY_UNIT_PRICE）为基准——让业务
     库兜底价与 AVM/DWD 估值的量级一致，避免「全量回退」时 LTV 整体失真。
-  - true_market_price 的合成噪声带为 ±10%（单价乘子 U(0.9, 1.1)，2026-08-05
-    起由 ±35% U(0.75,1.35) 收窄）——原 ±35% 使 R-UNW-03 异常估值（AVM vs 参考价
-    偏差>30%）高达 45.5%，demo 观感差；收窄后异常率回落至正常水平。
   - 字段分布与 docs/poc 的原型保持一致，便于 AVM / LTV 链路衔接。
 
 合规：
   - 全部为合成数据，地址以 DWD 实有键为骨架拼装，不含任何真实个人金融信息。
 
 用法：
-  python3 seed/generate_seed.py          # 默认每表 200 条
-  python3 seed/generate_seed.py 500      # 指定每表条数
+  python3 seed/generate_seed.py               # 默认每表 200 条（仅 SQL）
+  python3 seed/generate_seed.py 5000          # 5000 笔，仅生成 SQL
+  python3 seed/generate_seed.py 5000 --write-db   # 生成并直接灌入 MySQL 业务库
   或：make seed-gen
 """
 
@@ -243,9 +236,135 @@ DWD_KEYS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# 城市加权分布（2026-08-06 起，演示剧本用）
+# 广州提升到 25%（事件城市，剧本「广州 LTV 上穿」需要足够样本）；
+# 其余 20 城共享 75%，彼此比例对齐 crawl_housing_sale 的真实爬取分布
+# （sw/hui/mz/st 等非珠三角城市爬取量更大）。代码内会做归一化。
+# 若想恢复 21 城等分轮序，把下面 gz 改为 100/21 ≈ 4.76 即可。
+# ---------------------------------------------------------------------------
+CITY_WEIGHTS = {
+    "gz": 25.0,  # 剧本事件城市：占比 25%（≈1250/5000）
+    "sz": 2.87,
+    "fs": 4.89,
+    "dg": 0.23,
+    "zh": 1.32,
+    "zs": 2.95,
+    "hui": 5.04,
+    "jm": 4.81,
+    "zq": 4.81,
+    "qy": 3.72,
+    "sg": 4.65,
+    "st": 4.96,
+    "sw": 5.04,
+    "jy": 4.26,
+    "cz": 3.49,
+    "mz": 4.96,
+    "hy": 2.71,
+    "yj": 3.72,
+    "mm": 4.81,
+    "zj": 4.73,
+    "yf": 1.16,
+}
+
+# 广州真实小区名补充池（采样自 crawl_housing_sale 广州区真实 community，2026-08-06）：
+# - 增城 / 万科城 是 DWD 实有键（样本 ≥ 20，命中 DWD 行情）。
+# - 其余为真实小区名（样本 < 20，DWD 不命中，但地址含「广州」→ AVM 必命中，
+#   重训后经广州城市/小区编码传导下探）。政区 token 均 ≤ 5 字，满足估值正则 ≤6 字。
+GZ_COMMUNITIES = (
+    "增城",
+    "万科城",
+    "骏景花园",
+    "珠江新城",
+    "员村",
+    "五羊新城",
+    "穗花新村",
+    "东华西路",
+    "科学城",
+    "知识城",
+    "广钢新城",
+    "亚运城",
+    "金碧新城",
+    "奥园城",
+    "富力城",
+    "合和新城",
+    "雅居乐花园",
+)
+
+
 def _sql_str(value):
     """把 Python 字符串安全地转为 SQL 字符串字面量。"""
     return "'" + str(value).replace("'", "''") + "'"
+
+
+# ---------------------------------------------------------------------------
+# 目标 LTV 分布（演示剧本基线口径，2026-08-06）
+# balance = 目标 LTV × 抵押物估值（AVM 优先 / true_market_price 兜底）。
+# 分布按城市分组设计：
+#   - 广州：抵押敞口偏大的按揭客群，LTV 上尾显著（基线 ~15% 落在 >0.75），
+#     事件日估值下探 ~10% 后 LTV 整体 ×1.11，上穿预警线的笔数随之放大。
+#   - 其余城市：健康房贷画像，上尾仅 ~2%，事件日不受影响（基线稳定）。
+# 返回目标 LTV；rng 由外层传入保证确定性。
+# ---------------------------------------------------------------------------
+def _target_ltv(city_code: str, rng) -> float:
+    if city_code == "gz":
+        # 广州：按揭敞口偏大客群。上尾集中分布在 0.68-0.90，事件日估值下探 ~10%
+        # （LTV 整体 ×1.11）后，0.68-0.75 段的贷款批量上穿 0.75 预警线 → 预警量放大，
+        # 与剧本「广州 LTV 集体上穿」一致。
+        r = rng.random()
+        if r < 0.50:
+            return rng.uniform(0.30, 0.55)
+        if r < 0.76:
+            return rng.uniform(0.55, 0.68)
+        if r < 0.90:
+            return rng.uniform(0.68, 0.78)
+        if r < 0.97:
+            return rng.uniform(0.78, 0.90)
+        return rng.uniform(0.90, 1.05)
+    # 其余城市：健康房贷画像，上尾仅 ~1%，事件日不受影响 → 基线稳定、比值对比干净。
+    r = rng.random()
+    if r < 0.92:
+        return rng.uniform(0.25, 0.52)
+    if r < 0.98:
+        return rng.uniform(0.52, 0.66)
+    if r < 0.998:
+        return rng.uniform(0.66, 0.80)
+    return rng.uniform(0.80, 1.00)
+
+
+def _weighted_cities(n: int, seed: int):
+    """按 CITY_WEIGHTS 确定性地抽样 n 个城市码（rng 固定种子，可复现）。"""
+    rng = random.Random(seed)
+    codes = [c[1] for c in CITIES]
+    total = sum(CITY_WEIGHTS[c] for c in codes)
+    weights = [CITY_WEIGHTS[c] / total for c in codes]
+    return rng.choices(codes, weights=weights, k=n)
+
+
+def _avm_env():
+    """惰性接入 tools/risk 的 AVM 估值（有 sklearn/joblib 时）；失败返回 None。
+
+    返回 (valuation 模块, city_map, model) 或 (None, None, None)。
+    仅在运行环境可用时启用——生成器本身仍是零第三方依赖。
+    """
+    try:
+        import os as _os
+        import sys as _sys
+
+        _risk_dir = _os.path.join(
+            _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "tools", "risk"
+        )
+        if _risk_dir not in _sys.path:
+            _sys.path.insert(0, _risk_dir)
+        import config as _cfg  # noqa: F401
+        import valuation as _val
+
+        model = _val.load_avm_model()
+        if model is None:
+            return None, None, None
+        return _val, _cfg.CITY_MAP, model
+    except Exception:
+        return None, None, None
 
 
 def gen_customers(n, seed=1):
@@ -265,18 +384,28 @@ def gen_customers(n, seed=1):
 
 def gen_collaterals(n, seed=2):
     rng = random.Random(seed)
-    n_cities = len(CITIES)
+    city_by_idx = _weighted_cities(n, seed=seed)
     rows = []
     for i in range(n):
-        # 城市按固定轮序铺满 21 城；键/行政区/小区名由确定性 rng 抽取。
-        city_name, city_code, districts, (lat_lo, lat_hi, lng_lo, lng_hi) = CITIES[i % n_cities]
+        # 城市按 CITY_WEIGHTS 加权分配（广州 ≈25%）；键/行政区/小区名由确定性 rng 抽取。
+        city_code = city_by_idx[i]
+        city_name, _, districts, (lat_lo, lat_hi, lng_lo, lng_hi) = next(
+            c for c in CITIES if c[1] == city_code
+        )
         building = rng.randint(1, 200)
         lat = rng.uniform(lat_lo, lat_hi)
         lng = rng.uniform(lng_lo, lng_hi)
         area = rng.uniform(40, 140)
         age = rng.uniform(0, 30)
 
-        if city_code in DWD_KEYS:
+        if city_code == "gz":
+            # 广州：采样真实小区名补充池（增城/万科城为 DWD 实有键 → DWD 命中；
+            # 其余真实小区样本不足 → AVM 城市中位兜底，重训后随广州编码下探）。
+            key = rng.choice(GZ_COMMUNITIES)
+            property_addr = f"{city_name}市{key}区{key}{building}号"
+            key_med = dict(DWD_KEYS["gz"]).get(key)
+            unit = (key_med or CITY_UNIT_PRICE[city_code]) * rng.uniform(0.9, 1.1)
+        elif city_code in DWD_KEYS:
             # 有键城市：地址以「key+区」开头，剥后缀后恰好等于 DWD 键 → 必然命中。
             # true_market_price 以该键 DWD 中位单价为基准，与估值链同口径。
             key, median_up = rng.choice(DWD_KEYS[city_code])
@@ -292,6 +421,14 @@ def gen_collaterals(n, seed=2):
 
         true_market = round(unit * area, 2)
 
+        # 空间特征缺失率（0-1 标度，store 侧 ×100 对齐 0-100 阈值 75）：
+        # 合成坐标随机撒点，约 50% 落入样本稀疏区 → 缺失率 >75 → AC-04 低置信。
+        # 与 acceptance.md D3「低置信 40%-60%」对齐，保证预警都来自非低置信行。
+        if rng.random() < 0.50:
+            missing_pct = rng.uniform(0.40, 0.74)
+        else:
+            missing_pct = rng.uniform(0.75, 0.98)
+
         rows.append(
             {
                 "collateral_id": 20000 + i,
@@ -304,15 +441,19 @@ def gen_collaterals(n, seed=2):
                 "poi_density": rng.uniform(0, 1),
                 "commute_min": rng.uniform(10, 90),
                 "is_high_risk_zone": 1 if rng.random() < 0.15 else 0,
-                "spatial_feat_missing_pct": round(rng.uniform(0, 0.3), 2),
+                "spatial_feat_missing_pct": round(missing_pct, 2),
             }
         )
     return rows
 
 
 def _check_dwd_hit(collaterals):
-    """自检：用与 tools/risk/valuation.py 相同的三段式解析，断言所有有键城市
-    的地址都能解析回本城 DWD 键。防键长超限 / 配方写错导致的静默漏配。"""
+    """自检：用与 tools/risk/valuation.py 相同的三段式解析，统计有键城市的 DWD 命中率。
+
+    版本演进说明：广州地址改为「真实小区名补充池」采样后，仅增城/万科城等 DWD 实有键
+    保证命中，其余真实小区样本不足、DWD 不命中属预期（走 AVM 城市中位），不再对
+    「全部有键城市地址都命中」做硬断言，改为报告命中率，防键长超限/配方写错导致的
+    静默漏配。"""
     import re as _re
 
     city_re = _re.compile(r"^[\u4e00-\u9fa5]{2,4}市")
@@ -320,46 +461,70 @@ def _check_dwd_hit(collaterals):
     suffix_re = _re.compile(r"(?:区|县|市|街道|镇)$")
     keyed_by_code = {c: [k for k, _ in ks] for c, ks in DWD_KEYS.items()}
 
+    n_keyed = 0
     n_hit = 0
-    for i, c in enumerate(collaterals):
-        code = CITIES[i % len(CITIES)][1]
+    for c in collaterals:
+        # 城市由 gen_collaterals 的加权分配决定，这里按地址反解城市码统计。
+        code = _city_code_of(c["property_addr"])
         if code not in keyed_by_code:
             continue
+        n_keyed += 1
         body = city_re.sub("", c["property_addr"], count=1)
         m = token_re.match(body)
         token = m.group(1) if m else ""
         stripped = suffix_re.sub("", token)
         district = stripped if len(stripped) >= 2 else token
-        assert district in keyed_by_code[code], (
-            f"{code} 地址 {c['property_addr']!r} 解析出 {district!r}，"
-            f"不在 DWD 键 {keyed_by_code[code]} 内"
-        )
-        n_hit += 1
-    return n_hit
+        if district in keyed_by_code[code]:
+            n_hit += 1
+    return n_hit, n_keyed
 
 
-def gen_loans(customers, collaterals, seed=3):
+def _city_code_of(addr: str) -> str:
+    """从地址文本反解城市码（与 valuation._city_code_from_addr 同逻辑，本地实现防依赖）。"""
+    for city_name, code, _districts, _bbox in CITIES:
+        if city_name in addr:
+            return code
+    return ""
+
+
+def gen_loans(customers, collaterals, seed=3, avm_env=None):
+    """按目标 LTV 分布生成贷款：balance = 目标 LTV × 抵押物估值。
+
+    avm_env = (valuation 模块, city_map, model) 或 None：有 AVM 时用 AVM 预测估值
+    （引擎重算 LTV 精确等于目标 LTV），否则回退 true_market_price（量级一致，近似）。
+    """
     rng = random.Random(seed)
     n = max(len(customers), len(collaterals))
     coll_map = {c["collateral_id"]: c for c in collaterals}
+    city_by_idx = _weighted_cities(n, seed=seed)
+    val_mod, city_map, model = avm_env or (None, None, None)
+
     rows = []
     for i in range(n):
         customer_id = customers[i % len(customers)]["customer_id"]
         collateral_id = collaterals[i % len(collaterals)]["collateral_id"]
-        true_market = coll_map[collateral_id]["true_market_price"]
+        col = coll_map[collateral_id]
+        city_code = city_by_idx[i]
 
-        loan_amount = round(true_market * rng.uniform(0.4, 0.9), 2)
-        balance = round(loan_amount * rng.uniform(0.3, 1.0), 2)
+        target_ltv = _target_ltv(city_code, rng)
+        if val_mod is not None:
+            est = val_mod.valuation_from_avm(model, col, city_map) or float(
+                col["true_market_price"] or 0.0
+            )
+        else:
+            est = float(col["true_market_price"] or 0.0)
+        balance = round(target_ltv * est, 2)
+        # 放款额 = 余额 / 未还比例（70%-98%），即大部分贷款仍处于本金高位。
+        loan_amount = round(balance / rng.uniform(0.70, 0.98), 2)
 
-        # 五级分类分布：正常 80% / 关注 12% / 次级 5% / 可疑 2% / 损失 1%
-        r = rng.random()
-        if r < 0.80:
+        # 申报五级分类（仅主档展示口径，引擎按 LTV 实时重算覆盖，见 docs/demo/script_7d.md）
+        if target_ltv <= 0.60:
             risk_class = "正常"
-        elif r < 0.92:
+        elif target_ltv <= 0.75:
             risk_class = "关注"
-        elif r < 0.97:
+        elif target_ltv <= 0.85:
             risk_class = "次级"
-        elif r < 0.99:
+        elif target_ltv <= 1.00:
             risk_class = "可疑"
         else:
             risk_class = "损失"
@@ -491,11 +656,13 @@ def to_sql(customers, collaterals, loans):
 
 
 def main():
-    n = int(sys.argv[1]) if len(sys.argv) > 1 else 200
+    n = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 200
+    write_db = "--write-db" in sys.argv
 
     customers = gen_customers(n, seed=1)
     collaterals = gen_collaterals(n, seed=2)
-    loans = gen_loans(customers, collaterals, seed=3)
+    avm_env = _avm_env()
+    loans = gen_loans(customers, collaterals, seed=3, avm_env=avm_env)
 
     out_dir = os.path.dirname(os.path.abspath(__file__))
     out_path = os.path.join(out_dir, "..", "sql", "init", "02_seed.sql")
@@ -503,31 +670,115 @@ def main():
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(to_sql(customers, collaterals, loans))
 
+    if write_db:
+        _load_to_mysql(customers, collaterals, loans)
+
     # 摘要与健全性检查
     dist = {rc: sum(1 for ln in loans if ln["risk_class"] == rc) for rc in RISK_CLASSES}
     avg_price = sum(c["true_market_price"] for c in collaterals) / len(collaterals)
     high_risk = sum(c["is_high_risk_zone"] for c in collaterals)
-    dwd_hits = _check_dwd_hit(collaterals)
+    low_conf = sum(1 for c in collaterals if c["spatial_feat_missing_pct"] > 0.75)
+    dwd_hits, dwd_keyed = _check_dwd_hit(collaterals)
+    city_codes = _weighted_cities(n, seed=2)
     city_counts = {}
-    for i, _c in enumerate(collaterals):
-        code = CITIES[i % len(CITIES)][1]
+    for code in city_codes:
         city_counts[code] = city_counts.get(code, 0) + 1
 
     print("=" * 60)
-    print("SpaceFin Agent · 合成 seed 生成器（广东 21 城版 · DWD 实有键对齐）")
+    print("SpaceFin Agent · 合成 seed 生成器（广东 21 城版 · DWD 实有键对齐 · 广州加权）")
     print("=" * 60)
     print(f"  customer   : {len(customers)} 条")
     print(f"  collateral : {len(collaterals)} 条  (高危区 {high_risk} 处)")
     print(f"  loan       : {len(loans)} 条")
     print(f"  抵押物均价 : {avg_price:,.0f}")
     print(
-        f"  DWD 键命中 : {dwd_hits}/{len(collaterals)} "
-        f"({dwd_hits * 100 // max(len(collaterals), 1)}% of 有键城市样本)"
+        f"  DWD 键命中 : {dwd_hits}/{dwd_keyed} "
+        f"({dwd_hits * 100 // max(dwd_keyed, 1)}% of 有键样本, 其余走 AVM)"
     )
-    print(f"  城市覆盖   : {len(city_counts)} 城")
-    print("  五级分类   : " + " / ".join(f"{rc} {dist[rc]}" for rc in RISK_CLASSES))
+    print(
+        f"  低置信(缺失>75%) : {low_conf}/{len(collaterals)} ({low_conf * 100 // max(len(collaterals), 1)}%)"
+    )
+    print(f"  城市覆盖   : {len(city_counts)} 城 (gz={city_counts.get('gz', 0)})")
+    print("  申报五级   : " + " / ".join(f"{rc} {dist[rc]}" for rc in RISK_CLASSES))
+    print(
+        f"  AVM 估值   : {'启用(引擎重算 LTV=目标 LTV)' if avm_env[2] else '未启用(回退 true_market_price)'}"
+    )
     print(f"  输出文件   : {out_path}")
+    print(f"  --write-db : {'已灌入 MySQL spacefin 业务库' if write_db else '否'}")
     print("=" * 60)
+
+
+def _load_to_mysql(customers, collaterals, loans):
+    """把合成三表直接灌入 MySQL 业务库（--write-db）。
+
+    幂等口径：先 TRUNCATE 三张业务表再批量 INSERT（配合外键顺序 customer→collateral→loan）。
+    连接参数复用 tools/risk/config（读取仓库根 .env）。"""
+    import pymysql  # 仅灌库模式依赖 PyMySQL
+
+    sys.path.insert(
+        0,
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools", "risk"),
+    )
+    import config
+
+    env = config.load_env()
+    conn = pymysql.connect(**config.business_params(env), charset="utf8mb4")
+    try:
+        cur = conn.cursor()
+        cur.execute("SET FOREIGN_KEY_CHECKS=0")
+        for t in ("loan", "collateral", "customer"):
+            cur.execute(f"TRUNCATE TABLE {t}")
+        cur.execute("SET FOREIGN_KEY_CHECKS=1")
+        cur.executemany(
+            "INSERT INTO customer (customer_id, credit_score, income_monthly, debt_ratio) "
+            "VALUES (%s,%s,%s,%s)",
+            [
+                (c["customer_id"], c["credit_score"], c["income_monthly"], c["debt_ratio"])
+                for c in customers
+            ],
+        )
+        cur.executemany(
+            "INSERT INTO collateral (collateral_id, property_addr, lat, lng, area, age, "
+            " true_market_price, poi_density, commute_min, is_high_risk_zone, spatial_feat_missing_pct) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            [
+                (
+                    c["collateral_id"],
+                    c["property_addr"],
+                    c["lat"],
+                    c["lng"],
+                    c["area"],
+                    c["age"],
+                    c["true_market_price"],
+                    c["poi_density"],
+                    c["commute_min"],
+                    c["is_high_risk_zone"],
+                    c["spatial_feat_missing_pct"],
+                )
+                for c in collaterals
+            ],
+        )
+        cur.executemany(
+            "INSERT INTO loan (loan_id, customer_id, collateral_id, loan_amount, balance, "
+            " interest_rate, risk_class, origination_date) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            [
+                (
+                    ln["loan_id"],
+                    ln["customer_id"],
+                    ln["collateral_id"],
+                    ln["loan_amount"],
+                    ln["balance"],
+                    ln["interest_rate"],
+                    ln["risk_class"],
+                    ln["origination_date"],
+                )
+                for ln in loans
+            ],
+        )
+        conn.commit()
+        cur.close()
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

@@ -87,7 +87,7 @@ function barChart(container, data, opts) {
     const x = 4 + slot * i + (slot - barW) / 2;
     const y = padT + plotH - h;
     const fill = color ? color(d) : "#2563eb";
-    svg += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(0, h).toFixed(1)}" rx="3" fill="${fill}"/>`;
+    svg += `<rect class="bar-rect" data-i="${i}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(0, h).toFixed(1)}" rx="3" fill="${fill}"/>`;
     svg += `<text x="${(x + barW / 2).toFixed(1)}" y="${(y - 5).toFixed(1)}" text-anchor="middle" font-size="11" fill="#374151">${fmt(v)}</text>`;
     const lx = 4 + slot * i + slot / 2;
     svg += `<text x="${lx.toFixed(1)}" y="${height - 28}" text-anchor="middle" font-size="11" fill="#6b7280">${esc(d[label])}</text>`;
@@ -104,15 +104,15 @@ function hbarList(container, items, opts) {
   const max = Math.max(1, ...items.map((d) => Number(d[value]) || 0));
   const fmt = format || ((d) => d[value]);
   let html = "";
-  for (const d of items) {
+  items.forEach((d, i) => {
     const w = ((Number(d[value]) || 0) / max) * 100;
     html +=
-      `<div class="hbar-row">` +
+      `<div class="hbar-row" data-i="${i}">` +
       `<div class="hbar-label">${esc(d[label])}</div>` +
       `<div class="hbar-track"><div class="hbar-fill ${color ? color(d) : ""}" style="width:${w.toFixed(1)}%"></div></div>` +
       `<div class="hbar-num">${esc(fmt(d))}</div>` +
       `</div>`;
-  }
+  });
   container.innerHTML = html;
 }
 
@@ -233,19 +233,20 @@ async function mountPlugin(id) {
 
 async function renderDashboard() {
   const data = await api("/api/dashboard");
+  state.dashboardData = data;
   const kpi = data.kpi;
   const kpis = [
-    { label: "贷款笔数", value: kpi.loan_count, sub: "dws_risk_class 明细" },
-    { label: "总敞口（余额）", value: fmtMoney(kpi.total_balance), sub: "全部贷款" },
-    { label: "预警贷款", value: kpi.alert_loans, sub: "LTV 超红线" },
-    { label: "低置信笔数", value: kpi.low_confidence, sub: "空间特征缺失" },
-    { label: "高危区贷款", value: kpi.high_risk_zone_loans, sub: "空间画像标记" },
+    { label: "贷款笔数", value: kpi.loan_count },
+    { label: "总敞口（余额）", value: fmtMoney(kpi.total_balance) },
+    { label: "预警贷款", value: kpi.alert_loans },
+    { label: "低置信笔数", value: kpi.low_confidence },
+    { label: "高危区贷款", value: kpi.high_risk_zone_loans },
   ];
   document.getElementById("kpi-cards").innerHTML = kpis
     .map(
       (k) =>
         `<div class="kpi"><div class="kpi-label">${k.label}</div>` +
-        `<div class="kpi-value">${k.value}</div><div class="kpi-sub">${k.sub}</div></div>`
+        `<div class="kpi-value">${k.value}</div></div>`
     )
     .join("");
 
@@ -282,6 +283,189 @@ async function renderDashboard() {
   });
 
   renderAlertOverview(data.alert_breakdown);
+  renderTrustCards(data.trust_cards);
+  renderFunnel(data.alert_funnel);
+  renderDemoNote(data.trust_cards.crawl_scale, data.trust_cards.parse_success);
+  fillCityOptions(data.city_dist);
+}
+
+/* ---------------- 数据底座信任卡（爬取规模 / 新鲜度 / 解析成功率 / 模型版本） ----------------
+ * 全部来自 /api/dashboard 的 trust_cards（真实库聚合，无 mock）。
+ * 新鲜度徽标沿用 P1 数据底座页的分层口径：ok=绿 / warn=黄 / bad=红 / empty=灰。 */
+
+function fmtAge(sec) {
+  if (sec == null) return "未知";
+  if (sec < 3600) return Math.round(sec / 60) + " 分钟前";
+  if (sec < 86400) return (sec / 3600).toFixed(1) + " 小时前";
+  return (sec / 86400).toFixed(1) + " 天前";
+}
+
+const FRESH_LABEL = { ok: "绿", warn: "黄", bad: "红", empty: "灰" };
+
+function renderTrustCards(tc) {
+  const cs = tc.crawl_scale;
+  const f = tc.freshness;
+  const ps = tc.parse_success;
+  const mv = tc.model_version;
+  const freshLines = f.layers
+    .map(
+      (l) =>
+        `<div class="tf-fresh-line"><span class="tf-layer">${l.layer}</span>` +
+        `<span class="tf-note">${esc(l.note)}</span>` +
+        `<span class="badge ${l.status}">${FRESH_LABEL[l.status] || "灰"} · ${fmtAge(l.age_seconds)}</span></div>`
+    )
+    .join("");
+  const cards = [
+    {
+      label: "爬取规模",
+      value: (cs.sale || 0).toLocaleString("zh-CN"),
+      sub: `挂牌 ${(cs.sale || 0).toLocaleString("zh-CN")} · 租房 ${(cs.rent || 0).toLocaleString("zh-CN")} · 坐标 ${(cs.coords || 0).toLocaleString("zh-CN")} · ${cs.cities || 0} 城`,
+    },
+    {
+      label: "数据新鲜度",
+      value: `<span class="badge ${f.overall}">${FRESH_LABEL[f.overall] || "灰"}</span> 分层 MAX(etl_ts) 距今`,
+      sub: freshLines,
+      subClass: "tf-fresh",
+    },
+    {
+      label: "解析成功率",
+      value: ps.rate == null ? "-" : ps.rate.toFixed(2) + "%",
+      // 双口径并排：主数字 = 已解析(hit+miss)中的命中率；副注必须给出待解析量
+      // 及其占挂牌量比例，避免「待解析」被单一命中率掩盖（双口径展示）。
+      sub: `已解析中命中率 · 待解析 ${(ps.pending || 0).toLocaleString("zh-CN")} 条（占挂牌量 ${ps.pending_pct == null ? "-" : ps.pending_pct.toFixed(1) + "%"}）`,
+    },
+    {
+      label: "模型版本",
+      value: esc(mv.version || "-"),
+      sub: `dws_risk_class ${(mv.loan_count || 0).toLocaleString("zh-CN")} 笔 · 产出 ${mv.etl_ts ? esc(mv.etl_ts.slice(0, 16)) : "-"}`,
+    },
+  ];
+  document.getElementById("trust-cards").innerHTML = cards
+    .map(
+      (c) =>
+        `<div class="trust-card"><div class="trust-label">${c.label}</div>` +
+        `<div class="trust-value">${c.value}</div>` +
+        `<div class="trust-sub ${c.subClass || ""}">${c.sub}</div></div>`
+    )
+    .join("");
+}
+
+/* ---------------- 预警处置闭环漏斗（与 7 天剧本呼应） ---------------- */
+
+function renderFunnel(f) {
+  const stages = [
+    { key: "alert", label: "预警", color: "#d14a3a" },
+    { key: "confirmed", label: "确认", color: "#e07b1f" },
+    { key: "disposed", label: "处置", color: "#2563eb" },
+    { key: "recovered", label: "解除", color: "#2e9e5b" },
+  ];
+  const max = Math.max(1, f.alert, f.confirmed, f.disposed, f.recovered);
+  document.getElementById("alert-funnel").innerHTML =
+    `<div class="funnel-row">` +
+    stages
+      .map(
+        (s) =>
+          `<div class="funnel-stage">` +
+          `<div class="funnel-label">${s.label}</div>` +
+          `<div class="funnel-track"><div class="funnel-fill" style="width:${((f[s.key] / max) * 100).toFixed(1)}%;background:${s.color}"></div></div>` +
+          `<div class="funnel-num"><b>${f[s.key]}</b> 条</div>` +
+          `</div>`
+      )
+      .join("") +
+    `</div>` +
+    `<div class="funnel-note">数据来源：ads_ltv_alerts + ads_stream_ltv_alerts（预警）→ ads_alert_confirm（确认/处置/解除）。处置=disposition_status 的 disposed+recovered 累计（含已解除），解除=recovered；保证 预警≥确认≥处置≥解除 单调（B2.2）。</div>`;
+}
+
+/* ---------------- 页面底部诚实标注行 ---------------- */
+
+function renderDemoNote(cs, ps) {
+  const sale = cs && cs.sale ? cs.sale.toLocaleString("zh-CN") : "44,369";
+  // 诚实标注行：演示数据边界 + 解析成功率口径（双口径并排，避免 95.32% 掩盖待解析）。
+  document.getElementById("demo-note").textContent =
+    `演示数据集：贷款/抵押物/客户为脚本合成，房源爬取为真实数据（${sale} 条）；7 天剧本为演示回填。` +
+    ` 解析成功率口径：${ps && ps.rate != null ? ps.rate.toFixed(2) + "%" : "-"} 为已解析（成功+失败）中的命中率，不计待解析；` +
+    `待解析 ${ps && ps.pending != null ? ps.pending.toLocaleString("zh-CN") : "-"} 条（占挂牌量 ${ps && ps.pending_pct != null ? ps.pending_pct.toFixed(1) + "%" : "-"}）单列展示。`;
+}
+
+/* ---------------- 预警列表城市下拉 ---------------- */
+
+function fillCityOptions(cityDist) {
+  state.cityOptions = cityDist || [];
+  const sel = document.getElementById("f-city");
+  if (!sel) return;
+  const cur = sel.value;
+  const cities = (cityDist || []).filter((c) => c.city && c.city !== "未标注").map((c) => c.city);
+  sel.innerHTML =
+    `<option value="">全部</option>` + cities.map((c) => `<option>${esc(c)}</option>`).join("");
+  if (cities.includes(cur)) sel.value = cur;
+}
+
+/* ---------------- 二级钻取：图表点击 → 预警列表预置筛选 ---------------- */
+
+function ltvBucketRange(bucket) {
+  const map = {
+    "<0.50": [null, 0.5],
+    "0.50-0.60": [0.5, 0.6],
+    "0.60-0.70": [0.6, 0.7],
+    "0.70-0.80": [0.7, 0.8],
+    "0.80-0.85": [0.8, 0.85],
+    "0.85-0.90": [0.85, 0.9],
+    "0.90-1.00": [0.9, 1.0],
+    ">1.00": [1.0, null],
+  };
+  return map[bucket] || null;
+}
+
+function drillToAlerts(filters) {
+  state.alertPreset = filters || {};
+  state.alertsPage = 1;
+  showPage("alerts");
+}
+
+function bindChartDrill() {
+  const ltvEl = document.getElementById("ltv-hist-chart");
+  ltvEl.classList.add("clickable");
+  ltvEl.addEventListener("click", (e) => {
+    const rect = e.target.closest(".bar-rect");
+    if (!rect) return;
+    const item = state.dashboardData && state.dashboardData.ltv_hist[Number(rect.dataset.i)];
+    if (!item) return;
+    const range = ltvBucketRange(item.bucket);
+    if (!range) return; // 「缺失」桶没有 LTV 区间，不钻取
+    drillToAlerts({ ltv_min: range[0], ltv_max: range[1] });
+  });
+
+  const fiveEl = document.getElementById("five-class-chart");
+  fiveEl.classList.add("clickable");
+  fiveEl.addEventListener("click", (e) => {
+    const rect = e.target.closest(".bar-rect");
+    if (!rect) return;
+    const item = state.dashboardData && state.dashboardData.five_class[Number(rect.dataset.i)];
+    if (!item || !item.risk_class) return;
+    drillToAlerts({ risk_class: item.risk_class });
+  });
+
+  const cityEl = document.getElementById("city-dist");
+  cityEl.classList.add("clickable");
+  cityEl.addEventListener("click", (e) => {
+    const row = e.target.closest(".hbar-row");
+    if (!row) return;
+    const item = state.dashboardData && state.dashboardData.city_dist[Number(row.dataset.i)];
+    if (!item || item.city === "未标注") return; // 未标注无城市维度，不钻取
+    drillToAlerts({ city: item.city });
+  });
+}
+
+function applyAlertPreset() {
+  const p = state.alertPreset || {};
+  const set = (id, v) => {
+    if (v !== undefined && v !== null && v !== "") document.getElementById(id).value = v;
+  };
+  set("f-risk-class", p.risk_class);
+  set("f-city", p.city);
+  set("f-ltv-min", p.ltv_min);
+  set("f-ltv-max", p.ltv_max);
+  state.alertPreset = null;
 }
 
 function ltvColor(bucket) {
@@ -331,6 +515,7 @@ function buildAlertQuery(page) {
   const v = (id) => document.getElementById(id).value;
   if (v("f-risk-class")) q.set("risk_class", v("f-risk-class"));
   if (v("f-source")) q.set("source", v("f-source"));
+  if (v("f-city")) q.set("city", v("f-city"));
   if (v("f-ltv-min")) q.set("ltv_min", v("f-ltv-min"));
   if (v("f-ltv-max")) q.set("ltv_max", v("f-ltv-max"));
   if (v("f-date-from")) q.set("date_from", v("f-date-from"));
@@ -340,6 +525,12 @@ function buildAlertQuery(page) {
 }
 
 async function renderAlerts() {
+  applyAlertPreset();
+  // 若还没看过驾驶舱（城市下拉未填充），用缓存的 city_dist 补一次。
+  const citySel = document.getElementById("f-city");
+  if (citySel && citySel.options.length <= 1 && state.cityOptions && state.cityOptions.length) {
+    fillCityOptions(state.cityOptions);
+  }
   const qs = buildAlertQuery();
   const data = await api("/api/alerts?" + qs);
   document.getElementById("export-btn").href = "/api/alerts/export?" + qs;
@@ -347,7 +538,7 @@ async function renderAlerts() {
 
   const tbody = document.querySelector("#alert-table tbody");
   if (!data.rows.length) {
-    tbody.innerHTML = `<tr><td colspan="13" class="empty">无符合条件的数据</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="14" class="empty">无符合条件的数据</td></tr>`;
   } else {
     tbody.innerHTML = data.rows
       .map((r) => {
@@ -370,7 +561,8 @@ async function renderAlerts() {
           `<td>${r.alert_date}</td>` +
           `<td>${esc(r.property_addr)}</td>` +
           `<td>${conf}</td>` +
-          `<td></td>` +
+          `<td>${dispositionCell(r)}</td>` +
+          `<td><button class="btn btn-sm btn-ghost btn-detail" data-loan="${r.loan_id}" data-date="${r.alert_date}" data-src="${r.src}">详情</button></td>` +
           `</tr>`
         );
       })
@@ -382,6 +574,124 @@ async function renderAlerts() {
   document.getElementById("page-info").textContent = `第 ${data.page}/${totalPages} 页`;
   document.getElementById("prev-page").disabled = data.page <= 1;
   document.getElementById("next-page").disabled = data.page >= totalPages;
+}
+
+/* 处置状态列：徽标 + 可操作的处置/恢复按钮（admin/risk）。
+ * 状态机：pending(未确认) → 确认 → confirmed(已确认待处置) → 处置 → disposed(处置中)
+ * → 恢复 → recovered(已恢复)。处置动作隐含确认（后端落 confirm 记录）。 */
+function dispositionCell(r) {
+  const disp = r.disposition || { status: "pending", by: null };
+  const st = disp.status;
+  let badge = `<span class="badge off">未确认</span>`;
+  if (st === "confirmed" || (st === "pending" && r.confirmed))
+    badge = `<span class="badge warn">已确认待处置</span>`;
+  else if (st === "disposed") badge = `<span class="badge warn">处置中</span>`;
+  else if (st === "recovered") badge = `<span class="badge ok">已恢复</span>`;
+  const who = disp.by ? `<span class="disp-who">· ${esc(disp.by)}</span>` : "";
+  let btn = "";
+  if (state.user.can_confirm) {
+    if (st === "disposed") {
+      btn = `<button class="btn btn-sm btn-ghost btn-dispose" data-loan="${r.loan_id}" data-date="${r.alert_date}" data-src="${r.src}" data-status="recovered">恢复</button>`;
+    } else if (st === "confirmed" || (st === "pending" && r.confirmed) || st === "pending") {
+      btn = `<button class="btn btn-sm btn-ghost btn-dispose" data-loan="${r.loan_id}" data-date="${r.alert_date}" data-src="${r.src}" data-status="disposed">处置</button>`;
+    }
+  }
+  return `<div class="disp-cell">${badge}${who}</div>${btn ? `<div class="disp-actions">${btn}</div>` : ""}`;
+}
+
+/* ---------------- 行内详情展开（二级钻取） ---------------- */
+
+const DISP_LABEL = {
+  pending: "未确认",
+  confirmed: "已确认待处置",
+  disposed: "处置中",
+  recovered: "已恢复",
+};
+
+async function toggleDetail(btn) {
+  const tr = btn.closest("tr");
+  const loan = btn.dataset.loan;
+  const date = btn.dataset.date;
+  const src = btn.dataset.src;
+  const existing = tr.nextElementSibling;
+  if (existing && existing.classList.contains("detail-row")) {
+    existing.remove();
+    btn.textContent = "详情";
+    return;
+  }
+  // 同一时刻只展开一行。
+  document.querySelectorAll("#alert-table tr.detail-row").forEach((el) => el.remove());
+  document.querySelectorAll("#alert-table .btn-detail").forEach((b) => {
+    if (b !== btn) b.textContent = "详情";
+  });
+  const data = await api(
+    `/api/alerts/detail?loan_id=${loan}&alert_date=${encodeURIComponent(date)}&source=${src}`
+  );
+  const dtr = document.createElement("tr");
+  dtr.className = "detail-row";
+  dtr.innerHTML = `<td colspan="14" class="detail-cell">${buildDetailHtml(data)}</td>`;
+  tr.after(dtr);
+  btn.textContent = "收起";
+}
+
+function buildDetailHtml(d) {
+  const a = d.alert;
+  const rf = d.risk_factors;
+  const cf = d.confirm;
+  const disp = cf && cf.disposition ? cf.disposition : { status: "pending", by: null, ts: null };
+  const fmtDt = (v) => (v ? esc(String(v).replace("T", " ").slice(0, 19)) : "—");
+  const riskFactorLine = rf
+    ? [
+        `LTV ${fmtLtv(rf.ltv)}`,
+        rf.low_confidence ? "空间特征低置信" : null,
+        rf.abnormal_valuation
+          ? `估值偏差 ${rf.valuation_deviation_pct == null ? "异常" : fmtPct(rf.valuation_deviation_pct)} · 标记异常`
+          : rf.valuation_deviation_pct != null
+            ? `估值偏差 ${fmtPct(rf.valuation_deviation_pct)}`
+            : null,
+        rf.is_high_risk_zone ? "高危区" : null,
+        rf.model_version ? `模型 ${esc(rf.model_version)}` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : "—（实时流预警，dws_risk_class 无此贷款明细）";
+  const confirmLine = cf ? `${esc(cf.confirmed_by)} @ ${fmtDt(cf.confirmed_ts)}` : "未确认";
+  const disposeLine =
+    disp.status === "pending" && !cf
+      ? "—"
+      : `${DISP_LABEL[disp.status] || disp.status}${disp.by ? ` · ${esc(disp.by)} @ ${fmtDt(disp.ts)}` : ""}`;
+  const item = (k, v) => `<div class="detail-item"><span>${k}</span><b>${v}</b></div>`;
+  return (
+    `<div class="detail-grid">` +
+    item("贷款号", a.loan_id) +
+    item("客户号", a.customer_id ?? "-") +
+    item("抵押物号", a.collateral_id ?? "-") +
+    item("来源", a.src === "offline" ? "离线 T+1" : "实时") +
+    item("贷款余额", fmtMoney(a.loan_balance)) +
+    item("市场估值", fmtMoney(a.market_valuation)) +
+    item("LTV", fmtLtv(a.ltv)) +
+    item(
+      "风险类",
+      a.risk_class
+        ? `<span class="badge" style="background:${CLASS_COLORS[a.risk_class]}22;color:${CLASS_COLORS[a.risk_class]}">${esc(a.risk_class)}</span>`
+        : "-"
+    ) +
+    item("预警等级", alertLevelLabel(a.alert_level)) +
+    item("预警日期", a.alert_date) +
+    item("抵押物地址", esc(d.property_addr)) +
+    item("风险因子", riskFactorLine) +
+    item("确认记录", confirmLine) +
+    item("处置记录", disposeLine) +
+    `</div>`
+  );
+}
+
+async function disposeAlert(loanId, alertDate, source, status) {
+  await api("/api/alerts/dispose", {
+    method: "POST",
+    body: JSON.stringify({ loan_id: loanId, alert_date: alertDate, source, status }),
+  });
+  renderAlerts();
 }
 
 async function confirmAlert(loanId, alertDate, source) {
@@ -498,10 +808,28 @@ async function init() {
   });
   document.getElementById("report-date").addEventListener("change", renderReport);
 
-  // 确认按钮用事件委托，避免整表重绑。
+  // 图表钻取：绑定一次（dashboard 容器常驻，事件委托无需每次重绑）。
+  bindChartDrill();
+
+  // 预警列表操作按钮用事件委托，避免整表重绑。
   document.querySelector("#alert-table tbody").addEventListener("click", (e) => {
-    const btn = e.target.closest(".btn-confirm");
-    if (btn) confirmAlert(btn.dataset.loan, btn.dataset.date, btn.dataset.src);
+    const confBtn = e.target.closest(".btn-confirm");
+    if (confBtn) {
+      confirmAlert(confBtn.dataset.loan, confBtn.dataset.date, confBtn.dataset.src);
+      return;
+    }
+    const dispBtn = e.target.closest(".btn-dispose");
+    if (dispBtn) {
+      disposeAlert(
+        dispBtn.dataset.loan,
+        dispBtn.dataset.date,
+        dispBtn.dataset.src,
+        dispBtn.dataset.status
+      );
+      return;
+    }
+    const detailBtn = e.target.closest(".btn-detail");
+    if (detailBtn) toggleDetail(detailBtn);
   });
 
   const me = await api("/api/me");
