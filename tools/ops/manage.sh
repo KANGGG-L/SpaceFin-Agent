@@ -152,7 +152,7 @@ cmd_health() {
     local host="${SPF_HOST:-127.0.0.1}"
     local port="${SPF_PORT:-8500}"
     local user="${SPF_USER:-risk}"
-    local pass="${SPF_PASS:-risk123}"
+    local pass="${SPF_PASS:-risk20020309}"
     local base="http://${host}:${port}"
 
     # 1) 登录拿 token（HttpOnly cookie，curl 用 -c 存到临时文件）。

@@ -49,7 +49,7 @@
 ## 访问方式
 
 - **URL**：`http://20.70.128.18/`
-- **账号**：密码由 `tools/frontend/app.py` 在启动时生成并持久化至 `output/frontend/credentials.json`（非 dev 模式）；`SF_DEV_MODE=1` 时回退内置弱口令（`admin/admin123` 等）。环境变量 `SF_PWD_<ROLE>` 可固定口令。
+- **账号**：密码由 `tools/frontend/app.py` 在启动时生成并持久化至 `output/frontend/credentials.json`（非 dev 模式）；`SF_DEV_MODE=1` 时回退内置弱口令（`admin/admin20020309` 等）。环境变量 `SF_PWD_<ROLE>` 可固定口令。
 - **演示路径**：驾驶舱 → P5 空间画像（地图点选）→ P7 AVM → P9 合规审计（导出脱敏）→ 切换 `postloan` 看 403。
 
 ---
