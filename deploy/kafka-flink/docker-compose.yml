@@ -47,8 +47,8 @@ services:
       # broker JVM 上限 1G，容器再留一点余量给页缓存，见下 mem_limit。
       KAFKA_HEAP_OPTS: -Xms512m -Xmx1024m
     ports:
-      - "9092:9092"
-      - "9093:9093"
+      - "127.0.0.1:9092:9092"
+      - "127.0.0.1:9093:9093"
     volumes:
       # 数据目录持久化：KRaft 元数据 + topic 日志。注意必须挂到镜像实际的 log.dirs
       # （apache/kafka 镜像默认 /tmp/kafka-logs，见容器内 ls /tmp/kafka-logs），
@@ -73,8 +73,8 @@ services:
         jobmanager.memory.process.size: 1024m
         rest.address: flink-jobmanager
     ports:
-      - "8081:8081"
-      - "6123:6123"
+      - "127.0.0.1:8081:8081"
+      - "127.0.0.1:6123:6123"
     volumes:
       # 连接器 jar 以单文件方式 bind 进 /opt/flink/lib（不能用目录挂载，会盖掉发行版自带 jar）。
       - ./jars/flink-sql-connector-kafka-3.3.0-1.19.jar:/opt/flink/lib/flink-sql-connector-kafka-3.3.0-1.19.jar:ro

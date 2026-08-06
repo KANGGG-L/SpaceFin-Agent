@@ -95,7 +95,7 @@ services:
     container_name: spacefin-airflow-webserver
     command: webserver
     ports:
-      - "${AIRFLOW_WEB_PORT:-8080}:8080"
+      - "127.0.0.1:${AIRFLOW_WEB_PORT:-8080}:8080"
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
       interval: 30s
