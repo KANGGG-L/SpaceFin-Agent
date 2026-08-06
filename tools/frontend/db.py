@@ -312,7 +312,7 @@ def dashboard():
         }
 
         # 预警闭环漏斗：预警 → 确认 → 处置 → 恢复。
-        # 预警量 = 离线 + 实时；确认量 = confirmed_by 非空的行（data-dev 契约：
+        # 预警量 = 离线 + 实时；确认量 = confirmed_by 非空的行（处置契约：
         # 有 confirmed_by/confirmed_ts 才算确认；处置/恢复行同样带确认人，
         # 故确认≥处置，漏斗单调）。
         # 处置量 = 累计已处置（disposed + recovered），恢复量 = recovered。
@@ -474,7 +474,7 @@ def alerts(
 
         # 确认/处置状态：按 (loan_id, alert_date, src) 关联前端自建确认表。
         # 表由 app 启动时用 root 建；若权限不足未建成，降级为无状态而不报错。
-        # 处置字段未就绪（data-dev 尚未补列）时只读 confirmed，disposition 由 confirmed 推导。
+        # 处置字段未就绪（处置字段尚未补列）时只读 confirmed，disposition 由 confirmed 推导。
         conf_map = {}
         if rows:
             cols = _confirm_has_cols(cur)
@@ -519,7 +519,7 @@ def alerts(
 # disposed=处置中 / recovered=已恢复。前端漏斗卡与列表处置按钮共用这一定义。
 DISPOSITION_STATUSES = {"pending", "confirmed", "disposed", "recovered"}
 
-# 处置字段 DDL（data-dev 会同步在数据链路侧补列，这里保证前端自建表也带同名字段，
+# 处置字段 DDL（数据链路侧会同步补列，这里保证前端自建表也带同名字段，
 # 两边都幂等，谁先建都行）。disposition_status 默认 pending，NULL 视为 pending。
 _DISPOSITION_COL_DDL = {
     "disposition_status": "disposition_status VARCHAR(16) NOT NULL DEFAULT 'pending'",
@@ -531,7 +531,7 @@ _DISPOSITION_COL_DDL = {
 def _confirm_has_cols(cur):
     """返回 ads_alert_confirm 现有列名集合。
 
-    兼容「data-dev 尚未补处置字段」的阶段：列表/漏斗查询据此决定查哪些列，
+    兼容「处置字段尚未补全」的阶段：列表/漏斗查询据此决定查哪些列，
     缺列时处置统计降级为 0、列表 disposition 由 confirmed 推导，页面不报错。
     """
     try:
@@ -545,7 +545,7 @@ def ensure_alert_confirm_table():
     """幂等建前端自用确认表（root+房产库）。为什么单独建表：不改动预警链路既有表，
     确认/处置动作只在这张前端表留痕，报表/推送链路不受影响。
 
-    建表 DDL 直接带处置字段；若表已存在但缺列（data-dev 还没同步、或旧库），
+    建表 DDL 直接带处置字段；若表已存在但缺列（数据链路侧尚未同步、或旧库），
     用 ALTER 逐列补齐——保证列表/漏斗查询永远能读到 disposition_status。
     """
     conn = ddl_conn()

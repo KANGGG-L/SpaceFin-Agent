@@ -175,7 +175,7 @@ def _x(conn, sql, args=None):
 
 
 # ---------------------------------------------------------------------------
-# ads_alert_confirm 处置字段（与 frontend-dev 对齐的契约）
+# ads_alert_confirm 处置字段（处置契约）
 #   disposition_status: confirmed / disposed / recovered（NULL=未确认）
 #   disposition_by / disposition_ts
 # ---------------------------------------------------------------------------

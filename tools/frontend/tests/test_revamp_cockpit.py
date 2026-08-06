@@ -43,7 +43,7 @@ def test_confirm_row_with_disposition_columns():
 
 
 def test_confirm_row_without_disposition_columns_derives_confirmed():
-    """处置字段未建好（data-dev 尚未同步）时，由 confirmed_by 推导为 confirmed。"""
+    """处置字段未建好（处置字段尚未同步）时，由 confirmed_by 推导为 confirmed。"""
     row = (101, "2026-08-05", "offline", "risk", "2026-08-05 10:00:00")
     out = db._confirm_row_from(row, set())
     assert out["disposition"]["status"] == "confirmed"
@@ -156,12 +156,12 @@ def test_dashboard_trust_cards_and_funnel(monkeypatch):
     funnel = d["alert_funnel"]
     assert funnel == {"alert": 194, "confirmed": 3, "disposed": 2, "recovered": 1}
     assert funnel["alert"] >= funnel["confirmed"] >= funnel["disposed"] >= funnel["recovered"]
-    # 确认量按 data-dev 契约 = confirmed_by 非空的行（处置行也带确认人）。
+    # 确认量按处置契约 = confirmed_by 非空的行（处置行也带确认人）。
     assert conn.find_sql("confirmed_by IS NOT NULL") is not None
 
 
 def test_dashboard_funnel_degrades_without_disposition_column(monkeypatch):
-    """处置字段缺失（data-dev 未同步）时漏斗不报错，disposed/recovered 降级为 0。"""
+    """处置字段缺失（处置字段未同步）时漏斗不报错，disposed/recovered 降级为 0。"""
     conn = _dashboard_fake_conn(has_disposition=False)
     monkeypatch.setattr(db, "crawl_conn", lambda: conn)
     monkeypatch.setattr(db, "biz_conn", lambda: conn)
