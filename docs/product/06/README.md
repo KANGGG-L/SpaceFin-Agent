@@ -32,7 +32,7 @@ SpaceFin-Agent 是**最终交付版本（final deliverable）**，不是 MVP 原
 
 ## 2. 测试结论
 
-- **自动化测试**：12 模块，共 **604 项**，其中 **603 passed + 1 skipped**（skipped = 活体 Chrome 冒烟测试，`ANJUKE_TEST_LIVE=1` 显式启用，非缺陷）。
+- **自动化测试**：12 模块，共 **604 项**，其中 **603 passed + 1 skipped**（skipped = 活体 Chrome 冒烟测试，`ANJUKE_TEST_LIVE=1` 显式启用，非缺陷）。当前全仓实测为 **560 passed + 1 skipped**，差异为模块归并计数口径，非回归。
 - **缺陷分布**：0 P0 / 0 P1 / 5 P2（均已修复并合入 develop）/ 0 P3。
 - **用例覆盖**：功能 8/8（TC-01～08）+ 边界 6 项（B-01～06）+ 异常 6 项（E-01～06）+ 回归 R-01～06 范围定义齐备。
 
