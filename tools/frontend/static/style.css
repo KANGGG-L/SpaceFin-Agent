@@ -463,3 +463,186 @@ body {
   padding: 18px 4px;
   text-align: center;
 }
+
+/* ---------- 数据底座信任卡（爬取规模 / 新鲜度 / 解析成功率 / 模型版本） ---------- */
+.trust-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-top: 12px;
+}
+@media (max-width: 960px) {
+  .trust-row {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+.trust-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  box-shadow: var(--shadow);
+}
+.trust-card .trust-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+.trust-card .trust-value {
+  font-size: 22px;
+  font-weight: 700;
+  margin-top: 4px;
+  word-break: break-all;
+}
+.trust-card .trust-sub {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 6px;
+  line-height: 1.7;
+}
+.trust-card .tf-fresh {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.tf-fresh-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.tf-fresh-line .tf-layer {
+  font-weight: 600;
+  color: var(--text);
+  width: 34px;
+  flex-shrink: 0;
+}
+.tf-fresh-line .tf-note {
+  color: var(--muted);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- 预警处置闭环漏斗 ---------- */
+.funnel-card {
+  margin-top: 16px;
+}
+.funnel-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+  align-items: end;
+}
+@media (max-width: 960px) {
+  .funnel-row {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+.funnel-stage {
+  text-align: center;
+}
+.funnel-label {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.funnel-track {
+  background: #eef2f7;
+  border-radius: 6px;
+  height: 26px;
+  overflow: hidden;
+}
+.funnel-fill {
+  height: 100%;
+  border-radius: 6px;
+  min-width: 2px;
+  transition: width 0.4s ease;
+}
+.funnel-num {
+  font-size: 13px;
+  color: var(--text);
+  margin-top: 6px;
+}
+.funnel-note {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* ---------- 诚实标注行 ---------- */
+.demo-note {
+  margin-top: 18px;
+  font-size: 12px;
+  color: #9ca3af;
+  border-top: 1px dashed var(--border);
+  padding-top: 10px;
+  line-height: 1.6;
+}
+
+/* ---------- 图表可点击钻取 ---------- */
+.clickable .bar-rect,
+.clickable .hbar-row {
+  cursor: pointer;
+}
+.clickable .bar-rect:hover {
+  opacity: 0.75;
+  stroke: #1d4ed8;
+  stroke-width: 1.5;
+}
+.clickable .hbar-row:hover .hbar-fill {
+  opacity: 0.8;
+}
+
+/* ---------- 预警列表 · 处置状态列 ---------- */
+.disp-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.disp-who {
+  font-size: 12px;
+  color: var(--muted);
+}
+.disp-actions {
+  margin-top: 4px;
+}
+
+/* ---------- 预警列表 · 行内详情展开 ---------- */
+.detail-row td {
+  background: #f8fafc;
+  padding: 0;
+}
+.detail-cell {
+  padding: 0 !important;
+}
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px 24px;
+  padding: 14px 18px;
+  border-left: 3px solid var(--primary);
+  background: #f8fafc;
+}
+@media (max-width: 960px) {
+  .detail-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.detail-item {
+  display: flex;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.detail-item span {
+  color: var(--muted);
+  flex-shrink: 0;
+  min-width: 64px;
+}
+.detail-item b {
+  font-weight: 500;
+  color: var(--text);
+  word-break: break-all;
+}

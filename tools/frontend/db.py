@@ -34,6 +34,20 @@ EPS_BALANCE = 0.01
 # 预警来源标记：离线 T+1（ads_ltv_alerts）与实时（ads_stream_ltv_alerts）合并展示。
 ALERT_SOURCES = {"offline", "stream"}
 
+# 信任卡「数据新鲜度」分层阈值（秒）：与 pages/p1_datasource 的 DWD/DWS/ADS 同口径——
+# T+1 批跑 26h 未更新 = warn（黄）、48h = bad（红）。驾驶舱信任卡简化为一卡，
+# 但判定尺子必须与 P1 数据底座页一致，避免两个页面口径打架。
+FRESHNESS_WARN_SECONDS = 26 * 3600
+FRESHNESS_BAD_SECONDS = 48 * 3600
+
+# 信任卡「新鲜度」展示的分层（表名, 时间列, 中文说明），取每层最关键的一张主表：
+# DWD=房源挂牌 / DWS=风险宽表 / ADS=离线预警。实时预警表单独口径，不进这张卡。
+FRESHNESS_LAYERS = [
+    ("DWD", "crawl_housing_sale", "etl_ts", "房源挂牌"),
+    ("DWS", "dws_risk_class", "etl_ts", "风险宽表"),
+    ("ADS", "ads_ltv_alerts", "etl_ts", "离线预警"),
+]
+
 
 def _conn(params):
     """开一个短连接；调用方负责 close。"""
@@ -194,6 +208,127 @@ def dashboard():
             for c, v in sorted(city_agg.items(), key=lambda kv: kv[1]["loan_count"], reverse=True)
         ]
 
+        # 数据底座信任卡：爬取规模 / 新鲜度 / 解析成功率 / 模型版本。
+        # 全部来自真实运行态，无 mock——爬取规模与 P1 登记表、README 的数字互相印证。
+        cur.execute("SELECT COUNT(*) FROM crawl_housing_sale")
+        sale_rows = int(cur.fetchone()[0])
+        cur.execute("SELECT COUNT(*) FROM crawl_housing_rent")
+        rent_rows = int(cur.fetchone()[0])
+        cur.execute("SELECT COUNT(*) FROM community_coords")
+        coords_rows = int(cur.fetchone()[0])
+        cur.execute("SELECT COUNT(DISTINCT district) FROM crawl_housing_sale")
+        crawl_scale = {
+            "sale": sale_rows,
+            "rent": rent_rows,
+            "coords": coords_rows,
+            "cities": int(cur.fetchone()[0]),
+        }
+
+        # 新鲜度：各层 MAX(时间列) 距今，状态 = ok(绿)/warn(黄)/bad(红)/empty(灰)。
+        # 年龄一律在 SQL 侧用 TIMESTAMPDIFF(..., NOW()) 算（宿主 UTC / MySQL +08 的时区坑，
+        # 与 P1 同一原则：绝不把 naive datetime 拿到 Python 里减）。
+        freshness_layers = []
+        for layer, table, ts_col, note in FRESHNESS_LAYERS:
+            cur.execute(
+                f"SELECT COUNT(*), MAX({ts_col}), "
+                f"TIMESTAMPDIFF(SECOND, MAX({ts_col}), NOW()) FROM {table}"
+            )
+            r = cur.fetchone()
+            rows, last, age = int(r[0]), r[1], r[2]
+            if rows == 0 or age is None:
+                status = "empty"
+            elif age >= FRESHNESS_BAD_SECONDS:
+                status = "bad"
+            elif age >= FRESHNESS_WARN_SECONDS:
+                status = "warn"
+            else:
+                status = "ok"
+            freshness_layers.append(
+                {
+                    "layer": layer,
+                    "note": note,
+                    "table": table,
+                    "rows": rows,
+                    "last_update": str(last) if last else None,
+                    "age_seconds": int(age) if age is not None else None,
+                    "status": status,
+                }
+            )
+        # 整体状态取最差一层（含 bad→bad，含 warn→warn，否则 ok/empty）。
+        overall = "ok"
+        if any(layer["status"] == "bad" for layer in freshness_layers):
+            overall = "bad"
+        elif any(layer["status"] == "warn" for layer in freshness_layers):
+            overall = "warn"
+        elif all(layer["status"] == "empty" for layer in freshness_layers):
+            overall = "empty"
+
+        # 解析成功率：合并 sale+rent 两张挂牌表的 geocode_status（hit/miss/pending）。
+        # hit=解析成功 / miss=失败 / pending=待解析（配额未回填）。成功率只算 hit/(hit+miss)，
+        # pending 单独展示「待解析量」，否则 44k 房源里 3 万条 pending 会把成功率砸到 30%，
+        # 而实际是「还没轮到解析」，不是解析质量差。
+        geocode = {}
+        for t in ("crawl_housing_sale", "crawl_housing_rent"):
+            cur.execute(f"SELECT geocode_status, COUNT(*) FROM {t} GROUP BY geocode_status")
+            for status, cnt in cur.fetchall():
+                geocode[status] = geocode.get(status, 0) + int(cnt)
+        hit, miss, pending = (
+            geocode.get("hit", 0),
+            geocode.get("miss", 0),
+            geocode.get("pending", 0),
+        )
+        parse_success = {
+            "success": hit,
+            "failed": miss,
+            "pending": pending,
+            "rate": round(hit / (hit + miss) * 100, 2) if (hit + miss) else None,
+        }
+
+        # 模型版本：dws_risk_class 最新产出的估值模型（按 etl_ts 取最新一组）。
+        cur.execute(
+            "SELECT model_version, MAX(etl_ts), COUNT(*) FROM dws_risk_class "
+            "GROUP BY model_version ORDER BY MAX(etl_ts) DESC LIMIT 1"
+        )
+        mv = cur.fetchone()
+        model_version = {
+            "version": str(mv[0]) if mv and mv[0] else None,
+            "etl_ts": str(mv[1]) if mv and mv[1] else None,
+            "loan_count": int(mv[2]) if mv else 0,
+        }
+
+        trust_cards = {
+            "crawl_scale": crawl_scale,
+            "freshness": {"layers": freshness_layers, "overall": overall},
+            "parse_success": parse_success,
+            "model_version": model_version,
+        }
+
+        # 预警闭环漏斗：预警 → 确认 → 处置 → 恢复。
+        # 预警量 = 离线 + 实时；确认量 = ads_alert_confirm 总行数（确认即建行）；
+        # 处置/恢复量 = 该表 disposition_status 计数（data-dev 补字段后自动有值，
+        # 字段未就绪时 _confirm_has_cols 降级为 0，漏斗照常渲染）。
+        cur.execute("SELECT COUNT(*) FROM ads_ltv_alerts")
+        off_total = int(cur.fetchone()[0])
+        cur.execute("SELECT COUNT(*) FROM ads_stream_ltv_alerts")
+        str_total = int(cur.fetchone()[0])
+        cur.execute("SELECT COUNT(*) FROM ads_alert_confirm")
+        confirm_total = int(cur.fetchone()[0])
+        disposed_total = recovered_total = 0
+        if "disposition_status" in _confirm_has_cols(cur):
+            cur.execute(
+                "SELECT disposition_status, COUNT(*) FROM ads_alert_confirm "
+                "WHERE disposition_status IN ('disposed','recovered') GROUP BY disposition_status"
+            )
+            disp_map = dict(cur.fetchall())
+            disposed_total = int(disp_map.get("disposed", 0))
+            recovered_total = int(disp_map.get("recovered", 0))
+        alert_funnel = {
+            "alert": off_total + str_total,
+            "confirmed": confirm_total,
+            "disposed": disposed_total,
+            "recovered": recovered_total,
+        }
+
         cur.close()
         return {
             "kpi": kpi,
@@ -201,6 +336,8 @@ def dashboard():
             "ltv_hist": ltv_hist,
             "city_dist": city_dist,
             "alert_breakdown": alert_breakdown,
+            "trust_cards": trust_cards,
+            "alert_funnel": alert_funnel,
         }
     finally:
         crawl.close()
@@ -227,10 +364,16 @@ def alerts(
     date_from=None,
     date_to=None,
     source=None,
+    city=None,
     page=1,
     page_size=20,
 ):
-    """离线 + 实时预警合并分页查询；返回总条数 + 本页明细（附抵押物地址）。"""
+    """离线 + 实时预警合并分页查询；返回总条数 + 本页明细（附抵押物地址）。
+
+    city 按抵押物地址前缀过滤（如「广州」匹配 property_addr LIKE '广州%'），
+    需查业务库 collateral 表得到 collateral_id 集合后在 SQL 里 IN 过滤——
+    分页在 SQL 侧完成，避免「先全量查出再内存筛城市导致页码错位」。
+    """
     where, params = [], []
     if risk_class:
         where.append("risk_class=%s")
@@ -250,29 +393,49 @@ def alerts(
     if source and source in ALERT_SOURCES:
         where.append("src=%s")
         params.append(source)
-    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
-
-    base = (
-        "SELECT src, id, loan_id, customer_id, collateral_id, "
-        "loan_balance, market_valuation, ltv, risk_class, is_high_risk_zone, "
-        "alert_date, alert_level "
-        "FROM ("
-        "SELECT 'offline' src, id, loan_id, customer_id, collateral_id, "
-        "loan_balance, market_valuation, ltv, risk_class, is_high_risk_zone, "
-        "alert_date, alert_level "
-        "FROM ads_ltv_alerts "
-        "UNION ALL "
-        "SELECT 'stream', event_id, loan_id, customer_id, collateral_id, "
-        "loan_balance, market_valuation, ltv, risk_class, is_high_risk_zone, "
-        "alert_date, NULL "
-        "FROM ads_stream_ltv_alerts"
-        f") t {where_sql}"
-    )
 
     crawl = crawl_conn()
     biz = biz_conn()
     try:
         cur = crawl.cursor()
+        if city:
+            # 城市 = 抵押物地址前缀（「广州」匹配「广州市…」）；未标注 → 地址为空。
+            bcur = biz.cursor()
+            if city == "未标注":
+                bcur.execute(
+                    "SELECT collateral_id FROM collateral "
+                    "WHERE property_addr IS NULL OR property_addr=''"
+                )
+            else:
+                bcur.execute(
+                    "SELECT collateral_id FROM collateral WHERE property_addr LIKE %s",
+                    (f"{city}%",),
+                )
+            cids = [r[0] for r in bcur.fetchall()]
+            bcur.close()
+            if cids:
+                placeholders = ",".join(["%s"] * len(cids))
+                where.append(f"collateral_id IN ({placeholders})")
+                params.extend(cids)
+            else:
+                where.append("1=0")
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+        base = (
+            "SELECT src, id, loan_id, customer_id, collateral_id, "
+            "loan_balance, market_valuation, ltv, risk_class, is_high_risk_zone, "
+            "alert_date, alert_level "
+            "FROM ("
+            "SELECT 'offline' src, id, loan_id, customer_id, collateral_id, "
+            "loan_balance, market_valuation, ltv, risk_class, is_high_risk_zone, "
+            "alert_date, alert_level "
+            "FROM ads_ltv_alerts "
+            "UNION ALL "
+            "SELECT 'stream', event_id, loan_id, customer_id, collateral_id, "
+            "loan_balance, market_valuation, ltv, risk_class, is_high_risk_zone, "
+            "alert_date, NULL "
+            "FROM ads_stream_ltv_alerts"
+            f") t {where_sql}"
+        )
         cur.execute(f"SELECT COUNT(*) FROM ({base}) t", params)
         total = int(cur.fetchone()[0])
         offset = max(0, (page - 1) * page_size)
@@ -297,20 +460,23 @@ def alerts(
             addr_map = {r[0]: r[1] for r in bcur.fetchall()}
             bcur.close()
 
-        # 确认状态：按 (loan_id, alert_date, src) 关联前端自建确认表。
-        # 表由 app 启动时用 root 建；若权限不足未建成，降级为无确认状态而不报错。
+        # 确认/处置状态：按 (loan_id, alert_date, src) 关联前端自建确认表。
+        # 表由 app 启动时用 root 建；若权限不足未建成，降级为无状态而不报错。
+        # 处置字段未就绪（data-dev 尚未补列）时只读 confirmed，disposition 由 confirmed 推导。
         conf_map = {}
         if rows:
-            try:
-                cur.execute(
-                    "SELECT loan_id, alert_date, src, confirmed_by, confirmed_ts "
-                    "FROM ads_alert_confirm"
+            cols = _confirm_has_cols(cur)
+            if "disposition_status" in cols:
+                conf_sel = (
+                    "loan_id, alert_date, src, confirmed_by, confirmed_ts, "
+                    "disposition_status, disposition_ts, disposition_by"
                 )
+            else:
+                conf_sel = "loan_id, alert_date, src, confirmed_by, confirmed_ts"
+            try:
+                cur.execute(f"SELECT {conf_sel} FROM ads_alert_confirm")
                 for r in cur.fetchall():
-                    conf_map[(r[0], str(r[1]), r[2])] = {
-                        "confirmed_by": r[3],
-                        "confirmed_ts": str(r[4]),
-                    }
+                    conf_map[(r[0], str(r[1]), r[2])] = _confirm_row_from(r, cols)
             except pymysql.err.ProgrammingError:
                 conf_map = {}
 
@@ -318,7 +484,15 @@ def alerts(
         for r in rows:
             key = (r["loan_id"], str(r["alert_date"]), r["src"])
             r["property_addr"] = addr_map.get(r.get("collateral_id")) or "未标注"
-            r["confirmed"] = conf_map.get(key)
+            conf = conf_map.get(key)
+            r["confirmed"] = (
+                {"confirmed_by": conf["confirmed_by"], "confirmed_ts": conf["confirmed_ts"]}
+                if conf
+                else None
+            )
+            r["disposition"] = (
+                conf["disposition"] if conf else {"status": "pending", "by": None, "ts": None}
+            )
             out.append(r)
         cur.close()
         return {"total": total, "page": page, "page_size": page_size, "rows": out}
@@ -327,12 +501,41 @@ def alerts(
         biz.close()
 
 
-# ---------------- 预警确认（风控/管理员可写） ----------------
+# ---------------- 预警确认与处置（风控/管理员可写） ----------------
+
+# 处置状态枚举（预警闭环漏斗四阶段）：pending=未确认 / confirmed=已确认待处置 /
+# disposed=处置中 / recovered=已恢复。前端漏斗卡与列表处置按钮共用这一定义。
+DISPOSITION_STATUSES = {"pending", "confirmed", "disposed", "recovered"}
+
+# 处置字段 DDL（data-dev 会同步在数据链路侧补列，这里保证前端自建表也带同名字段，
+# 两边都幂等，谁先建都行）。disposition_status 默认 pending，NULL 视为 pending。
+_DISPOSITION_COL_DDL = {
+    "disposition_status": "disposition_status VARCHAR(16) NOT NULL DEFAULT 'pending'",
+    "disposition_ts": "disposition_ts DATETIME NULL",
+    "disposition_by": "disposition_by VARCHAR(32) NULL",
+}
+
+
+def _confirm_has_cols(cur):
+    """返回 ads_alert_confirm 现有列名集合。
+
+    兼容「data-dev 尚未补处置字段」的阶段：列表/漏斗查询据此决定查哪些列，
+    缺列时处置统计降级为 0、列表 disposition 由 confirmed 推导，页面不报错。
+    """
+    try:
+        cur.execute("SHOW COLUMNS FROM ads_alert_confirm")
+        return {r[0] for r in cur.fetchall()}
+    except pymysql.err.ProgrammingError:
+        return set()
 
 
 def ensure_alert_confirm_table():
     """幂等建前端自用确认表（root+房产库）。为什么单独建表：不改动预警链路既有表，
-    确认动作只在这张前端表留痕，报表/推送链路不受影响。"""
+    确认/处置动作只在这张前端表留痕，报表/推送链路不受影响。
+
+    建表 DDL 直接带处置字段；若表已存在但缺列（data-dev 还没同步、或旧库），
+    用 ALTER 逐列补齐——保证列表/漏斗查询永远能读到 disposition_status。
+    """
     conn = ddl_conn()
     try:
         cur = conn.cursor()
@@ -344,32 +547,199 @@ def ensure_alert_confirm_table():
             "src VARCHAR(16) NOT NULL,"
             "confirmed_by VARCHAR(32) NOT NULL,"
             "confirmed_ts DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "disposition_status VARCHAR(16) NOT NULL DEFAULT 'pending',"
+            "disposition_ts DATETIME NULL,"
+            "disposition_by VARCHAR(32) NULL,"
             "UNIQUE KEY uq_loan_date_src (loan_id, alert_date, src)"
             ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
         )
+        existing = _confirm_has_cols(cur)
+        for col, ddl in _DISPOSITION_COL_DDL.items():
+            if col not in existing:
+                cur.execute(f"ALTER TABLE ads_alert_confirm ADD COLUMN {ddl}")
         conn.commit()
         cur.close()
     finally:
         conn.close()
 
 
+def _confirm_row_from(r, cols):
+    """把 ads_alert_confirm 一行翻译成前端需要的结构（含处置状态）。
+
+    兼容缺列阶段：没有 disposition_status 列时，由 confirmed_by 推导——
+    有确认记录 → confirmed，否则 pending；disposed/recovered 只能等字段建好才有值。
+    """
+    row = {
+        "confirmed_by": r[3],
+        "confirmed_ts": str(r[4]) if r[4] is not None else None,
+    }
+    if "disposition_status" in cols:
+        raw = r[5]
+        row["disposition"] = {
+            "status": raw if raw in DISPOSITION_STATUSES else "pending",
+            "by": r[7],
+            "ts": str(r[6]) if r[6] is not None else None,
+        }
+    else:
+        row["disposition"] = {
+            "status": "confirmed",
+            "by": r[3],
+            "ts": str(r[4]) if r[4] is not None else None,
+        }
+    return row
+
+
 def confirm_alert(loan_id, alert_date, source, user):
-    """写入确认记录；重复确认幂等（UNIQUE 键 + ON DUPLICATE 覆盖）。"""
+    """写入确认记录；重复确认幂等（UNIQUE 键 + ON DUPLICATE 覆盖）。
+
+    确认是处置闭环的第二步：落库时把 disposition_status 置为 confirmed，
+    这样漏斗卡「确认量」与列表处置状态天然一致。
+    """
     ensure_alert_confirm_table()
     conn = crawl_conn()
     try:
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO ads_alert_confirm (loan_id, alert_date, src, confirmed_by) "
-            "VALUES (%s, %s, %s, %s) "
+            "INSERT INTO ads_alert_confirm (loan_id, alert_date, src, confirmed_by, disposition_status) "
+            "VALUES (%s, %s, %s, %s, 'confirmed') "
             "ON DUPLICATE KEY UPDATE confirmed_by=VALUES(confirmed_by), "
-            "confirmed_ts=CURRENT_TIMESTAMP",
+            "confirmed_ts=CURRENT_TIMESTAMP, disposition_status='confirmed'",
             (loan_id, alert_date, source, user),
         )
         conn.commit()
         cur.close()
     finally:
         conn.close()
+
+
+def dispose_alert(loan_id, alert_date, source, status, user):
+    """更新处置状态（disposed=处置中 / recovered=已恢复）。
+
+    处置是确认的后续动作，隐含「已确认」：若该条还没有确认记录，
+    直接落一条完整记录（confirmed_by=操作人）。重复处置幂等。
+    status 只接受 disposed / recovered——pending/confirmed 由确认动作管理。
+    """
+    if status not in ("disposed", "recovered"):
+        raise ValueError(f"dispose 只支持 disposed / recovered，收到 {status!r}")
+    ensure_alert_confirm_table()
+    conn = crawl_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO ads_alert_confirm "
+            "(loan_id, alert_date, src, confirmed_by, disposition_status, disposition_by, disposition_ts) "
+            "VALUES (%s, %s, %s, %s, %s, %s, NOW()) "
+            "ON DUPLICATE KEY UPDATE disposition_status=VALUES(disposition_status), "
+            "disposition_by=VALUES(disposition_by), disposition_ts=VALUES(disposition_ts), "
+            "confirmed_by=COALESCE(confirmed_by, VALUES(confirmed_by)), "
+            "confirmed_ts=COALESCE(confirmed_ts, CURRENT_TIMESTAMP)",
+            (loan_id, alert_date, source, user, status, user),
+        )
+        conn.commit()
+        cur.close()
+    finally:
+        conn.close()
+
+
+def alert_detail(loan_id, alert_date, source):
+    """单笔预警行内详情：预警基础 + 风险因子（dws_risk_class）+ 抵押物地址 + 确认/处置记录。
+
+    供预警列表「行内展开」使用。预警基础从离线/实时合并视图按 (loan_id, alert_date, src)
+    精确取一行；风险因子按 loan_id 关联 dws_risk_class（实时流里的新贷款可能查不到，
+    此时 risk_factors=None，前端照常展示其余字段）。
+    """
+    crawl = crawl_conn()
+    biz = biz_conn()
+    try:
+        cur = crawl.cursor()
+        cur.execute(
+            "SELECT src, loan_id, customer_id, collateral_id, "
+            "loan_balance, market_valuation, ltv, risk_class, is_high_risk_zone, "
+            "alert_date, alert_level FROM ("
+            "SELECT 'offline' src, loan_id, customer_id, collateral_id, "
+            "loan_balance, market_valuation, ltv, risk_class, is_high_risk_zone, "
+            "alert_date, alert_level FROM ads_ltv_alerts "
+            "UNION ALL "
+            "SELECT 'stream', loan_id, customer_id, collateral_id, "
+            "loan_balance, market_valuation, ltv, risk_class, is_high_risk_zone, "
+            "alert_date, NULL FROM ads_stream_ltv_alerts"
+            ") t WHERE loan_id=%s AND alert_date=%s AND src=%s",
+            (loan_id, alert_date, source),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in cur.description]
+        alert = dict(zip(cols, row, strict=True))
+        alert["ltv"] = float(alert["ltv"]) if alert["ltv"] is not None else None
+        alert["loan_balance"] = float(alert["loan_balance"] or 0)
+        alert["market_valuation"] = float(alert["market_valuation"] or 0)
+
+        # 风险因子：dws_risk_class 按 loan_id 取（估值偏差/异常估值/低置信等）。
+        cur.execute(
+            "SELECT market_valuation, ltv, risk_class, low_confidence, "
+            "is_high_risk_zone, valuation_deviation_pct, abnormal_valuation, "
+            "alert_level, model_version FROM dws_risk_class WHERE loan_id=%s",
+            (loan_id,),
+        )
+        r = cur.fetchone()
+        risk_factors = None
+        if r:
+            risk_factors = {
+                "ltv": float(r[1]) if r[1] is not None else None,
+                "risk_class": r[2],
+                "low_confidence": bool(r[3]),
+                "is_high_risk_zone": bool(r[4]),
+                "valuation_deviation_pct": float(r[5]) if r[5] is not None else None,
+                "abnormal_valuation": bool(r[6]),
+                "model_version": r[8],
+            }
+
+        # 抵押物地址。
+        addr = "未标注"
+        if alert.get("collateral_id") is not None:
+            bcur = biz.cursor()
+            bcur.execute(
+                "SELECT property_addr FROM collateral WHERE collateral_id=%s",
+                (alert["collateral_id"],),
+            )
+            ar = bcur.fetchone()
+            bcur.close()
+            if ar and ar[0]:
+                addr = str(ar[0])
+
+        # 确认与处置记录（缺处置列时由 confirmed 推导，与 alerts() 同口径）。
+        confirm = None
+        ccols = _confirm_has_cols(cur)
+        if "disposition_status" in ccols:
+            csel = (
+                "loan_id, alert_date, src, confirmed_by, confirmed_ts, "
+                "disposition_status, disposition_ts, disposition_by"
+            )
+        else:
+            csel = "loan_id, alert_date, src, confirmed_by, confirmed_ts"
+        try:
+            cur.execute(
+                f"SELECT {csel} FROM ads_alert_confirm "
+                "WHERE loan_id=%s AND alert_date=%s AND src=%s",
+                (loan_id, alert_date, source),
+            )
+            cr = cur.fetchone()
+            if cr:
+                confirm = _confirm_row_from(cr, ccols)
+        except pymysql.err.ProgrammingError:
+            confirm = None
+
+        cur.close()
+        return {
+            "alert": alert,
+            "property_addr": addr,
+            "risk_factors": risk_factors,
+            "confirm": confirm,
+        }
+    finally:
+        crawl.close()
+        biz.close()
 
 
 # ---------------- 操作审计（TC-06：导出/确认留痕） ----------------
