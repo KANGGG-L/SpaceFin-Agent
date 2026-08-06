@@ -277,11 +277,19 @@ def dashboard():
             geocode.get("miss", 0),
             geocode.get("pending", 0),
         )
+        # 双口径（信任卡「解析成功率」）：rate = 已解析(hit+miss)中的命中率；
+        # pending_pct = 待解析占全部挂牌量(hit+miss+pending)的比例——两个口径必须
+        # 并排放，否则 44k 房源里 3 万条 pending 会被 95.32% 掩盖（那是「还没轮到
+        # 解析」，不是解析质量差）。total = 挂牌总量，供前端计算占比展示。
         parse_success = {
             "success": hit,
             "failed": miss,
             "pending": pending,
+            "total": hit + miss + pending,
             "rate": round(hit / (hit + miss) * 100, 2) if (hit + miss) else None,
+            "pending_pct": round(pending / (hit + miss + pending) * 100, 2)
+            if (hit + miss + pending)
+            else None,
         }
 
         # 模型版本：dws_risk_class 最新产出的估值模型（按 etl_ts 取最新一组）。

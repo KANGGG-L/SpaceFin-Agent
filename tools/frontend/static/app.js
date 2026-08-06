@@ -285,7 +285,7 @@ async function renderDashboard() {
   renderAlertOverview(data.alert_breakdown);
   renderTrustCards(data.trust_cards);
   renderFunnel(data.alert_funnel);
-  renderDemoNote(data.trust_cards.crawl_scale);
+  renderDemoNote(data.trust_cards.crawl_scale, data.trust_cards.parse_success);
   fillCityOptions(data.city_dist);
 }
 
@@ -330,7 +330,9 @@ function renderTrustCards(tc) {
     {
       label: "解析成功率",
       value: ps.rate == null ? "-" : ps.rate.toFixed(2) + "%",
-      sub: `成功 ${(ps.success || 0).toLocaleString("zh-CN")} · 失败 ${(ps.failed || 0).toLocaleString("zh-CN")} · 待解析 ${(ps.pending || 0).toLocaleString("zh-CN")}`,
+      // 双口径并排：主数字 = 已解析(hit+miss)中的命中率；副注必须给出待解析量
+      // 及其占挂牌量比例，避免「待解析」被单一命中率掩盖（team-lead 拍板口径）。
+      sub: `已解析中命中率 · 待解析 ${(ps.pending || 0).toLocaleString("zh-CN")} 条（占挂牌量 ${ps.pending_pct == null ? "-" : ps.pending_pct.toFixed(1) + "%"}）`,
     },
     {
       label: "模型版本",
@@ -376,10 +378,13 @@ function renderFunnel(f) {
 
 /* ---------------- 页面底部诚实标注行 ---------------- */
 
-function renderDemoNote(cs) {
+function renderDemoNote(cs, ps) {
   const sale = cs && cs.sale ? cs.sale.toLocaleString("zh-CN") : "44,369";
+  // 诚实标注行：演示数据边界 + 解析成功率口径（双口径并排，避免 95.32% 掩盖待解析）。
   document.getElementById("demo-note").textContent =
-    `演示数据集：贷款/抵押物/客户为脚本合成，房源爬取为真实数据（${sale} 条）；7 天剧本为演示回填。`;
+    `演示数据集：贷款/抵押物/客户为脚本合成，房源爬取为真实数据（${sale} 条）；7 天剧本为演示回填。` +
+    ` 解析成功率口径：${ps && ps.rate != null ? ps.rate.toFixed(2) + "%" : "-"} 为已解析（成功+失败）中的命中率，不计待解析；` +
+    `待解析 ${ps && ps.pending != null ? ps.pending.toLocaleString("zh-CN") : "-"} 条（占挂牌量 ${ps && ps.pending_pct != null ? ps.pending_pct.toFixed(1) + "%" : "-"}）单列展示。`;
 }
 
 /* ---------------- 预警列表城市下拉 ---------------- */

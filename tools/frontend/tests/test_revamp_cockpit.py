@@ -143,7 +143,9 @@ def test_dashboard_trust_cards_and_funnel(monkeypatch):
         "success": 13000,
         "failed": 600,
         "pending": 33000,
+        "total": 46600,
         "rate": 95.59,
+        "pending_pct": 70.82,
     }
     assert tc["model_version"]["version"] == "2026-08-05-r11"
     assert tc["model_version"]["loan_count"] == 200
