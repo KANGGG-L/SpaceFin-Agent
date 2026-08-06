@@ -138,10 +138,10 @@ nohup tools/orchestrator/.venv/bin/python tools/frontend/app.py \
 
 | 账号 | 密码 | 角色 | 权限要点 |
 |------|------|------|---------|
-| `admin` | `admin123` | 系统管理员 | 全部权限 |
-| `risk` | `risk123` | 风控策略经理 | 配置空间惩罚项 / LTV 阈值、确认 / 导出 |
-| `da` | `da123` | 数据分析师 | 只读 + 导出（PII 自动脱敏） |
-| `postloan` | `post123` | 贷后资产保全 | 仅看 LTV 预警，不可见 1104 报送页（403） |
+| `admin` | `admin20020309` | 系统管理员 | 全部权限 |
+| `risk` | `risk20020309` | 风控策略经理 | 配置空间惩罚项 / LTV 阈值、确认 / 导出 |
+| `da` | `da20020309` | 数据分析师 | 只读 + 导出（PII 自动脱敏） |
+| `postloan` | `postloan20020309` | 贷后资产保全 | 仅看 LTV 预警，不可见 1104 报送页（403） |
 
 **推荐点击路径（对应 PoC 设计稿 `docs/poc/raw-prototype/`）**：
 
@@ -161,6 +161,16 @@ nohup tools/orchestrator/.venv/bin/python tools/frontend/app.py \
 - **角色隔离**：用 `postloan` 登录点 1104 报送页会返回 403，直观体现 RBAC。
 
 > 前端依赖 `output/` 下产物（如 `output/avm/avm_report.json`、`output/spatial/spatial_report.json`、`output/risk/dws_risk_class.csv`）；若演示机未跑过 pipeline，对应页显示「产物缺失」空态（已优雅处理，不崩溃）。演示前请确认产物已生成。
+
+## 7 天风险演进演示（2026-08-01 ~ 08-07，事件城市：广州）
+
+平台内置一套 **7 天风险演进剧本**（`docs/demo/script_7d.md`）与验收标准（`docs/demo/acceptance.md`），完整演示「数据底座 → 估值 → LTV → 预警 → 人工处置 → 闭环」链路：
+
+- **剧本主线**：8 月 4 日广州核心区挂牌价异动下探 → 数据底座 24 小时内传导到抵押物估值（AVM 重训）→ 广州贷款 LTV 集体上穿预警线 → 8 月 5 日预警达峰 → 风控批量确认与处置 → 8 月 7 日企稳收口。
+- **灌数方式**：`tools/dev/backfill_7d.py --all` 逐日调用**真实引擎**（`tools/risk/main.py --date X --write-db` + `tools/alerting/main.py --date X`），处置记录复用 `ads_alert_confirm`（新增 `disposition_status / disposition_by / disposition_ts` 字段）。
+- **数据规模**：客户 / 抵押物 / 贷款三表扩至 **5,000 笔**（广州约 1,250 笔，占比 25%）；`seed/generate_seed.py 5000` 重新生成并灌库。
+
+> **诚实标注（重要）**：仅 `customer / collateral / loan` 三表为脚本合成；`crawl_housing_sale` 4.4 万条房源为**真实爬取**。D4 起的「广州挂牌价下探」是对真实爬取行做单价乘子的**演示脚本扰动**（原值记于 `ads_demo_gz_perturb`，可一键回滚），AVM 重训是真实引擎行为；7 天全链路为演示回填数据，不构成任何真实市场判断。
 
 ## 项目性质与范围说明
 
