@@ -121,6 +121,47 @@ make down              # 停止
 
 更多入口见根目录 `Makefile`（`make help`）。合成 seed 由 `seed/generate_seed.py` 生成（确定性、可复现），说明见 [seed/README.md](seed/README.md)。
 
+### 交互体验（Interactive Demo）
+
+平台提供零依赖 Web 驾驶舱（stdlib `http.server` + PyMySQL，端口 8500），10 个页面覆盖资产监控、空间风险、AVM、合规审计与策略沙盒。前端详情见 [tools/frontend/README.md](tools/frontend/README.md)。
+
+**启动**（需先有 MySQL 与合成 seed，见上）：
+
+```bash
+# 启动前端（后台，日志落 output/frontend/app.log）
+nohup tools/orchestrator/.venv/bin/python tools/frontend/app.py \
+    --host 127.0.0.1 --port 8500 >> output/frontend/app.log 2>&1 &
+# 浏览器打开 http://127.0.0.1:8500
+```
+
+**演示账号（RBAC 四角色，凭据写死在 `app.py` 的 `USERS`，dev-only）**：
+
+| 账号 | 密码 | 角色 | 权限要点 |
+|------|------|------|---------|
+| `admin` | `admin123` | 系统管理员 | 全部权限 |
+| `risk` | `risk123` | 风控策略经理 | 配置空间惩罚项 / LTV 阈值、确认 / 导出 |
+| `da` | `da123` | 数据分析师 | 只读 + 导出（PII 自动脱敏） |
+| `postloan` | `post123` | 贷后资产保全 | 仅看 LTV 预警，不可见 1104 报送页（403） |
+
+**推荐点击路径（对应 PoC 设计稿 `docs/poc/raw-prototype/`）**：
+
+| PoC 设计图 | 前端页面 | 可交互点 |
+|-----------|---------|---------|
+| 资产质量监控驾驶舱 Dashboard | 内置 `驾驶舱` 页 | KPI 卡片 + SVG 柱状图 |
+| 区域贷款分布地图 | `P5 空间画像` | **点击地图网格点**弹 tooltip + 右侧高危区明细（最强交互记忆点） |
+| 分类详情 | `P3 迁徙矩阵` | 五级分类下钻 |
+| LTV 爆仓预警 | 内置 `预警列表` 页 | 两档徽标（强预警级 / 警示级） |
+| 政策参数配置 | `P6 策略惩罚` | 空间惩罚项配置（仅 `risk`/`admin`） |
+
+**重点演示项**：
+- **P5 空间页**：SVG 地图网格可点选，直观展示空间风险维度——PoC 静态图在此升级为可交互可视化。
+- **P7 AVM 页**：估值误差直方图 + 模型版本血缘（`R-UBQ-01`），特征归因读 `attribution_report.json`。
+- **P9 合规审计页**：用 `da` 登录导出 → 客户号显示为 `c****{后4位}`，且 `ads_export_audit` 落审计行（AC-06）。
+- **P10 策略沙盒页**：顶部红色「未校准」横幅，诚实声明 Critic 基准为合成种子（H3 商用前置）。
+- **角色隔离**：用 `postloan` 登录点 1104 报送页会返回 403，直观体现 RBAC。
+
+> 前端依赖 `output/` 下产物（如 `output/avm/avm_report.json`、`output/spatial/spatial_report.json`、`output/risk/dws_risk_class.csv`）；若演示机未跑过 pipeline，对应页显示「产物缺失」空态（已优雅处理，不崩溃）。演示前请确认产物已生成。
+
 ## 作品集范围说明
 
 > 本仓库是**校招作品集，非商业部署**。以下显式声明定位、前置条件与降级，避免把作品集边界误读为生产系统承诺。
