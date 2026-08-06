@@ -304,14 +304,15 @@ def dashboard():
         }
 
         # 预警闭环漏斗：预警 → 确认 → 处置 → 恢复。
-        # 预警量 = 离线 + 实时；确认量 = ads_alert_confirm 总行数（确认即建行）；
-        # 处置/恢复量 = 该表 disposition_status 计数（data-dev 补字段后自动有值，
-        # 字段未就绪时 _confirm_has_cols 降级为 0，漏斗照常渲染）。
+        # 预警量 = 离线 + 实时；确认量 = confirmed_by 非空的行（data-dev 契约：
+        # 有 confirmed_by/confirmed_ts 才算确认；处置/恢复行同样带确认人，
+        # 故确认≥处置，漏斗单调）。处置/恢复量 = disposition_status 计数
+        # （字段未就绪时 _confirm_has_cols 降级为 0，漏斗照常渲染）。
         cur.execute("SELECT COUNT(*) FROM ads_ltv_alerts")
         off_total = int(cur.fetchone()[0])
         cur.execute("SELECT COUNT(*) FROM ads_stream_ltv_alerts")
         str_total = int(cur.fetchone()[0])
-        cur.execute("SELECT COUNT(*) FROM ads_alert_confirm")
+        cur.execute("SELECT COUNT(*) FROM ads_alert_confirm WHERE confirmed_by IS NOT NULL")
         confirm_total = int(cur.fetchone()[0])
         disposed_total = recovered_total = 0
         if "disposition_status" in _confirm_has_cols(cur):

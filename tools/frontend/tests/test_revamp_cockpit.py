@@ -155,6 +155,8 @@ def test_dashboard_trust_cards_and_funnel(monkeypatch):
         "disposed": 1,
         "recovered": 1,
     }
+    # 确认量按 data-dev 契约 = confirmed_by 非空的行（处置行也带确认人）。
+    assert conn.find_sql("confirmed_by IS NOT NULL") is not None
 
 
 def test_dashboard_funnel_degrades_without_disposition_column(monkeypatch):
