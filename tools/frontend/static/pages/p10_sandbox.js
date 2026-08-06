@@ -13,7 +13,8 @@
   const { api, esc } = window.spf;
 
   const HTML = `
-    <h1 class="page-title">策略沙盒推演</h1>
+    <h1 class="page-title">策略沙盒推演 <span style="font-size:13px;color:#6b7280;font-weight:400">（框架预览）</span></h1>
+    <div class="check-line" style="font-size:13px;color:#6b7280;margin-bottom:12px">本页为设计框架展示，闭环交互不进入本期开发排期。</div>
 
     <div id="p10-uncalib-banner"></div>
     <div id="p10-attr-notice"></div>

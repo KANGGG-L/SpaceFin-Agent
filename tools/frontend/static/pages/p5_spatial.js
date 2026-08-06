@@ -562,7 +562,7 @@
   }
 
   const HTML = `
-<h2 class="page-title">空间风险画像 <span style="font-size:13px;color:#6b7280;font-weight:400">通勤 / 高危区 / POI 图层 + 高危区 NPL 集中度</span></h2>
+<h1 class="page-title">空间风险画像 <span style="font-size:13px;color:#6b7280;font-weight:400">通勤 / 高危区 / POI 图层 + 高危区 NPL 集中度</span></h1>
 
 <div class="filter-bar">
   <label>城市<select id="p5-city"></select></label>

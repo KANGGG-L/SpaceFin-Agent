@@ -377,6 +377,7 @@ def alerts(
     date_to=None,
     source=None,
     city=None,
+    keyword=None,
     page=1,
     page_size=20,
 ):
@@ -385,6 +386,7 @@ def alerts(
     city 按抵押物地址前缀过滤（如「广州」匹配 property_addr LIKE '广州%'），
     需查业务库 collateral 表得到 collateral_id 集合后在 SQL 里 IN 过滤——
     分页在 SQL 侧完成，避免「先全量查出再内存筛城市导致页码错位」。
+    keyword 按贷款号/客户号模糊搜索（参数化 LIKE，防注入）；为空时行为不变。
     """
     where, params = [], []
     if risk_class:
@@ -405,6 +407,10 @@ def alerts(
     if source and source in ALERT_SOURCES:
         where.append("src=%s")
         params.append(source)
+    if keyword:
+        # q 搜索：贷款号 / 客户号模糊匹配（LIKE 值走参数化，不拼 SQL，防注入）。
+        where.append("(loan_id LIKE %s OR customer_id LIKE %s)")
+        params.extend([f"%{keyword}%", f"%{keyword}%"])
 
     crawl = crawl_conn()
     biz = biz_conn()
@@ -804,6 +810,71 @@ def write_audit(action, username, role, detail, result, ip):
 
 # ---------------- 1104 报送 ----------------
 
+# ads_1104_g11 重建前置检查的必要列（与 tools/reporting/main.py 建表 DDL 对齐）。
+_G11_REQUIRED_COLS = {
+    "stat_date",
+    "risk_class",
+    "loan_count",
+    "balance_total",
+    "balance_pct",
+    "is_total",
+}
+
+
+def _latest_g11_date(cur):
+    """取 ads_1104_g11 最新的 stat_date（date 缺省时的默认值）。"""
+    cur.execute("SELECT MAX(stat_date) FROM ads_1104_g11")
+    row = cur.fetchone()
+    return str(row[0]) if row and row[0] else None
+
+
+def _load_g11_rows(cur, date):
+    """读 ads_1104_g11 该日快照行（合计行置尾，五级按 CLASS_ORDER 排序）。"""
+    cur.execute(
+        "SELECT stat_date, risk_class, loan_count, balance_total, balance_pct, is_total, etl_ts "
+        "FROM ads_1104_g11 WHERE stat_date=%s ORDER BY is_total ASC, "
+        "FIELD(risk_class,%s,%s,%s,%s,%s)",
+        (date, *CLASS_ORDER),
+    )
+    return [
+        {
+            "stat_date": str(r[0]),
+            "risk_class": r[1],
+            "loan_count": int(r[2]),
+            "balance_total": float(r[3]),
+            "balance_pct": float(r[4]),
+            "is_total": bool(r[5]),
+            "etl_ts": str(r[6]),
+        }
+        for r in cur.fetchall()
+    ]
+
+
+def _dws_aggregate(cur):
+    """dws_risk_class 明细聚合（裁判出口）：risk_class -> (笔数, 余额)。"""
+    cur.execute(
+        "SELECT risk_class, COUNT(*), COALESCE(SUM(balance),0) "
+        "FROM dws_risk_class GROUP BY risk_class"
+    )
+    return {r[0]: (int(r[1]), float(r[2])) for r in cur.fetchall()}
+
+
+def _g11_consistency(rows, dws):
+    """以 dws 明细聚合为裁判，比对 g11 快照行的笔数/余额，返回 mismatch 列表。
+
+    与 tools/reporting/main.py 的 1104_vs_dws 校验同源：余额差超 EPS_BALANCE 即不一致。
+    """
+    mismatches = []
+    for r in rows:
+        if r["is_total"]:
+            continue
+        cnt, bal = dws.get(r["risk_class"], (0, 0.0))
+        if r["loan_count"] != cnt:
+            mismatches.append(f"g11_vs_dws:{r['risk_class']}:loan_count")
+        if abs(r["balance_total"] - bal) > EPS_BALANCE:
+            mismatches.append(f"g11_vs_dws:{r['risk_class']}:balance")
+    return mismatches
+
 
 def report(date=None):
     """G11 报送页：报表行 + 口径校验状态 + 阻断告警历史。
@@ -817,48 +888,12 @@ def report(date=None):
     try:
         cur = crawl.cursor()
         if not date:
-            cur.execute("SELECT MAX(stat_date) FROM ads_1104_g11")
-            row = cur.fetchone()
-            date = str(row[0]) if row and row[0] else None
+            date = _latest_g11_date(cur)
         if not date:
             return {"date": None, "rows": [], "consistent": None, "mismatches": [], "alerts": []}
 
-        cur.execute(
-            "SELECT stat_date, risk_class, loan_count, balance_total, balance_pct, is_total, etl_ts "
-            "FROM ads_1104_g11 WHERE stat_date=%s ORDER BY is_total ASC, "
-            "FIELD(risk_class,%s,%s,%s,%s,%s)",
-            (date, *CLASS_ORDER),
-        )
-        rows = []
-        for r in cur.fetchall():
-            rows.append(
-                {
-                    "stat_date": str(r[0]),
-                    "risk_class": r[1],
-                    "loan_count": int(r[2]),
-                    "balance_total": float(r[3]),
-                    "balance_pct": float(r[4]),
-                    "is_total": bool(r[5]),
-                    "etl_ts": str(r[6]),
-                }
-            )
-
-        # dws 明细聚合（裁判出口）。
-        cur.execute(
-            "SELECT risk_class, COUNT(*), COALESCE(SUM(balance),0) "
-            "FROM dws_risk_class GROUP BY risk_class"
-        )
-        dws = {r[0]: (int(r[1]), float(r[2])) for r in cur.fetchall()}
-
-        mismatches = []
-        for r in rows:
-            if r["is_total"]:
-                continue
-            cnt, bal = dws.get(r["risk_class"], (0, 0.0))
-            if r["loan_count"] != cnt:
-                mismatches.append(f"g11_vs_dws:{r['risk_class']}:loan_count")
-            if abs(r["balance_total"] - bal) > EPS_BALANCE:
-                mismatches.append(f"g11_vs_dws:{r['risk_class']}:balance")
+        rows = _load_g11_rows(cur, date)
+        mismatches = _g11_consistency(rows, _dws_aggregate(cur))
 
         # 阻断告警历史。
         cur.execute(
@@ -889,6 +924,147 @@ def report(date=None):
         }
     finally:
         crawl.close()
+
+
+def report_recheck(date=None):
+    """1104 口径实时复算（只读，不写表、不落审计）。
+
+    复用 report() 同一套校验逻辑（_load_g11_rows + _dws_aggregate + _g11_consistency），
+    只返回校验结论与 checked_at。checked_at 用 SQL 侧 NOW()：宿主 UTC / MySQL +08 的
+    时区差由 MySQL 自己消化，绝不在 Python 里做 naive datetime 减法。
+    """
+    crawl = crawl_conn()
+    try:
+        cur = crawl.cursor()
+        if not date:
+            date = _latest_g11_date(cur)
+        if not date:
+            return {"date": None, "consistent": None, "mismatches": [], "checked_at": None}
+        cur.execute("SELECT NOW()")
+        checked_at = str(cur.fetchone()[0])
+        mismatches = _g11_consistency(_load_g11_rows(cur, date), _dws_aggregate(cur))
+        cur.close()
+        return {
+            "date": date,
+            "consistent": not mismatches,
+            "mismatches": mismatches,
+            "checked_at": checked_at,
+        }
+    finally:
+        crawl.close()
+
+
+def report_rebuild(date=None):
+    """按 dws_risk_class 现算重建 ads_1104_g11 快照（可操作闭环的兜底）。
+
+    快照与明细口径漂了时，直接以明细聚合为基准覆盖重算该 stat_date：先删该日
+    已有行再插入（单事务，任一步失败整体回滚），保持 CLASS_ORDER 排序，
+    is_total 合计行一并生成，etl_ts 用 SQL NOW()。重建后与明细同源，校验应恒一致，
+    仍跑一遍返回供前端展示。
+    """
+    conn = crawl_conn()
+    try:
+        # 关闭自动提交：DELETE + INSERT 必须落在同一事务，失败整体回滚。
+        conn.autocommit(False)
+        cur = conn.cursor()
+        try:
+            if not date:
+                date = _latest_g11_date(cur)
+            if not date:
+                conn.rollback()
+                return {
+                    "date": None,
+                    "rebuilt_rows": 0,
+                    "consistent": None,
+                    "mismatches": [],
+                    "etl_ts": None,
+                }
+
+            # 写入前置：表/列结构缺失 → 明确报错而非 500（前端能展示，不裸崩）。
+            _ensure_g11_schema(cur)
+            dws = _dws_aggregate(cur)
+            bad = [cls for cls in dws if cls not in CLASS_ORDER]
+            if bad:
+                raise ValueError(
+                    "dws_risk_class 出现非五级 risk_class，阻断重建: "
+                    + ", ".join(str(x) for x in bad)
+                )
+            rows = _build_g11_rows(date, dws)
+
+            cur.execute("DELETE FROM ads_1104_g11 WHERE stat_date=%s", (date,))
+            cur.executemany(
+                "INSERT INTO ads_1104_g11 "
+                "(stat_date, risk_class, loan_count, balance_total, balance_pct, is_total, etl_ts) "
+                "VALUES (%s,%s,%s,%s,%s,%s,NOW())",
+                [
+                    (
+                        date,
+                        r["risk_class"],
+                        r["loan_count"],
+                        r["balance_total"],
+                        r["balance_pct"],
+                        r["is_total"],
+                    )
+                    for r in rows
+                ],
+            )
+            cur.execute("SELECT NOW()")
+            etl_ts = str(cur.fetchone()[0])
+            mismatches = _g11_consistency(rows, dws)
+            conn.commit()
+            return {
+                "date": date,
+                "rebuilt_rows": len(rows),
+                "consistent": not mismatches,
+                "mismatches": mismatches,
+                "etl_ts": etl_ts,
+            }
+        finally:
+            cur.close()
+    finally:
+        conn.close()
+
+
+def _ensure_g11_schema(cur):
+    """rebuild 前置结构检查：ads_1104_g11 必要列缺失 → ValueError（明确错误而非 500）。"""
+    try:
+        cur.execute("SHOW COLUMNS FROM ads_1104_g11")
+        cols = {r[0] for r in cur.fetchall()}
+    except pymysql.err.ProgrammingError as err:
+        raise ValueError(
+            "ads_1104_g11 表不存在，无法重建（请先运行 tools/reporting/main.py 建表）"
+        ) from err
+    missing = _G11_REQUIRED_COLS - cols
+    if missing:
+        raise ValueError(f"ads_1104_g11 缺少必要列，无法重建: {sorted(missing)}")
+
+
+def _build_g11_rows(date, dws):
+    """dws 明细聚合 → G11 模板行：五级按 CLASS_ORDER + 合计行（is_total=1）。"""
+    total_count = sum(cnt for cnt, _ in dws.values())
+    total_balance = round(sum(bal for _, bal in dws.values()), 2)
+    rows = []
+    for cls in CLASS_ORDER:
+        cnt, bal = dws.get(cls, (0, 0.0))
+        rows.append(
+            {
+                "risk_class": cls,
+                "loan_count": cnt,
+                "balance_total": round(bal, 2),
+                "balance_pct": round(bal / total_balance, 4) if total_balance else 0.0,
+                "is_total": 0,
+            }
+        )
+    rows.append(
+        {
+            "risk_class": "合计",
+            "loan_count": total_count,
+            "balance_total": total_balance,
+            "balance_pct": round(total_balance / total_balance, 4) if total_balance else 0.0,
+            "is_total": 1,
+        }
+    )
+    return rows
 
 
 def report_dates():

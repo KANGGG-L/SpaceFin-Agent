@@ -10,7 +10,7 @@
 | **stdlib `http.server` + PyMySQL** | ✅ 采用 | 全仓唯一 Python 环境 `tools/orchestrator/.venv`（= conda spark 3.10）已带 PyMySQL 2.2.8；**零新增依赖**，不往共享 conda 环境塞几十个包，不污染 spark/调度等既有流水线 |
 | Streamlit | ❌ 不采用 | 依赖树大（altair/pandas/plotly…），且服务模型不利于自控 RBAC 与会话 |
 | FastAPI + 前端 | ❌ 不采用 | 需新增 uvicorn/fastapi/pydantic 全家桶；200 行级数据 + 3 个页面，不值得引入 ASGI 常驻服务 |
-| Node/React 构建链 | ❌ 不采用 | 明确要求避免重型构建链；前端用原生 JS + 内联 SVG 图表，无 CDN、无构建、离线可用 |
+| Node/React 构建链 | ❌ 不采用 | 明确要求避免重型构建链；前端用原生 JS + 内联 SVG 图表，无构建、无 npm 依赖；P5 地图底图瓦片来自外网 OpenStreetMap，需 VPS 可联网访问，内网/断网时降级为点位图 |
 
 ## 页面清单与数据映射
 
@@ -53,7 +53,8 @@ pkill -f "tools/frontend/app.py"
 ```
 
 - 默认端口 **8500**（已避开 MySQL 3306 / Redis 6379 / Airflow 8080 / Flink 8081 / Doris 9030 / Kafka 9092 / MinIO 9000 等占用）。
-- 默认仅监听 `127.0.0.1`；如需局域网访问加 `--host 0.0.0.0`（开发环境自行评估暴露面）。
+- 默认仅监听 `127.0.0.1`；部署到 VPS、暴露到公网时加 `--host 0.0.0.0`（需自行评估暴露面，建议前置 Nginx/反向代理）。
+- P5 空间画像页的地图底图瓦片来自外网 OpenStreetMap（`https://{s}.tile.openstreetmap.org/...`），VPS 需可联网访问；内网/断网时地图降级为点位图（点位数据仍在，仅无底图）。
 - 首次启动会用 root 凭证幂等建前端自用表 `ads_alert_confirm`（预警确认留痕，不改动预警链路既有表）与 `ads_export_audit`（操作审计：导出/确认留 who/role/when/what/result/ip，对应 TC-06「审计日志已记录」）。
 
 ## 默认账号（dev-only，上线前必须接统一认证）
@@ -76,6 +77,7 @@ pkill -f "tools/frontend/app.py"
 - 连接参数 / 业务日口径复用 `tools/risk/config.py` 的 `load_env` / `crawl_params` / `business_params`，与风险引擎、报送、预警链路同源；
 - 五级分类顺序、LTV 红线（0.85）、口径容差（余额 0.01）与 `config.py` / `tools/reporting` 保持一致；
 - 1104 校验状态为页面实时复算（dws 明细聚合 vs `ads_1104_g11`），与报送 CLI 的阻断结论互相印证——当前若显示「口径不一致」，说明 T+1 报送快照与最新明细存在漂移，正是 AC-05 要拦截的场景。
+- 1104 页提供处置闭环：「重新校验」只读复算（`POST /api/report/recheck`）；「重建快照」按 dws 明细覆盖重建该日 `ads_1104_g11`（`POST /api/report/rebuild`，admin/risk 权限，写操作前有二次确认，动作留痕 `ads_export_audit`）。重建后口径即一致——这是演示修复漂移的路径，真实报送场景应由 `tools/reporting/main.py` 重跑并保留阻断审计。
 
 ## API 一览
 
@@ -84,10 +86,12 @@ pkill -f "tools/frontend/app.py"
 | POST | `/api/login` `/api/logout` | 公开 |
 | GET | `/api/me` | 公开 |
 | GET | `/api/dashboard` | 登录 |
-| GET | `/api/alerts` | 登录 |
+| GET | `/api/alerts`（支持 `q` 按贷款号/客户号模糊搜索） | 登录 |
 | POST | `/api/alerts/confirm` | admin / risk |
 | GET | `/api/alerts/export` | admin / risk / da |
 | GET | `/api/report` `/api/report/dates` | admin / risk / da |
+| POST | `/api/report/recheck` | admin / risk / da（只读重算，返回 `checked_at`） |
+| POST | `/api/report/rebuild` | admin / risk（写操作：按 dws 明细重建 G11 快照，落审计） |
 | GET | `/api/compliance_audit` | admin / risk |
 | GET | `/api/sandbox` | admin / risk / da |
 

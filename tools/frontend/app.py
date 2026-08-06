@@ -209,6 +209,15 @@ def _json(data):
     return json.dumps(data, ensure_ascii=False, default=_json_default).encode("utf-8")
 
 
+def _valid_stat_date(value):
+    """1104 报送 date 参数边界校验：必须是合法 YYYY-MM-DD（防脏串进 SQL 产生怪状态）。"""
+    try:
+        date.fromisoformat(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 class SpaceFinApp(BaseHTTPRequestHandler):
     """单处理器承载全部路由；RBAC 在 API 分发前统一校验。"""
 
@@ -349,6 +358,16 @@ class SpaceFinApp(BaseHTTPRequestHandler):
             user = self._require(CAN_CONFIRM)
             if user:
                 self._handle_dispose(user)
+        elif path == "/api/report/recheck":
+            # 1104 口径实时复算（只读）：与 report 同权限（admin/risk/da 登录即可）。
+            user = self._require(CAN_VIEW_REPORT)
+            if user:
+                self._handle_recheck(user)
+        elif path == "/api/report/rebuild":
+            # 1104 快照重建（写）：与确认/处置同权限，admin / risk。
+            user = self._require(CAN_CONFIRM)
+            if user:
+                self._handle_rebuild(user)
         elif not self._dispatch_plugin("POST", parsed):
             self._send_error(404, "not found")
 
@@ -477,6 +496,7 @@ class SpaceFinApp(BaseHTTPRequestHandler):
             date_to=first("date_to"),
             source=first("source"),
             city=first("city"),
+            keyword=first("q"),
             page=max(1, page),
             page_size=20,
         )
@@ -645,6 +665,59 @@ class SpaceFinApp(BaseHTTPRequestHandler):
         db.dispose_alert(int(loan_id), alert_date, source, status, user["user"])
         db.write_audit("dispose", user["user"], user["role"], detail, "success", ip)
         self._send_json(200, {"ok": True, "disposed_by": user["user"], "status": status})
+
+    def _handle_recheck(self, user):
+        """1104 口径实时复算：只读重算，不写表、不落审计（checked_at 取 SQL NOW()）。"""
+        body = self._parse_body()
+        date = (body.get("date") or "").strip() or None
+        if date and not _valid_stat_date(date):
+            self._send_error(400, "date 参数不合法，应为 YYYY-MM-DD")
+            return
+        self._send_json(200, db.report_recheck(date))
+
+    def _handle_rebuild(self, user):
+        """重建 1104 G11 快照：以 dws_risk_class 明细为基准覆盖该日快照。
+
+        与确认/处置同权限（admin/risk）。写库在 db.report_rebuild 内单事务完成；
+        本 handler 负责参数校验、审计留痕（TC-06）与错误转译（结构缺列 → 400 而非 500）。
+        """
+        body = self._parse_body()
+        date = (body.get("date") or "").strip() or None
+        ip = self.client_address[0]
+        if date and not _valid_stat_date(date):
+            db.write_audit(
+                "report_rebuild",
+                user["user"],
+                user["role"],
+                f"重建 G11 快照 {date} 参数不合法",
+                "failure",
+                ip,
+            )
+            self._send_error(400, "date 参数不合法，应为 YYYY-MM-DD")
+            return
+        try:
+            result = db.report_rebuild(date)
+        except ValueError as exc:
+            # 写入前置失败（表/列缺失、非五级档位）→ 明确报错而非 500，同时留审计。
+            db.write_audit(
+                "report_rebuild",
+                user["user"],
+                user["role"],
+                f"重建 G11 快照 {date} 失败: {exc}",
+                "failure",
+                ip,
+            )
+            self._send_error(400, str(exc))
+            return
+        db.write_audit(
+            "report_rebuild",
+            user["user"],
+            user["role"],
+            f"重建 G11 快照 {result['date']} {result['rebuilt_rows']} 行",
+            "success",
+            ip,
+        )
+        self._send_json(200, result)
 
     def _handle_detail(self, parsed):
         """单笔预警详情（行内展开）：基础 + 风险因子 + 地址 + 确认/处置记录。"""

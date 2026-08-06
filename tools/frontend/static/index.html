@@ -23,7 +23,15 @@
       </label>
       <div id="login-err" class="login-err"></div>
       <button type="submit" class="btn btn-primary btn-block">登 录</button>
-      <div class="login-hint">开发环境内置账号见 README（dev-only）</div>
+      <div class="login-hint">
+        <div class="login-hint-title">开发账号（dev-only，非生产凭据）</div>
+        <table class="login-accounts">
+          <tr><td>admin</td><td>admin20020309</td><td>系统管理员</td></tr>
+          <tr><td>risk</td><td>risk20020309</td><td>风控（确认/处置）</td></tr>
+          <tr><td>da</td><td>da20020309</td><td>数据分析（只读+导出）</td></tr>
+          <tr><td>postloan</td><td>postloan20020309</td><td>贷后（不可见报送页）</td></tr>
+        </table>
+      </div>
     </form>
   </div>
 
@@ -47,7 +55,7 @@
         <div id="trust-cards" class="trust-row"></div>
         <!-- 预警处置闭环漏斗（与 7 天剧本呼应） -->
         <div class="card funnel-card">
-          <h2 class="card-title">预警处置闭环 · 7 天剧本</h2>
+          <h2 class="card-title">预警处置闭环 · 7 天剧本<span class="card-note">预警=累计预警事件（含历史）</span></h2>
           <div id="alert-funnel" class="funnel"></div>
         </div>
         <div class="grid-2">
@@ -107,6 +115,9 @@
           <label>日期至
             <input type="date" id="f-date-to" />
           </label>
+          <label>搜索
+            <input id="f-q" placeholder="贷款号/客户号" />
+          </label>
           <button type="submit" class="btn btn-primary">查询</button>
           <a id="export-btn" class="btn btn-ghost" href="#">导出 CSV</a>
           <span id="alert-total" class="filter-total"></span>
@@ -138,6 +149,10 @@
             <select id="report-date"></select>
           </label>
           <span id="report-status" class="badge"></span>
+          <span class="filter-actions">
+            <button id="btn-recheck" class="btn btn-ghost btn-sm">重新校验</button>
+            <button id="btn-rebuild" class="btn btn-danger btn-sm">重建快照</button>
+          </span>
         </div>
         <div class="grid-2">
           <div class="card">
@@ -151,6 +166,7 @@
           </div>
           <div class="card">
             <h2 class="card-title">口径一致性校验</h2>
+            <div id="report-checked-at" class="check-line"></div>
             <div id="report-check"></div>
             <h2 class="card-title" style="margin-top:16px">阻断告警历史（ads_report_alert）</h2>
             <div id="report-alerts"></div>

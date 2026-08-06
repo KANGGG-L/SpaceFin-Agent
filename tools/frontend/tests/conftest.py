@@ -31,6 +31,11 @@ class _FakeCursor:
         self.description = desc
         return len(self._rows)
 
+    def executemany(self, sql, seq_params):
+        # 批量写：与 execute 同口径录制（SQL + 参数序列），供测试断言写入内容。
+        self._conn.executed.append((" ".join(sql.split()), seq_params))
+        return len(seq_params)
+
     def fetchone(self):
         return self._rows[0] if self._rows else None
 
@@ -64,6 +69,16 @@ class FakeConn:
 
     def close(self):
         pass
+
+    # ---- 事务三件套：供写路径（单事务 DELETE+INSERT）测试使用，均为无副作用录制 ----
+    def commit(self):
+        self.committed = getattr(self, "committed", 0) + 1
+
+    def rollback(self):
+        self.rolled_back = getattr(self, "rolled_back", 0) + 1
+
+    def autocommit(self, enabled):
+        self.autocommit_mode = enabled
 
     def find_sql(self, *keywords):
         for sql, params in self.executed:

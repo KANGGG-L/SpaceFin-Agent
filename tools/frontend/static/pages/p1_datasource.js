@@ -209,9 +209,9 @@
   /* ---------------- 页面装配 ---------------- */
 
   const HTML =
-    `<h2 class="page-title">数据底座接入配置` +
+    `<h1 class="page-title">数据底座接入配置` +
     `<button class="btn btn-ghost btn-sm" id="ds-refresh" style="margin-left:12px">刷新</button>` +
-    `<span id="ds-now" style="font-size:12px;color:#6b7280;margin-left:8px"></span></h2>` +
+    `<span id="ds-now" style="font-size:12px;color:#6b7280;margin-left:8px"></span></h1>` +
     `<div class="kpi-row" id="ds-kpi"></div>` +
     `<div class="card" style="margin-top:16px"><div class="card-title">链路健康度 · ODS → DWD → DWS → ADS</div>` +
     `<div id="ds-lineage"></div></div>` +
