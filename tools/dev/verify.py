@@ -139,6 +139,15 @@ def verify_a2(crawl, summary):
     check(
         "A2.6 模型版本存在且无 unknown", len(mv) >= 1 and all(v != "unknown" for v in mv), str(mv)
     )
+    # 按日版本切换证据：dws_risk_class 是 D7 最新快照只见单一版本，逐日版本看 summary
+    # （引擎每日跑完当刻从 dws 快照留存），D4 事件日重训后版本必须切换。
+    day_vers = [summary.get(d, {}).get("model_version", "") for d in DATES]
+    d3_ver, d4_ver = day_vers[2], day_vers[3]
+    check(
+        "A2.6 按日版本 D4 起切换(r17→r20)",
+        bool(d3_ver) and bool(d4_ver) and d4_ver != d3_ver,
+        f"D1-D7={day_vers}",
+    )
     cur.close()
 
 

@@ -1,7 +1,7 @@
 # 7 天演示验收清单（2026-08-06 实测）
 
 > 对应 `docs/demo/acceptance.md`，由 `tools/dev/verify.py` 自动打勾；本文件记录实测数值。
-> 结论：**23/23 通过**。完整输出见 `tools/orchestrator/.venv/bin/python tools/dev/verify.py`。
+> 结论：**24/24 通过**。完整输出见 `tools/orchestrator/.venv/bin/python tools/dev/verify.py`。
 
 ## A 数据侧
 
@@ -16,6 +16,7 @@
 | A2.4 | D5 为全量预警峰值 | D5=289 | PASS |
 | A2.5 | 广州天河区挂牌均价较扰动前下降 8%-12% | 51,234 → 45,086（-12.0%） | PASS |
 | A2.6 | 模型版本存在且无 unknown | 2026-08-06-r20（D1-D3 基线 r17，D4 起切换） | PASS |
+| A2.6 | 按日版本 D4 起切换（r17→r20） | D1-D7 = r17/r17/r17/r18/r19/r19/r20 | PASS |
 
 ## A3 处置闭环
 
