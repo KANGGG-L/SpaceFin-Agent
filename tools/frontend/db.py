@@ -306,8 +306,11 @@ def dashboard():
         # 预警闭环漏斗：预警 → 确认 → 处置 → 恢复。
         # 预警量 = 离线 + 实时；确认量 = confirmed_by 非空的行（data-dev 契约：
         # 有 confirmed_by/confirmed_ts 才算确认；处置/恢复行同样带确认人，
-        # 故确认≥处置，漏斗单调）。处置/恢复量 = disposition_status 计数
-        # （字段未就绪时 _confirm_has_cols 降级为 0，漏斗照常渲染）。
+        # 故确认≥处置，漏斗单调）。
+        # 处置量 = 累计已处置（disposed + recovered），恢复量 = recovered。
+        # B2.2 要求 预警≥确认≥处置≥解除 单调：「处置中」只是瞬时存量，解除是
+        # 处置的下游动作，必须计入处置累计，否则处置(瞬时 2) < 解除(100) 倒挂。
+        # （字段未就绪时 _confirm_has_cols 降级为 0，漏斗照常渲染。）
         cur.execute("SELECT COUNT(*) FROM ads_ltv_alerts")
         off_total = int(cur.fetchone()[0])
         cur.execute("SELECT COUNT(*) FROM ads_stream_ltv_alerts")
@@ -321,8 +324,8 @@ def dashboard():
                 "WHERE disposition_status IN ('disposed','recovered') GROUP BY disposition_status"
             )
             disp_map = dict(cur.fetchall())
-            disposed_total = int(disp_map.get("disposed", 0))
             recovered_total = int(disp_map.get("recovered", 0))
+            disposed_total = int(disp_map.get("disposed", 0)) + recovered_total
         alert_funnel = {
             "alert": off_total + str_total,
             "confirmed": confirm_total,

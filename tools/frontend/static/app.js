@@ -355,7 +355,7 @@ function renderFunnel(f) {
     { key: "alert", label: "预警", color: "#d14a3a" },
     { key: "confirmed", label: "确认", color: "#e07b1f" },
     { key: "disposed", label: "处置", color: "#2563eb" },
-    { key: "recovered", label: "恢复", color: "#2e9e5b" },
+    { key: "recovered", label: "解除", color: "#2e9e5b" },
   ];
   const max = Math.max(1, f.alert, f.confirmed, f.disposed, f.recovered);
   document.getElementById("alert-funnel").innerHTML =
@@ -371,7 +371,7 @@ function renderFunnel(f) {
       )
       .join("") +
     `</div>` +
-    `<div class="funnel-note">数据来源：ads_ltv_alerts + ads_stream_ltv_alerts（预警）→ ads_alert_confirm（确认/处置/恢复）；处置量来自 disposition_status。</div>`;
+    `<div class="funnel-note">数据来源：ads_ltv_alerts + ads_stream_ltv_alerts（预警）→ ads_alert_confirm（确认/处置/解除）。处置=disposition_status 的 disposed+recovered 累计（含已解除），解除=recovered；保证 预警≥确认≥处置≥解除 单调（B2.2）。</div>`;
 }
 
 /* ---------------- 页面底部诚实标注行 ---------------- */

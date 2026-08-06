@@ -148,13 +148,12 @@ def test_dashboard_trust_cards_and_funnel(monkeypatch):
     assert tc["model_version"]["version"] == "2026-08-05-r11"
     assert tc["model_version"]["loan_count"] == 200
 
-    # 漏斗：预警 = 离线 34 + 实时 160；确认/处置/恢复来自 ads_alert_confirm。
-    assert d["alert_funnel"] == {
-        "alert": 194,
-        "confirmed": 3,
-        "disposed": 1,
-        "recovered": 1,
-    }
+    # 漏斗：预警 = 离线 34 + 实时 160；确认/处置/解除来自 ads_alert_confirm。
+    # 处置 = 累计已处置（disposed 1 + recovered 1 = 2），解除 = recovered 1，
+    # 保证 B2.2 单调：194 ≥ 3 ≥ 2 ≥ 1。
+    funnel = d["alert_funnel"]
+    assert funnel == {"alert": 194, "confirmed": 3, "disposed": 2, "recovered": 1}
+    assert funnel["alert"] >= funnel["confirmed"] >= funnel["disposed"] >= funnel["recovered"]
     # 确认量按 data-dev 契约 = confirmed_by 非空的行（处置行也带确认人）。
     assert conn.find_sql("confirmed_by IS NOT NULL") is not None
 
