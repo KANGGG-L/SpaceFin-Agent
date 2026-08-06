@@ -191,11 +191,11 @@ D1–D5 逐日 Δ=0.00 ✓；D6/D7 下降与 `backfill_7d.py` 处置逻辑（提
 
 | 优先级 | 事项 | 责任 | 状态 |
 |---|---|---|---|
-| **P0 修复** | alert_funnel 处置(2)<解除(100) 漏斗单调性破缺（B2.2） | frontend-dev | 已通知 |
+| **P0 修复** | alert_funnel 处置(2)<解除(100) 漏斗单调性破缺（B2.2） | frontend-dev | **已修复**（48d1d82：处置=disposed+recovered 累计，实测 1310≥212≥102≥100，审计 curl 复核一致） |
 | P1 对齐 | geocode 成功率口径统一（95.32% 已解析 / 28.95% 含待解析），剧本 32.8% 更新 | 产品 + frontend-dev | 已建议 |
 | P1 对齐 | 剧本 §3.1/§5/§6.2 数字与实现对齐（广州 1,233、五级分布、扰动乘子、确认/处置量） | 产品 + data-dev | 已建议 |
 | P2 叙事 | D2 无增量、实时仅 D5/D6、报送仅 D5、freshness DWD warn 的演示话术 | 产品 | 已建议 |
-| P2 文档 | acceptance_checklist.md 日期笔误（07→08） | data-dev | 已建议 |
+| P2 文档 | acceptance_checklist.md 日期笔误（07→08） | data-dev | **已修复**（834362c） |
 
 ---
 
