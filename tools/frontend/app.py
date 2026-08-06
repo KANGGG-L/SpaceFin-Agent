@@ -37,12 +37,83 @@ from data_classification import level_of, mask_value  # noqa: E402  # G2 导出�
 # ---------------- 用户与 RBAC ----------------
 # 仅开发环境内置账号；凭据写死在代码里并标注 dev-only，上线前必须接统一认证。
 # 角色矩阵（PRD §7.3）：DA 只读 / 风控可写（确认/导出）/ 贷后不可见报送页。
-USERS = {
-    "admin": {"password": "admin123", "role": "admin", "label": "系统管理员"},
-    "risk": {"password": "risk123", "role": "risk", "label": "风控策略经理"},
-    "da": {"password": "da123", "role": "da", "label": "数据分析师"},
-    "postloan": {"password": "post123", "role": "postloan", "label": "贷后资产保全"},
+#
+# 安全加固（VPS 部署）：密码优先读环境变量 SF_PWD_<ROLE>（强制强口令）；
+# 未设置时若处于 SF_DEV_MODE=1 则回退到内置弱口令（仅本地开发），否则启动时
+# 随机生成强口令（持久化到 output/frontend/credentials.json，重启保持稳定，
+# 避免公网暴露固定弱凭据，也避免每次重启口令漂移）。
+
+_ROLE_LABELS = {
+    "admin": "系统管理员",
+    "risk": "风控策略经理",
+    "da": "数据分析师",
+    "postloan": "贷后资产保全",
 }
+
+_CRED_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "output",
+    "frontend",
+    "credentials.json",
+)
+
+
+_ENV_PWDS = {
+    r: os.environ[f"SF_PWD_{r.upper()}"]
+    for r in _ROLE_LABELS
+    if os.environ.get(f"SF_PWD_{r.upper()}")
+}
+
+
+def _resolve_passwords() -> dict:
+    """返回 role -> password。优先级：环境变量 > 持久化文件 > 随机生成并落盘。"""
+    # 1) 环境变量最高优先
+    env_pwds = dict(_ENV_PWDS)
+    # 2) dev 模式回退弱口令
+    if os.environ.get("SF_DEV_MODE") == "1":
+        return {
+            r: {"admin": "admin123", "risk": "risk123", "da": "da123", "postloan": "post123"}[r]
+            for r in _ROLE_LABELS
+        }
+    # 3) 读持久化文件（若存在且含全部角色）
+    loaded = {}
+    if os.path.exists(_CRED_FILE):
+        try:
+            with open(_CRED_FILE, encoding="utf-8") as fh:
+                loaded = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            loaded = {}
+    merged = dict(loaded)
+    changed = False
+    for r in _ROLE_LABELS:
+        if r not in merged:
+            merged[r] = secrets.token_urlsafe(16)
+            changed = True
+    # 环境变量覆盖持久化值
+    merged.update(env_pwds)
+    if changed or env_pwds:
+        try:
+            os.makedirs(os.path.dirname(_CRED_FILE), exist_ok=True)
+            with open(_CRED_FILE, "w", encoding="utf-8") as fh:
+                json.dump({r: merged[r] for r in _ROLE_LABELS}, fh)
+        except OSError:
+            pass  # 落盘失败不影响运行，仅下次重启重新生成
+    return {r: merged[r] for r in _ROLE_LABELS}
+
+
+_PWDS = _resolve_passwords()
+
+USERS = {
+    role: {"password": _PWDS[role], "role": role, "label": label}
+    for role, label in _ROLE_LABELS.items()
+}
+
+# 非开发模式（无 SF_DEV_MODE=1）下，强口令已生成并持久化，不打印明文口令。
+if os.environ.get("SF_DEV_MODE") != "1" and not _ENV_PWDS:
+    sys.stderr.write(
+        f"[frontend] 凭据为强口令（非 dev 模式），已持久化至 {_CRED_FILE}；"
+        "设置 SF_PWD_<ROLE> 环境变量可固定口令。\n"
+    )
 
 # 页面可见性：role -> pages。
 PAGE_VISIBILITY = {
@@ -244,6 +315,9 @@ class SpaceFinApp(BaseHTTPRequestHandler):
             user = self._require()  # G8：健康度需登录，不对外匿名暴露
             if user:
                 self._handle_metrics(user)
+        elif path == "/healthz":
+            # 匿名存活探针（供 Caddy / 外部探活），不暴露任何内部信息。
+            self._send_json(200, {"status": "ok"})
         elif not self._dispatch_plugin("GET", parsed):
             self._send_error(404, "not found")
 

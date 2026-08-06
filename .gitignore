@@ -89,6 +89,8 @@ tools/orchestrator/probe_followup.py
 # 交接文档（给接手人的说明，不入库）
 tools/orchestrator/HANDOFF_*.md
 output/
+# Airflow 宿主机运行日志（systemd 直装产生，运行时产物，不入库）
+airflow/logs/
 # ODS 数据湖产物（本地 Parquet 分区，不入库）
 data_lake/
 
