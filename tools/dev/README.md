@@ -27,4 +27,12 @@ tools/orchestrator/.venv/bin/python tools/dev/backfill_7d.py --verify
 
 - 回填期间请暂停 `tools/cdc/consumer.py` 与 `tools/cdc/main.py`（CDC 增量消费会用
   当日 business_date 并发写 ads 表，破坏回填数据确定性）。暂停幂等，可随时重启。
+- **当前演示状态**：CDC 消费者已暂停，直到全部验收完成前不要重启（理由：作品集核心是
+  确定性 7 天剧本，CDC 用今天日期重算会污染 D6 的 08-06 数据；实时预警走 Flink 链路
+  `ads_stream_ltv_alerts`，不受影响）。演示需要重启时执行：
+  ```bash
+  tools/orchestrator/.venv/bin/python tools/cdc/consumer.py --loop --interval 20
+  ```
+  注意：重启后 CDC 会按当时业务表新状态重新覆盖 ads 表，08-06 数据会失真；如需精确的
+  08-06 结果，需在重启前重跑 D6（`--day 6`）。是否重启由演示现场决定。
 - 广州挂牌价扰动的原值记录在 `ads_demo_gz_perturb`，`--rollback-gz` 一键恢复。
