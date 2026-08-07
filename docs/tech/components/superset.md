@@ -1,6 +1,6 @@
 # 组件技术说明 · Superset BI 看板（L5 展示 / BI 层）
 
-> **状态**：📋 规划中（考虑接入）
+> **状态**：✅ 已接入（Superset 4.1.2 已起、连 Doris ADS，3 图表+示例仪表盘已建）
 > **能力地图层级**：L5 展示
 > **引入原则**：按需接入。与既有 `tools/frontend` 零依赖驾驶舱互补——驾驶舱是固化的 RBAC 决策视图，Superset 提供自助式探索性 BI。
 
@@ -44,20 +44,33 @@ Superset 补这块能力：
 - 驾驶舱：固定 10 页，RBAC 强控，导出走 `ads_export_audit` 审计 + PII 脱敏。
 - Superset：看板自由搭建；**生产接入时必须复用同一套 RBAC / 脱敏 / 审计约束**，否则会出现「驾驶舱合规、Superset 裸数」的合规破防。
 
-## 4. 部署（docker-compose，规划中）
+## 4. 部署（docker-compose，已接入）
 
-`docker-compose.yml` 已预留 `superset` service（端口 `8088`，仅绑 `127.0.0.1`）。首次启动需初始化元数据库：
+`docker-compose.yml` 已定义 `superset` service（端口 `8088`，仅绑 `127.0.0.1`，镜像固定
+`apache/superset:4.1.2`）。因官方镜像未预装 PyMySQL，已用 `deploy/superset/Dockerfile`
+派生镜像补 `pymysql`（Doris 走 MySQL 协议）。容器内 `127.0.0.1` 指向自身，连宿主 Doris 经
+`host.docker.internal`（compose `extra_hosts` 已设）。
+
+首次启动 + 导入看板资产：
 
 ```bash
-docker compose up -d superset
+docker compose up -d --build superset
 docker compose exec superset superset db upgrade
 docker compose exec superset superset init
 docker compose exec superset superset fab create-admin \
     --username admin --firstname Superset --lastname Admin \
-    --email admin@example.com --password <强密码>
+    --email admin@example.com --password superset_dev_only
+# 健康检查
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8088/health   # 期望 200
+# 导入数据源 + 数据集 + 3 图表 + 仪表盘
+python deploy/superset/setup_superset.py
 ```
 
-> 元数据默认用容器内 SQLite（`/app/superset_home`），生产应改为独立 PostgreSQL 并固定镜像版本。
+导入步骤、图表清单与验证记录见 [`deploy/superset/README.md`](../../deploy/superset/README.md)。
+
+> 元数据默认用容器内 SQLite（`/app/superset_home`），生产应改为独立 PostgreSQL 并固定镜像版本、强密码。
+> 连接 Doris 的 URI（容器视角）：`mysql+pymysql://root@host.docker.internal:9030/ads`；
+> 宿主等价：`mysql+pymysql://root@127.0.0.1:9030/ads`。
 
 ## 5. 合规（接入前必须解决）
 
@@ -67,4 +80,16 @@ docker compose exec superset superset fab create-admin \
 
 ## 6. 诚实标注
 
-当前**仅规划，未接入**：`docker-compose.yml` 仅有 service 占位，无看板定义、未接 RBAC/脱敏。接入后此处更新为 ✅ 并补充看板清单。
+**已接入（2026-08-07）**：Superset 4.1.2 已真机拉起，`/health` 返回 200；已连 Doris ADS 并
+建 3 个图表（资产质量概览 / 五级分类分布 / AVM 精度趋势）+ 示例仪表盘「房产金融风险概览」
+（见 `deploy/superset/README.md`）。验证要点：
+- 数据源「Doris ADS」创建成功，3 数据集 + 3 图表 + 1 仪表盘经 API 落库；
+- 在 Superset 容器内对 Doris 直跑三图对应 SQL 均返回真实数据（连接与口径已验证）。
+
+待人工确认 / 已知约束：
+- 通过脚本化 `api/v1/chart/data`（嵌套 `datasource`）调用在 4.1.2 触发
+  `QueryContextFactory.create() missing datasource` 的服务端已知 quirk，与 UI 经 slice 解析
+  datasource 的路径不同；建议浏览器打开 `http://127.0.0.1:8088` 用 admin 登录人工确认渲染。
+- 看板**未**接既有 RBAC/PII 脱敏（驾驶舱侧已内建）；生产前须复用
+  `tools/frontend/data_classification.py` + `ads_export_audit` 约束，避免敏感明细裸曝（见 §5）。
+- 元数据库为 SQLite、管理员密码为 dev 值，投产前须改 PostgreSQL + 强密码 + 固定 `SUPERSET_SECRET_KEY`。

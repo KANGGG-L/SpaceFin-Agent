@@ -38,13 +38,19 @@ services:
       start_period: 30s
 
   # --------------------------------------------------------------------------
-  # L5 展示：Superset BI 看板（规划中，考虑接入）
+  # L5 展示：Superset BI 看板（已接入基础）
   #   连接 Doris(ADS 层, MySQL 协议 9030) / MySQL(3306) 作为自助 BI 层；
   #   与 tools/frontend 驾驶舱互补：驾驶舱=固化 RBAC 决策视图，Superset=探索性分析。
+  #   镜像固定 4.1.2（生产建议固定具体版本标签）。
   #   首次启动需初始化元数据库（见 docs/tech/components/superset.md §4）。
+  #   注意：容器内 127.0.0.1 指向自身，连宿主 Doris/MySQL 须用 host.docker.internal
+  #   （已加 extra_hosts），对应宿主侧 URI 为 mysql+pymysql://root@127.0.0.1:9030/ads。
   # --------------------------------------------------------------------------
   superset:
-    image: apache/superset:latest   # 生产建议固定具体版本标签
+    build:
+      context: ./deploy/superset
+      dockerfile: Dockerfile
+    image: spacefin-superset:4.1.2
     container_name: spacefin-superset
     restart: unless-stopped
     environment:
@@ -53,6 +59,8 @@ services:
       SQLALCHEMY_DATABASE_URI: ${SUPERSET_METADATA_DB:-sqlite:////app/superset_home/superset.db}
     ports:
       - "127.0.0.1:${SUPERSET_PORT:-8088}:8088"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - superset-home:/app/superset_home
     depends_on:
@@ -62,7 +70,7 @@ services:
       interval: 15s
       timeout: 5s
       retries: 10
-      start_period: 60s
+      start_period: 90s
 
 volumes:
   mysql-data:
