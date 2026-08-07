@@ -1,7 +1,7 @@
 # SpaceFin-Agent — 接手 Prompt（Handoff Prompt）
 
 > 用途：把这份 prompt 整体复制给「下一个接手的工程师或 agent」，即可在零上下文的情况下接续本项目。
-> 最后更新：2026-08-07（接入 I-04 倒排索引审计检索 + Superset BI 看板并收口）。验证基线：`develop`（合并 `feat/inverted-index-superset` 后，已推 origin）。
+> 最后更新：2026-08-07（接入 I-04 倒排索引审计检索 + Superset BI 看板并收口）。验证基线：`dev`（合并 `feat/inverted-index-superset` 后，已推 origin）。
 
 ---
 
@@ -34,7 +34,7 @@
 3. **C-02 特征归因**：用 `sklearn.inspection.permutation_importance`（**不是 SHAP**）。原因：shap 未安装，且 HistGBR quantile 没有 `feature_importances_`。所有文档/前端文案已统一为 "permutation importance"，**不要再写 SHAP**。Top-5：`comm_mean 11.31 / comm_median 10.31 / city_code 7.12 / floor_total 2.43 / area 1.04`。
 4. **测试**：15 个模块，当前全仓实测 **645 passed + 1 skipped**（2026-08-07；含 I-04 倒排索引 3 项真机测试）。跑法见 §4。
 5. **前端**：零依赖方案，`tools/frontend`，端口 **8500**，RBAC **四角色**（admin/risk/da/postloan）。页面自动发现：`tools/frontend/pages/__init__.py` 的 `_discover()` 扫描 `pN_*.py`。P9（合规审计，角色 admin/risk）读 `ads_export_audit`/`ads_report_alert`/`attribution_report.json`；P10（沙盒，角色 admin/risk/da）读 `persona_report.json`，对 naive KS 0.257 显示「未校准」横幅。
-6. **已推远端**：各 feature 分支已推 origin；`feat/inverted-index-superset` 已推 origin，合并入 `develop` 后 `develop` 推 origin。
+6. **已推远端**：各 feature 分支已推 origin；`feat/inverted-index-superset` 已推 origin，合并入 `dev` 后 `dev` 推 origin。
 7. **I-04 倒排索引审计检索 + Superset BI 看板（`feat/inverted-index-superset`，2026-08-07）**：Doris 中文倒排索引毫秒级敏感词检索（pytest 3 passed，检索 4–7ms）；Superset 4.1.2 已起（`/health` 200）、连 Doris ADS、经 API 落库 3 图表+1 仪表盘。两者均已真机验证；Superset 投产前须复用 RBAC/PII 脱敏约束（诚实声明，见 superset.md §5/§6），元数据库改 PostgreSQL+强密码+固定 `SUPERSET_SECRET_KEY` 为生产前置项。
 
 ---
