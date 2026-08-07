@@ -25,7 +25,14 @@ try:
     print("[+] Current URL:", driver.current_url)
     print("[+] Page Title:", driver.title)
 
-    if "deny.do" in driver.current_url or "security.anjuke.com" in driver.current_url:
+    from urllib.parse import urlparse
+
+    _host = urlparse(driver.current_url).netloc.split(":")[0].lower()
+    if (
+        "deny.do" in driver.current_url
+        or _host == "security.anjuke.com"
+        or _host.endswith(".security.anjuke.com")
+    ):
         print("[-] 被 58/安居客 antibot 重定向拦截。")
     else:
         print("[+] 页面加载成功！")

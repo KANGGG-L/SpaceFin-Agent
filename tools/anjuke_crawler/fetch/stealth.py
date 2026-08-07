@@ -21,6 +21,7 @@ DrissionPage 隐身采集模块（持久化 chrome_profile 会话重放 + 代理
 
 import os
 import time
+from urllib.parse import urlparse
 
 from .proxy import ProxyClient
 
@@ -42,9 +43,16 @@ Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
 """
 
 
+def _host_of(url: str) -> str:
+    return urlparse(url).netloc.split(":")[0].lower()
+
+
 def _is_blocked(page) -> bool:
     url = page.url
-    return "deny.do" in url or "security.anjuke.com" in url
+    host = _host_of(url)
+    return (
+        "deny.do" in url or host == "security.anjuke.com" or host.endswith(".security.anjuke.com")
+    )
 
 
 def make_stealth_browser(proxy=None, headless=False):
