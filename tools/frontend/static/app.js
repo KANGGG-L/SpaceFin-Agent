@@ -317,12 +317,12 @@ async function renderDashboard() {
     state.dashboardData = data;
     const kpi = data.kpi;
     const kpis = [
-      { label: "贷款笔数", value: kpi.loan_count },
-      { label: "总敞口（余额）", value: fmtMoney(kpi.total_balance) },
+      { label: "贷款笔数", value: kpi.loan_count, sub: "演示数据集全部贷款" },
+      { label: "总敞口（余额）", value: fmtMoney(kpi.total_balance), sub: "单位：元（演示合成）" },
       // 「预警贷款」= 当前预警贷款数（去重贷款笔数），与漏斗「累计预警事件」区分。
-      { label: "预警贷款", value: kpi.alert_loans, sub: "当前预警贷款数" },
-      { label: "低置信笔数", value: kpi.low_confidence },
-      { label: "高危区贷款", value: kpi.high_risk_zone_loans },
+      { label: "预警贷款", value: kpi.alert_loans, sub: "当前预警的去重贷款数" },
+      { label: "低置信笔数", value: kpi.low_confidence, sub: "空间特征缺失率>75% 笔数" },
+      { label: "高危区贷款", value: kpi.high_risk_zone_loans, sub: "抵押物位于高危区笔数" },
     ];
     document.getElementById("kpi-cards").innerHTML = kpis
       .map(
@@ -416,7 +416,7 @@ function renderTrustCards(tc) {
     },
     {
       label: "数据新鲜度",
-      value: `<span class="badge ${f.overall}">${FRESH_LABEL[f.overall] || "灰"}</span> 分层 MAX(etl_ts) 距今`,
+      value: `<span class="badge ${f.overall}">${FRESH_LABEL[f.overall] || "灰"}</span> 分层最新更新距今`,
       sub: freshLines,
       subClass: "tf-fresh",
     },
@@ -430,7 +430,7 @@ function renderTrustCards(tc) {
     {
       label: "模型版本",
       value: esc(mv.version || "-"),
-      sub: `dws_risk_class ${(mv.loan_count || 0).toLocaleString("zh-CN")} 笔 · 产出 ${mv.etl_ts ? esc(mv.etl_ts.slice(0, 16)) : "-"}`,
+      sub: `dws_risk_class ${(mv.loan_count || 0).toLocaleString("zh-CN")} 笔 · 产出时间 ${mv.etl_ts ? esc(mv.etl_ts.slice(0, 16)) : "-"}`,
     },
   ];
   document.getElementById("trust-cards").innerHTML = cards
@@ -695,7 +695,7 @@ async function renderAlerts() {
 
     const tbody = document.querySelector("#alert-table tbody");
     if (!data.rows.length) {
-      tbody.innerHTML = `<tr><td colspan="14" class="empty">无符合条件的数据</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="9" class="empty">无符合条件的数据</td></tr>`;
     } else {
       tbody.innerHTML = data.rows
         .map((r) => {
@@ -706,19 +706,14 @@ async function renderAlerts() {
               : `<span class="badge off">未确认</span>`;
           return (
             `<tr>` +
-            `<td>${r.src === "offline" ? "离线 T+1" : "实时"}</td>` +
+            `<td>${alertLevelLabel(r.alert_level)}</td>` +
             `<td>${r.loan_id}</td>` +
-            `<td>${r.customer_id ?? "-"}</td>` +
             `<td><b>${fmtLtv(r.ltv)}</b></td>` +
             `<td>${fmtMoney(r.loan_balance)}</td>` +
-            `<td>${fmtMoney(r.market_valuation)}</td>` +
             `<td><span class="badge" style="background:${CLASS_COLORS[r.risk_class]}22;color:${CLASS_COLORS[r.risk_class]}">${esc(r.risk_class)}</span></td>` +
             `<td>${r.is_high_risk_zone ? `<span class="badge bad">高危区</span>` : "-"}</td>` +
-            `<td>${alertLevelLabel(r.alert_level)}</td>` +
-            `<td>${r.alert_date}</td>` +
-            `<td>${esc(r.property_addr)}</td>` +
-            `<td>${conf}</td>` +
             `<td>${dispositionCell(r)}</td>` +
+            `<td>${conf}</td>` +
             `<td><button class="btn btn-sm btn-ghost btn-detail" data-loan="${r.loan_id}" data-date="${r.alert_date}" data-src="${r.src}">详情</button></td>` +
             `</tr>`
           );
@@ -793,7 +788,7 @@ async function toggleDetail(btn) {
   );
   const dtr = document.createElement("tr");
   dtr.className = "detail-row";
-  dtr.innerHTML = `<td colspan="14" class="detail-cell">${buildDetailHtml(data)}</td>`;
+  dtr.innerHTML = `<td colspan="9" class="detail-cell">${buildDetailHtml(data)}</td>`;
   tr.after(dtr);
   btn.textContent = "收起";
 }
@@ -893,6 +888,53 @@ async function confirmAlert(loanId, alertDate, source) {
 
 /* ---------------- 1104 报送 ---------------- */
 
+/* 三个口径出口对照：出口① ads_risk_class（内部累计）、出口② dws_risk_class（风险明细聚合裁判）、
+   出口③ 1104 模板行（由出口①生成）。后端 mismatch / 告警 detail 形如 <scope>:<类>:<字段>，
+   统一转成业务能读懂的中文，避免 g11_vs_dws / dws_vs_internal 等技术 key 泄漏给面试官。 */
+function businessMismatch(key) {
+  const k = String(key || "").trim();
+  // 特殊项：五级占比恒等式。
+  if (/^g11:占比之和:balance_pct$/.test(k)) {
+    return "「五级分类余额占比」之和不等于 100%（G11 恒等式校验不通过）";
+  }
+  const m =
+    /^(g11_vs_dws|dws_vs_internal|1104_vs_dws|1104_vs_internal):(.+?):(loan_count|balance|balance_pct)$/.exec(
+      k
+    );
+  if (!m) return key;
+  const scope = m[1],
+    cls = m[2],
+    field = m[3];
+  const clsName =
+    { 正常: "正常", 关注: "关注", 次级: "次级", 可疑: "可疑", 损失: "损失", 总额: "合计" }[cls] ||
+    cls;
+  const fldName = { loan_count: "笔数", balance: "余额", balance_pct: "余额占比" }[field] || field;
+  const pair = {
+    g11_vs_dws: ["1104 报送快照", "风险明细聚合"],
+    dws_vs_internal: ["风险明细聚合", "内部累计口径"],
+    "1104_vs_dws": ["1104 模板行", "风险明细聚合"],
+    "1104_vs_internal": ["1104 模板行", "内部累计口径"],
+  }[scope];
+  return `「${pair[0]}」与「${pair[1]}」在「${clsName}」类的「${fldName}」口径不一致`;
+}
+
+/* 把「阻断告警历史」里的内容转成业务语言，避免技术泄漏：
+   - SQL 写入异常 → 可操作中文提示；
+   - 口径不一致告警 detail 形如「口径不一致: <key>」→ 转业务中文。 */
+function businessAlertDetail(detail) {
+  const d = String(detail || "");
+  if (/Data too long for column/i.test(d))
+    return "报送快照写入失败：字段内容超出长度限制，请点「重建快照」重试";
+  if (/Out of range value for column/i.test(d))
+    return "报送快照写入失败：数值超出字段范围，请点「重建快照」重试";
+  if (/Duplicate entry/i.test(d))
+    return "报送快照写入失败：与已有记录主键冲突，请点「重建快照」重试";
+  if (/errno|SQLSTATE/i.test(d)) return "报送快照写入异常，请点「重建快照」重试";
+  const mm = /口径不一致[:：]\s*(.+)$/.exec(d);
+  if (mm) return `口径不一致：${businessMismatch(mm[1].trim())}`;
+  return d;
+}
+
 /* 渲染口径一致性校验区：状态徽标 + mismatch 列表 + 可选「校验时间」行。 */
 function renderReportCheck(data, checkedAt) {
   const statusEl = document.getElementById("report-status");
@@ -910,7 +952,7 @@ function renderReportCheck(data, checkedAt) {
     checkEl.innerHTML =
       `<div class="check-line">以下口径与 dws_risk_class 明细聚合不一致（校验逻辑同 tools/reporting/main.py）：</div>` +
       `<div class="mismatch-list">${(data.mismatches || [])
-        .map((m) => `<div class="mismatch-item">· ${esc(m)}</div>`)
+        .map((m) => `<div class="mismatch-item">· ${esc(businessMismatch(m))}</div>`)
         .join("")}</div>`;
   }
   const checkedEl = document.getElementById("report-checked-at");
@@ -933,7 +975,7 @@ async function renderReport() {
       document.getElementById("report-checked-at").textContent = "";
       document.getElementById("report-check").innerHTML = "";
       document.querySelector("#report-table tbody").innerHTML =
-        `<tr><td colspan="5" class="empty">尚无报送数据</td></tr>`;
+        `<tr><td colspan="4" class="empty">尚无报送数据</td></tr>`;
       return;
     }
     const data = await api("/api/report?date=" + encodeURIComponent(date));
@@ -949,7 +991,7 @@ async function renderReport() {
           `<td>${r.loan_count}</td>` +
           `<td>${fmtMoney(r.balance_total)}</td>` +
           `<td>${fmtPct(r.balance_pct)}</td>` +
-          `<td>${r.etl_ts || "-"}</td></tr>`
+          `</tr>`
       )
       .join("");
 
@@ -958,7 +1000,7 @@ async function renderReport() {
       ? data.alerts
           .map(
             (a) =>
-              `<div class="check-line">#${a.id} [${a.alert_level}] ${esc(a.detail)} @ ${a.etl_ts}</div>`
+              `<div class="check-line">#${a.id} [${a.alert_level}] ${esc(businessAlertDetail(a.detail))}</div>`
           )
           .join("")
       : `<div class="check-line">无阻断告警（ads_report_alert 为空）</div>`;

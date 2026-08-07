@@ -618,7 +618,7 @@ def toggle_datasource(ctx):
 
 PAGE = {
     "id": "datasource",
-    "label": "数据底座接入配置",
+    "label": "数据接入健康度",
     # DE/管理员视角：风控与贷后不需要看底座配置（设计评审 P1 目标用户 = 数据工程师）。
     "roles": {"admin", "da"},
     "order": 10,

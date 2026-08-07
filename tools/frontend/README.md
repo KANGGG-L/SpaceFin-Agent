@@ -96,3 +96,69 @@ pkill -f "tools/frontend/app.py"
 | GET | `/api/sandbox` | admin / risk / da |
 
 > 插件路由（`/api/datasource*`、`/api/migration`、`/api/spatial*`、`/api/policy*`、`/api/avm*`、`/api/compliance_audit`、`/api/sandbox`）由各页面模块在 `PAGE["routes"]` 自行声明，权限 = 该页 `PAGE["roles"]`，服务端统一校验。
+
+## 生产部署（Vercel 静态前端 + VPS 后端）
+
+架构：**前端静态资源上 Vercel，后端（app.py + MySQL + Redis）留在 VPS**。浏览器只访问 Vercel 域名，所有 `/api/*` 由 Vercel 服务端反代回 VPS 后端——同源、无需 CORS、会话 cookie 正常来回。
+
+```
+浏览器 ──https://<项目>.vercel.app──▶ Vercel（托管静态 SPA）
+                                  └─/api/*─rewrite─▶ https://<vps-域名>/api/* ─▶ Caddy ─▶ 127.0.0.1:8500（app.py）
+```
+
+### 1. VPS 侧（后端 + TLS 反代）
+
+- 后端以 systemd 用户服务运行：`systemctl --user start spacefin-frontend.service`（监听 `127.0.0.1:8500`）。
+- 用 Caddy 做公网 HTTPS 反代，配置在 `/etc/caddy/Caddyfile`：
+  - `:80` 仅用于 ACME 校验通道；
+  - `<域名>` 站点反代 `127.0.0.1:8500`，并**只放行 `/api/*` 与 `/healthz`**，其余返回 404（公网不暴露完整后台 UI 与登录页）；
+  - 证书由 Caddy 自动向公共 CA（ZeroSSL / Let's Encrypt）签发，无需手动管理。
+- 当前示例域名 `20.70.128.18.nip.io`（nip.io：IP 即域名，无需自购域名即可拿到可信证书）。换成真实域名时，把 Caddyfile 站点名与下方 `vercel.json` 的 `destination` 同步改成你的域名，再 `sudo systemctl reload caddy`。
+
+> 仅 `/api/*` 对公网开放；终端用户永远只看到 Vercel 域名，VPS 只被 Vercel 服务器服务端访问。
+
+### 2. Vercel 侧（静态前端）
+
+仓库根已提供 `vercel.json`：
+
+```json
+{
+  "framework": null,
+  "buildCommand": null,
+  "outputDirectory": "tools/frontend/static",
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "https://20.70.128.18.nip.io/api/$1" }
+  ]
+}
+```
+
+- `outputDirectory` 指向零依赖 SPA 目录（`index.html` / `app.js` / `style.css` / `vendor/leaflet` / `pages/*.js`），资源全是根相对路径，映射零成本；
+- `rewrites` 把 `/api/*` 服务端反代到 VPS 后端（`app.py` 的静态托管在 Vercel 模式下用不到，反代只命中 `/api/*`）。
+
+### 3. 部署
+
+```bash
+npm i -g vercel
+cd <SpaceFin-Agent 仓库>        # 含 vercel.json
+vercel            # 预览环境
+vercel --prod     # 生产环境
+# 或推到 GitHub 后在 vercel.com Import 该仓库（自动识别 vercel.json）
+```
+
+### 4. 验证
+
+```bash
+# 后端公网可达（从任意外网机器执行）
+curl https://20.70.128.18.nip.io/api/me        # 期望 200（JSON）
+# 部署后的前端域名（经 Vercel 反代回到 VPS）
+curl https://<项目>.vercel.app/api/me          # 期望 200
+# 公网不应暴露后台 UI
+curl -o /dev/null -w "%{http_code}\n" https://20.70.128.18.nip.io/   # 期望 404
+```
+
+### 注意事项
+
+- **VPS 公网 IP 可能变化**：`20.70.128.18` 若为动态公网 IP，重启/重分配后需同步更新 `vercel.json` 的 `destination` 与 Caddyfile 站点名（或绑定固定域名一劳永逸）。
+- **数据依赖本机**：后端只读本机 MySQL；Docker 数据栈（MySQL / Redis / crawler / Airflow / Kafka / Flink / Doris / MinIO）必须保持运行，否则前端无数据。
+- **公网登录面**：当前 Caddy 已收紧为仅 `/api/*`，但 `/api/login` 仍对 Vercel 开放，等于对全网开放登录。正式环境请接统一认证或加 IP 白名单；默认账号写在 `app.py` 的 `USERS`（dev-only），上线前务必替换。
+- **Caddy ACME 邮箱**：在 `/etc/caddy/Caddyfile` 全局 `email` 中配置（当前 `liuethan.kl@gmail.com`），仅用于证书到期提醒。

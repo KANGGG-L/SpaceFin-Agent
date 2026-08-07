@@ -146,7 +146,7 @@ def get_compliance_audit(ctx):
 
 PAGE = {
     "id": "compliance_audit",
-    "label": "合规审计 / 特征归因",
+    "label": "模型可解释性报告",
     # 合规审计明细属风控与管理员职责：贷后与 DA 不接触（PRD §7.3 语义）。
     "roles": {"admin", "risk"},
     "order": 90,

@@ -620,7 +620,7 @@ def zone_detail(ctx):
 
 PAGE = {
     "id": "spatial",
-    "label": "空间风险画像",
+    "label": "高危地图与黑名单",
     # 风控策略经理是主用户；DA 需要看口径，admin 全量可见。贷后不参与空间策略，故不开。
     "roles": {"admin", "risk", "da"},
     "order": 50,

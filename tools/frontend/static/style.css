@@ -802,3 +802,18 @@ body.loading::before {
   color: var(--text);
   word-break: break-all;
 }
+
+/* 全站演示模式标识（固定顶部，所有页面可见，与 dashboard 底部诚实声明互补） */
+.demo-banner {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  background: #fff7e6;
+  border-bottom: 1px solid #ffe0a3;
+  color: #9a6700;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 6px 18px;
+  text-align: center;
+  letter-spacing: 0.2px;
+}

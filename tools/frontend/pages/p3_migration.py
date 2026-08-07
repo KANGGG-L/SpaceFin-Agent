@@ -473,7 +473,7 @@ def handle_migration(ctx):
 
 PAGE = {
     "id": "migration",
-    "label": "五级分类迁徙矩阵",
+    "label": "迁徙与降级追踪",
     # DA 是主用户；贷后（postloan）不涉及分类迁徙分析，按 PRD §7.3 不开放。
     "roles": {"admin", "risk", "da"},
     "order": 30,

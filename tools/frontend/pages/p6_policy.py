@@ -687,7 +687,7 @@ def handle_delete(ctx):
 
 PAGE = {
     "id": "policy",
-    "label": "空间惩罚项配置",
+    "label": "风险定价策略",
     # da 可见但不可写（写权限在各 handler 内按 WRITE_ROLES 二次校验）；
     # postloan 不在列表内——PRD §7.3「贷后资产保全不可见策略配置」。
     "roles": {"admin", "risk", "da"},

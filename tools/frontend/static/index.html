@@ -47,6 +47,10 @@
       </div>
     </aside>
     <main class="main">
+      <!-- 全站演示模式标识：与 dashboard 底部诚实声明互补，保证每个页面顶部都能看到 -->
+      <div id="demo-banner" class="demo-banner" role="note">
+        ⚠ 演示模式 · 本驾驶舱全部数据为脚本合成 / 演示回填，仅用于功能演示，并非真实业务数据
+      </div>
       <!-- 驾驶舱 -->
       <section id="page-dashboard" class="page hidden">
         <h1 class="page-title">资产质量监控驾驶舱</h1>
@@ -126,9 +130,8 @@
           <table class="table" id="alert-table">
             <thead>
               <tr>
-                <th>来源</th><th>贷款号</th><th>客户号</th><th>LTV</th><th>贷款余额</th>
-                <th>市场估值</th><th>风险类</th><th>高危区</th><th>预警等级</th><th>预警日期</th>
-                <th>抵押物地址</th><th>确认</th><th>处置状态</th><th></th>
+                <th>预警等级</th><th>贷款号</th><th>LTV</th><th>贷款余额</th>
+                <th>风险类</th><th>高危区</th><th>处置状态</th><th>确认/处置</th><th>详情</th>
               </tr>
             </thead>
             <tbody></tbody>
@@ -159,7 +162,7 @@
             <h2 class="card-title">G11 模板（五级 + 合计）</h2>
             <table class="table" id="report-table">
               <thead>
-                <tr><th>风险类</th><th>笔数</th><th>余额（元）</th><th>余额占比</th><th>etl_ts</th></tr>
+                <tr><th>风险类</th><th>笔数</th><th>余额（元）</th><th>余额占比</th></tr>
               </thead>
               <tbody></tbody>
             </table>

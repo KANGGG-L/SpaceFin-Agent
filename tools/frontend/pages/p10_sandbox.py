@@ -109,7 +109,7 @@ def get_sandbox(ctx):
 
 PAGE = {
     "id": "sandbox",
-    "label": "策略沙盒推演",
+    "label": "假设推演",
     # 策略研究员 / AI PM 视角；贷后不接触策略推演（PRD §7.3 语义）。
     "roles": {"admin", "risk", "da"},
     "order": 100,
