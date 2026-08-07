@@ -1,7 +1,7 @@
 # SpaceFin-Agent — 接手 Prompt（Handoff Prompt）
 
 > 用途：把这份 prompt 整体复制给「下一个接手的工程师或 agent」，即可在零上下文的情况下接续本项目。
-> 最后更新：2026-08-07（接入 I-04 倒排索引审计检索 + Superset BI 看板并收口）。验证基线：`dev`（合并 `feat/inverted-index-superset` 后，已推 origin）。
+> 最后更新：2026-08-07（接入 I-04 倒排索引审计检索 + Superset BI 看板；并落地投产加固：PG 元数据 + PII 脱敏视图 + 四角色 RBAC + 审计钩子）。验证基线：`dev`（合并 `feat/inverted-index-superset` 后已推 origin；`feat/superset-prod-hardening` 待合并）。
 
 ---
 
@@ -11,7 +11,7 @@
 
 - **验收标准 = 技术 AC + 可复现性 + 测试 + 文档自洽**，不是商业 SLA / 真实生产可用性。
 - 仅「真实外部资源依赖项」（真实数据源、合规审批、真实试点行意向）**诚实声明为未达成（delivery-gap）**，不要把它当成 bug 去「修复」——那超出可凭代码交付的范围。
-- 全链路 workflow 已把文档记录的所有可行 gap 收口完毕，G2/G4/G5/G8/G9/G10 已交付。你看到的状态**应当是 8/8 AC 全绿、645 测试通过（2026-08-07 全仓实测，含 I-04 倒排索引 3 项真机测试；2026-08-05 收口记录为 603/604，差异为计数口径）、D/RD/C 清单填满**。如果不是，先回到 §3 核对，再决定是不是你环境的问题。
+- 全链路 workflow 已把文档记录的所有可行 gap 收口完毕，G2/G4/G5/G8/G9/G10 已交付。你看到的状态**应当是 8/8 AC 全绿、645 测试通过（2026-08-07 全仓实测，含 I-04 倒排索引 3 项真机测试；2026-08-05 收口记录为 603/604，差异为计数口径）、D/RD/C 清单填满**。投产加固分支新增 `deploy/superset/test_superset_compliance.py`（3 项真机断言，服务在线时计入、离线自动 skip）。如果不是，先回到 §3 核对，再决定是不是你环境的问题。
 
 ---
 
@@ -35,7 +35,7 @@
 4. **测试**：15 个模块，当前全仓实测 **645 passed + 1 skipped**（2026-08-07；含 I-04 倒排索引 3 项真机测试）。跑法见 §4。
 5. **前端**：零依赖方案，`tools/frontend`，端口 **8500**，RBAC **四角色**（admin/risk/da/postloan）。页面自动发现：`tools/frontend/pages/__init__.py` 的 `_discover()` 扫描 `pN_*.py`。P9（合规审计，角色 admin/risk）读 `ads_export_audit`/`ads_report_alert`/`attribution_report.json`；P10（沙盒，角色 admin/risk/da）读 `persona_report.json`，对 naive KS 0.257 显示「未校准」横幅。
 6. **已推远端**：各 feature 分支已推 origin；`feat/inverted-index-superset` 已推 origin，合并入 `dev` 后 `dev` 推 origin。
-7. **I-04 倒排索引审计检索 + Superset BI 看板（`feat/inverted-index-superset`，2026-08-07）**：Doris 中文倒排索引毫秒级敏感词检索（pytest 3 passed，检索 4–7ms）；Superset 4.1.2 已起（`/health` 200）、连 Doris ADS、经 API 落库 3 图表+1 仪表盘。两者均已真机验证；Superset 投产前须复用 RBAC/PII 脱敏约束（诚实声明，见 superset.md §5/§6），元数据库改 PostgreSQL+强密码+固定 `SUPERSET_SECRET_KEY` 为生产前置项。
+7. **I-04 倒排索引审计检索 + Superset BI 看板（`feat/inverted-index-superset` 接入，`feat/superset-prod-hardening` 投产加固）**：Doris 中文倒排索引毫秒级敏感词检索（pytest 3 passed，检索 4–7ms）；Superset 4.1.2 已起（`/health` 200）、连 Doris ADS、经 API 落库 3 图表+1 仪表盘。投产加固（2026-08-07）已落地：元数据库改 PostgreSQL、固定 `SUPERSET_SECRET_KEY`、管理员强密码；仅注册 Doris 脱敏视图（`v_*`，PII 同 `mask_value` 口径）；四角色 RBAC（Admin/Risk/DA/Postloan，经 `setup_roles.py` 落地，关闭 Alpha SQL Lab 写）；查询/导出经 `superset_config.py` 钩子写 `spacefin.ads_export_audit`（与驾驶舱同一张审计表）。两者均已真机验证。
 
 ---
 
@@ -73,7 +73,7 @@
 ```bash
 # 仓库
 cd /home/azureuser/SpaceFin-Agent
-git status                      # 应干净；当前分支应 = develop @ 79d0cd2
+git status                      # 应干净；当前分支应 = dev（主线分支名是 dev，不是 develop）
 
 # Python 环境（conda，env 名 spark）
 source ~/miniforge/bin/activate spark
@@ -95,7 +95,10 @@ curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8500/p10_sandbox
 
 # Superset BI 看板验证（需 docker 已起 spacefin-superset）
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8088/health   # 期望 200
-python deploy/superset/setup_superset.py   # 幂等导入数据源+数据集+3 图表+1 仪表盘
+mysql -h127.0.0.1 -P9030 -uroot -e "SOURCE sql/doris/02_superset_pii_views.sql"  # 建脱敏视图
+python deploy/superset/setup_superset.py   # 幂等导入视图数据集+3 图表+1 仪表盘
+docker compose exec superset python /app/setup_roles.py   # 四角色 RBAC 映射（容器内）
+pytest deploy/superset/test_superset_compliance.py -v   # 脱敏形态 + 审计钩子（真机）
 ```
 
 ### systemd 用户级服务（改了代码要 reload）
@@ -121,7 +124,7 @@ systemctl --user restart spacefin-frontend.service
   export PATH="$HOME/node24/bin:$PATH"
   ```
 - **ruff-format 钩子**会重排文件 → 提交被拒后重新 `git add` 再提交即可。
-- **分支策略**：功能在 feature 分支开发，merge 进 develop。之前 workflow 用的分支名类似 `feature/xxx`、`spacefin-gap-closure`、`spacefin-close2`。
+- **分支策略**：功能在 feature 分支开发，merge 进 `dev`（主线分支名是 `dev`，不是 `develop`）。之前 workflow 用的分支名类似 `feature/xxx`、`spacefin-gap-closure`、`spacefin-close2`。
 
 ---
 
@@ -139,13 +142,15 @@ systemctl --user restart spacefin-frontend.service
 
 ## 7. 一句话给接手者
 
-「这是按最终交付版本标准验收的校招作品集：8/8 AC 绿、当前全仓 560 测试过、文档已收口。别把真实外部资源依赖（delivery-gap）当 bug；别动 AC-07 的 28 特征 canonical 配置；G2/G4/G5/G8/G9/G10 已交付，G1/G3/H4 为外部依赖声明。先 `git status` + 跑测试复现基线，再决定干什么。」
+「这是按最终交付版本标准验收的校招作品集：8/8 AC 绿、当前全仓 645 测试过、文档已收口。别把真实外部资源依赖（delivery-gap）当 bug；别动 AC-07 的 28 特征 canonical 配置；G2/G4/G5/G8/G9/G10 已交付（G10 含投产加固的 RBAC/PII/审计），G1/G3/H4 为外部依赖声明。先 `git status` + 跑测试复现基线，再决定干什么。」
 
 ---
 
 ## 附：最近关键 merge / commit 锚点（便于回溯）
 
-- `ee26320` docs(readme): 范围说明对齐最终交付版本口径（develop HEAD）
+- `7ea192b` docs(handoff): 修正 I-04/Superset 收口记录中分支名 develop→dev（dev HEAD）
+- `aa58ab5` chore(feat/inverted-index-superset): 接入倒排索引审计检索(I-04)与 Superset BI 看板
+- `ee26320` docs(readme): 范围说明对齐最终交付版本口径
 - `fbac3ee` feat(final): merge G2/G4/G5/G8 build-out（最终版补齐）
 - `3836df3` P9/P10 页面 + 静态 js
 - `f2d625e` `tools/avm/attribution.py` permutation_importance 归因

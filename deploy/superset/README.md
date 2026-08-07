@@ -39,6 +39,28 @@ python deploy/superset/setup_superset.py
 
 > 幂等说明：数据库 / 数据集按名复用（已存在则直接复用，不重复创建）；但**图表 / 仪表盘不幂等**——`create_chart` / `create_dashboard` 每次执行都会新建（Superset 允许重名），重跑会累积重复图表与仪表盘。建议一次性执行，或在重跑前于 UI 清理旧图表 / 仪表盘。
 
+## 2.1 投产加固：脱敏视图 + RBAC + 审计
+
+```bash
+# 1) 在 Doris 建脱敏视图（仅注册视图，不注册裸明细基表）
+mysql -h127.0.0.1 -P9030 -uroot -e "SOURCE sql/doris/02_superset_pii_views.sql"
+#    （无 mysql 客户端时可用 deploy/superset/gen_pii_views.py --apply 生成/落地视图）
+
+# 2) 注册视图数据集 + 3 图表 + 1 仪表盘（宿主执行）
+python deploy/superset/setup_superset.py
+
+# 3) RBAC 四角色映射（容器内执行；本部署未启用 roles REST 端点，走 security_manager）
+docker compose exec superset python /app/setup_roles.py
+#    Admin 全量；Risk 全 5 视图；DA 限聚合+趋势；Postloan 限贷后脱敏明细；
+#    并关闭 Alpha 的 SQL Lab 写权限。
+
+# 4) 审计钩子默认已通过 SUPERSET_CONFIG_PATH 挂载启用，查询/导出自动写
+#    spacefin.ads_export_audit（与驾驶舱同一张审计表）。
+```
+
+> 元数据库已改 PostgreSQL（`superset-metadata-db`）、`SUPERSET_SECRET_KEY` 固定、
+> 管理员密码读取 `SUPERSET_PASSWORD`，生产须在 `.env` 注入强值（见 `.env.example`）。
+
 ## 3. AVM 精度趋势数据
 
 `ads_avm_precision_trend` 由 `deploy/superset/load_avm_precision_trend.py` 从
@@ -59,9 +81,21 @@ python deploy/superset/load_avm_precision_trend.py
   slice 解析 datasource 的路径不同。图表/仪表盘已在元数据层创建且底层数据连接已验证，
   **建议浏览器打开 http://127.0.0.1:8088 用 admin 登录人工确认渲染**。
 
-## 5. 合规（接入必须遵循，勿破防）
+## 5. 合规约束清单（已落地，投产加固 2026-08-07）
 
-- 复用既有 RBAC 与 PII 脱敏约束：看板**不要**裸曝敏感明细（客户号、身份证、联系方式等）。
-- 看板查询与 `tools/frontend/data_classification.py` + `ads_export_audit` 同一套合规口径；
-  导出/共享看板须带权限边界。
-- 生产建议：元数据库改 PostgreSQL、固定 `SUPERSET_SECRET_KEY`、管理员强密码、行级权限。
+下列为投产必须满足的合规约束，已全部落地（见 `sql/doris/02_superset_pii_views.sql`、
+`setup_roles.py`、`superset_config.py`）：
+
+- **仅注册脱敏视图 / 聚合表**：Superset 数据集只允许是 `v_*` 视图或聚合表，禁止直接注册
+  裸明细基表 `ods_customer` / `ods_loan` / `ods_ads_ltv_alerts` / `dws_risk_class` /
+  `ads_compliance_audit`(基表) 等；
+- **PII 同口径脱敏**：敏感列按 `data_classification.mask_value` 口径
+  `CONCAT('c****', RIGHT(col,4))`（如 `v_ltv_alerts_masked.customer_id`）；
+- **RBAC 四角色**：Admin/Risk/DA/Postloan 经 `setup_roles.py` 映射数据集与看板权限，
+  普通角色禁止自建数据集（仅 Admin 可建），Alpha 关闭 SQL Lab 写；
+- **审计闭环**：查询/导出经 `superset_config.py` 钩子写 `spacefin.ads_export_audit`
+  （与驾驶舱同一张表），可通过 `deploy/superset/test_superset_compliance.py` 真机验证。
+
+> 复用既有 RBAC 与 PII 脱敏约束：看板**不**裸曝敏感明细（客户号、身份证、联系方式等）；
+> 看板查询与 `tools/frontend/data_classification.py` + `ads_export_audit` 同一套合规口径；
+> 导出/共享看板须带权限边界。
