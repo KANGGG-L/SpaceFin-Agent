@@ -1,8 +1,8 @@
 # ---- Python ----
 __pycache__/
 *.py[cod]
-.venv/
-venv/
+.venv
+venv
 env/
 .env
 *.egg-info/
@@ -64,3 +64,41 @@ pip-wheel-metadata/
 *.orig
 *.rej
 *~
+
+# ---- 本地指导（含内部开发约定，不入库）----
+CLAUDE.md
+CODEBUDDY.md
+.claude/
+
+# ---- 本地 agent skills（mattpocock/skills 已装到 ~/.agents/skills/ 全局，本机多项目共享）----
+skills-lock.json
+.agents/
+
+# ---- 安居客爬虫产物（tools/anjuke_crawler，仅技术验证，真实数据不入库）----
+tools/anjuke_crawler/output/
+tools/anjuke_crawler/chrome_profile/
+anjuke_*.csv
+
+# ---- SpaceFin orchestrator ----
+tools/orchestrator/.venv
+# launchd 托管配置：硬编码本机绝对路径，不入库（Linux 迁移用 systemd unit 替代）
+tools/orchestrator/com.spacefin.host-render.plist
+# 一次性诊断探针脚本（验证码率/渲染冒烟），非生产代码
+tools/orchestrator/probe_captcha.py
+tools/orchestrator/probe_followup.py
+# 交接文档（给接手人的说明，不入库）
+tools/orchestrator/HANDOFF_*.md
+output/
+# Airflow 宿主机运行日志（systemd 直装产生，运行时产物，不入库）
+airflow/logs/
+# ODS 数据湖产物（本地 Parquet 分区，不入库）
+data_lake/
+
+# ---- 面试准备 / 架构决策文档（用户要求不入库）----
+docs/tech/components/crawler-etl-architecture-decision.md
+
+# ---- 面试准备 / 开发踩坑实录（用户要求不入库）----
+docs/tech/components/crawler-etl-dev-notes.md
+
+# Flink/Kafka 连接器 jar（download_jars.sh 下载产物，不入库）
+deploy/kafka-flink/jars/

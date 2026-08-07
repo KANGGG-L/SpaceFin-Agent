@@ -1,0 +1,36 @@
+# Conda 环境：spark（唯一宿主 Python 环境）
+# 依据桌面参考文档《spark42_环境版本汇总.md》构建，环境名由原 spark42 改为 spark。
+#
+# 采集/ETL 运行依赖（curl_cffi / DrissionPage / pyarrow / PyMySQL / redis / pytest 等 29 包）见
+# tools/orchestrator/requirements.txt，已 pip 装入本环境；仓库内 tools/orchestrator/.venv 是指向
+# 本环境的符号链接（兼容别名，非独立环境）。重建完整环境：
+#   conda env create -f environment.yml && conda activate spark
+#   pip install -r tools/orchestrator/requirements.txt
+#
+# 参考文档中的「系统级二进制独立安装」组件不在 conda 内，需另行安装：
+#   Hadoop 3.3.2 / Hive 4.0.1 / Spark 4.2.0 / Java OpenJDK 17.0.19 / MySQL 8.4.10
+# 其中 Java 17 已通过 conda 装入本环境（openjdk=17），供 PySpark 运行期使用。
+#
+# 创建并激活：
+#   conda env create -f environment.yml
+#   conda activate spark
+# 验证：
+#   python -c "import pyspark; print(pyspark.__version__)"   # 期望 4.2.0
+#   java -version                                            # 期望 17.x
+
+name: spark
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10.18
+  - openjdk=17            # PySpark 运行期依赖的系统 Java
+  - pip
+  - pip:
+      # 参考配置：PySpark 由 pip 安装（自带 bundled Hadoop 3.x 客户端），无需在 env 内另装 Spark
+      - pyspark==4.2.0
+      # 本仓库运行 / 工具链所需（参考配置未列，但跑通代码必需）
+      - aiohttp            # tools/ 爬虫（asyncio 生产级改进）
+      - beautifulsoup4     # 爬虫 HTML 解析
+      - selenium           # tools/ Selenium 版爬虫
+      - pre-commit==4.6.1  # 提交前 / 提交信息钩子（README/CLAUDE 锁定版本）
+      - pytest             # 阶段 5 计划引入的单测

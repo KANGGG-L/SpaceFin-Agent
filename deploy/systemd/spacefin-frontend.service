@@ -1,0 +1,36 @@
+# spacefin-frontend.service —— 前端驾驶舱（S5，端口 8500）
+# 之前用 nohup 裸跑：会话退出即丢进程，已发生一次前端掉线。
+# 托管到用户级 systemd 后：开机（linger）/崩溃/被杀都由 systemd 拉起。
+#
+# 安装（用户级，推荐）：
+#   1) mkdir -p ~/.config/systemd/user
+#   2) cp deploy/systemd/spacefin-frontend.service ~/.config/systemd/user/
+#   3) systemctl --user daemon-reload && systemctl --user enable --now spacefin-frontend
+#   4) 无人登录也要常驻：sudo loginctl enable-linger $USER（linger 打开后重启宿主也会自动拉起）
+# 验证：curl -s -o /dev/null -w '%{http_code}' http://localhost:8500/   # 期望 200
+# 前置：MySQL/Redis 容器已启动；.env 含前端所需数据库配置。
+#
+# 注意：ExecStart 硬编码了本机仓库路径 /home/azureuser/SpaceFin-Agent，
+#       换机器部署需同步改这里（或用 EnvironmentFile 模式，见 spacefin-cdc.service）。
+
+[Unit]
+Description=SpaceFin frontend dashboard (S5, port 8500)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# ExecStart 的可执行文件不能用变量，故用 sh -c 先 cd 到仓库根再 exec python，
+# 保证相对导入与 tools/ 下模块互相引用时工作目录正确。
+ExecStart=/bin/sh -c 'cd /home/azureuser/SpaceFin-Agent && exec tools/orchestrator/.venv/bin/python tools/frontend/app.py'
+Restart=always
+RestartSec=5
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=spacefin-frontend
+
+[Install]
+WantedBy=default.target

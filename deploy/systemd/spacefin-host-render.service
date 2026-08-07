@@ -1,0 +1,39 @@
+# spacefin-host-render.service —— 宿主 fangyuan 渲染服务（Linux/systemd 托管）
+# 安装（用户级，推荐）：
+#   1) mkdir -p ~/.config/spacefin ~/.config/systemd/user
+#   2) 写 ~/.config/spacefin/render.env（勿加引号，systemd 会把引号当值的一部分）：
+#        SPACEFIN_REPO_ROOT=/srv/spacefin-agent
+#        SPACEFIN_RENDER_VENV=/srv/spacefin-agent/tools/orchestrator/.venv   # 单一 Python 环境（conda `spark` 或按 tools/orchestrator/requirements.txt 建的 venv），本机通常是指向 conda env 的符号链接
+#        RENDER_PORT=8899
+#        RENDER_SLOTS=5
+#   3) cp deploy/systemd/spacefin-host-render.service ~/.config/systemd/user/
+#   4) systemctl --user daemon-reload && systemctl --user enable --now spacefin-host-render
+#   5) 无人登录也要常驻：sudo loginctl enable-linger $USER
+#   系统级安装：改放 /etc/systemd/system/，把 %h 换成真实目录并补 User=/Group=。
+
+[Unit]
+Description=SpaceFin host fangyuan render service (Chrome + DrissionPage)
+Documentation=file:tools/orchestrator/host_render_service.py
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=RENDER_PORT=8899
+EnvironmentFile=%h/.config/spacefin/render.env
+# ExecStart 的可执行文件不能直接用变量，故用 sh -c 展开 EnvironmentFile 里的路径，
+# 避免把本机绝对路径硬编码进仓库（带本机路径的托管配置不入库）。
+ExecStart=/bin/sh -c 'cd "$SPACEFIN_REPO_ROOT" && exec "$SPACEFIN_RENDER_VENV/bin/python" tools/orchestrator/host_render_service.py "$RENDER_PORT"'
+Restart=always
+RestartSec=5
+# 多路并行 Chrome + CDP 套接字会打满默认 fd 软上限（踩过 OSError(24) Too many open files）
+LimitNOFILE=8192
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=spacefin-host-render
+
+[Install]
+WantedBy=default.target

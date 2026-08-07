@@ -1,0 +1,200 @@
+# ==============================================================================
+# SpaceFin 安居客采集容器编排（master 主备 + 泛化 worker）
+# ------------------------------------------------------------------------------
+# 架构：
+#   master-primary / master-standby  主备 master：Redis 抢锁选主，standby 心跳
+#       超时自动接管（避免单点）。leader 负责任务排队、代理巡查、进度监控。
+#   worker-1 .. worker-5             泛化 worker：不绑定城市/类型，从任务队列领任务
+#       {city, type, pages, target, round}，从 master/Redis 拿 https proxy 抓取。
+# 任务模型：42 任务 = 21 城 × sale(出售)/fangyuan(出租)，每 run 每城一轮，
+#           阶段化执行：先 sale 后 fangyuan；sale 用 500 青果 + 免费池兜底、fangyuan 用 500 青果；
+#           免费池本轮发放上限 FREE_BUDGET(1000)，到限后本轮不再用免费池；
+#           停止条件=全部任务 finished=1。关键参数：LEADER_TTL=60、POOL_SIZE_MIN=60、
+#           PAGES_SALE=100、PAGES_RENT=53（fangyuan 每城页数上限）。
+# 通信：
+#   - master 把可用代理写入 Redis 双池：spacefin:proxy_pool:qg/:free
+#   - master 把任务写入队列 spacefin:tasks；worker LPOP 领取
+#   - worker 通过 HTTP GET http://master-primary:5100/proxy/qg|/free 分配代理
+# 依赖：
+#   - 已有 spacefin-net 网络上的 spacefin-redis（对外 6379）
+#
+# 启动：
+#   docker compose --env-file .env -f tools/orchestrator/docker-compose.yml build
+#   docker compose --env-file .env -f tools/orchestrator/docker-compose.yml up -d
+# 注意：青果代理凭据（QG_*）从项目根 .env 读取（.env 已 gitignore），勿写入源码。
+# ==============================================================================
+
+x-worker-env: &worker-env
+  MASTER_URL: http://master-primary:5100
+  REDIS_HOST: spacefin-redis
+  REDIS_PORT: "6379"
+  # DrissionPage 渲染 fangyuan 必需（ANJUKE_PROFILE_DIR 由 start.sh 按 WORKER_ID 设为私有副本）
+  SPACEFIN_CHROME_BIN: /usr/bin/google-chrome
+  # fangyuan 单页渲染硬超时（秒）与连续失败预算：这两个值共同决定单任务最坏墙钟，
+  # 必须让整轮采集收敛在 Airflow DAG wait_crawl_done Sensor 的 6h 超时之内。
+  #   单次 crawl 最坏 = FAIL_BUDGET_RENDER 8 × (RENDER_TIMEOUT 60s + FAIL_BACKOFF_RENDER 1s)
+  #                   = 8 × 61s ≈ 8min
+  #   单任务最坏     = 8min × (MAX_REQUEUE 3 次重排 + 1 次终局) ≈ 33min
+  #   整轮最坏       = 21 城 fangyuan / 5 worker ≈ 4.2 批 × 33min ≈ 2.3h < 6h ✓
+  # 触发上述最坏路径的场景：宿主渲染服务假活（TCP 建连成功但不回数据）。
+  # 取舍（调大前务必先算上面这条式子）：240s 原本是给「本机负载高时单页渲染可达数分钟」
+  # 留余量，压到 60s 会提高慢页失败率；但失败页会换 IP 重试、ZERO_CARD_RETRY 还能兜底，
+  # 而 Sensor 等不到 all_done（ETL 与地理补全整段不执行）是严重得多的失败。
+  # 注意：以上是「失败路径」的界；顺利路径另有 PAGES_RENT(53) × 单页耗时的固有开销。
+  RENDER_TIMEOUT: "60"
+  FAIL_BUDGET_RENDER: "8"
+  # 断点续爬：从 spacefin:crawl_progress 续起点并向前回扫 HEAD_REWIND 页抓新增置顶房源
+  HEAD_REWIND: "2"
+  RESUME_ENABLED: "1"
+  # 连续取不到代理的周期上限，超过则放弃该任务（防无限 pause 卡死 Airflow Sensor）
+  NO_PROXY_MAX_CYCLES: "5"
+  # 单任务单 run 内允许被重新入队的次数上限（收敛保证，防 requeue 乒乓使 all_done 永不成立）
+  MAX_REQUEUE: "3"
+
+x-worker: &worker
+  build:
+    context: ../..
+    dockerfile: tools/orchestrator/Dockerfile
+  networks:
+    - spacefin-net
+  environment:
+    <<: *worker-env
+  env_file:
+    - ../../.env
+  # worker 经 host.docker.internal:8899 调宿主渲染服务；Linux 上需显式映射到网关
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  # Chrome 渲染需要足够的 /dev/shm（默认 64M 太小，Chrome 会因共享内存不足启动失败）
+  shm_size: "256mb"
+  volumes:
+    - ../../output/guangdong:/output
+    # B1 并行化 fangyuan：只读挂载已验证 chrome_profile 作为源，start.sh 拷贝到每 worker 私有目录
+    - ../../tools/anjuke_crawler/chrome_profile:/app/anjuke_crawler/chrome_profile_src:ro
+  restart: unless-stopped
+
+services:
+  # ---------- master 主备 ----------
+  master-primary:
+    build:
+      context: ../..
+      dockerfile: tools/orchestrator/Dockerfile
+    command: ["master.py"]
+    container_name: spacefin-crawler-master-primary
+    hostname: master-primary
+    networks:
+      - spacefin-net
+    environment:
+      REDIS_HOST: spacefin-redis
+      REDIS_PORT: "6379"
+      MASTER_PORT: "5100"
+      # 5 worker 并行渲染后代理消耗 ~5x，提高池水位与空池容忍轮数，防止瞬时空池误触发 STOP
+      POOL_SIZE_MIN: "60"
+      EMPTY_STALL_CYCLES: "8"
+      REFRESH_INTERVAL: "30"
+      LEADER_TTL: "60"
+      WORKER_TTL: "120"
+      WORKER_HB_TTL: "120"
+      QG_TARGET: "5"
+      QG_BUDGET: "1000"
+      QG_SALE_BUDGET: "500"
+      # 提取限流窗口：配额守恒，两次青果提取至少间隔 300s，把 1000 配额摊平到整天
+      QG_REFILL_INTERVAL: "60"
+      FREE_BUDGET: "1000"
+      PAGES_SALE: "100"
+      PAGES_RENT: "53"
+      TARGET: "999999"
+      # 每城 IP 预算：广深各 ~15%（sale 500 ≈ 75×2 + 18×19；fangyuan 500 ≈ 75×2 + 18×19）
+      IP_BUDGET_ENABLED: "1"
+      BUDGET_TOP_CITIES: "gz,sz"
+      IP_BUDGET_SALE_TOP: "75"
+      IP_BUDGET_SALE_OTHER: "18"
+      IP_BUDGET_FY_TOP: "75"
+      IP_BUDGET_FY_OTHER: "18"
+      # 本次 run 标识：Airflow 注入 {{ ds }}，手动启动时为 manual
+      CRAWL_RUN_ID: "${CRAWL_RUN_ID:-manual}"
+      # 单任务单 run 内允许被重新入队的次数上限（收敛保证，防 requeue 乒乓使 all_done 永不成立）
+      MAX_REQUEUE: "3"
+    env_file:
+      - ../../.env
+    ports:
+      - "127.0.0.1:5100:5100"
+    restart: unless-stopped
+
+  master-standby:
+    build:
+      context: ../..
+      dockerfile: tools/orchestrator/Dockerfile
+    command: ["master.py"]
+    container_name: spacefin-crawler-master-standby
+    hostname: master-standby
+    networks:
+      - spacefin-net
+    environment:
+      REDIS_HOST: spacefin-redis
+      REDIS_PORT: "6379"
+      MASTER_PORT: "5101"
+      POOL_SIZE_MIN: "60"
+      EMPTY_STALL_CYCLES: "8"
+      REFRESH_INTERVAL: "30"
+      LEADER_TTL: "60"
+      WORKER_TTL: "120"
+      WORKER_HB_TTL: "120"
+      QG_TARGET: "5"
+      QG_BUDGET: "1000"
+      QG_SALE_BUDGET: "500"
+      # 提取限流窗口：配额守恒，两次青果提取至少间隔 300s，把 1000 配额摊平到整天
+      QG_REFILL_INTERVAL: "60"
+      FREE_BUDGET: "1000"
+      PAGES_SALE: "100"
+      PAGES_RENT: "53"
+      TARGET: "999999"
+      IP_BUDGET_ENABLED: "1"
+      BUDGET_TOP_CITIES: "gz,sz"
+      IP_BUDGET_SALE_TOP: "75"
+      IP_BUDGET_SALE_OTHER: "18"
+      IP_BUDGET_FY_TOP: "75"
+      IP_BUDGET_FY_OTHER: "18"
+      CRAWL_RUN_ID: "${CRAWL_RUN_ID:-manual}"
+      # 单任务单 run 内允许被重新入队的次数上限（收敛保证，防 requeue 乒乓使 all_done 永不成立）
+      MAX_REQUEUE: "3"
+    env_file:
+      - ../../.env
+    ports:
+      - "127.0.0.1:5101:5101"
+    restart: unless-stopped
+
+  # ---------- 泛化 worker ×5 ----------
+  worker-1:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      WORKER_ID: "worker-1"
+    command: ["worker.py"]
+  worker-2:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      WORKER_ID: "worker-2"
+    command: ["worker.py"]
+  worker-3:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      WORKER_ID: "worker-3"
+    command: ["worker.py"]
+  worker-4:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      WORKER_ID: "worker-4"
+    command: ["worker.py"]
+  worker-5:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      WORKER_ID: "worker-5"
+    command: ["worker.py"]
+
+networks:
+  spacefin-net:
+    external: true

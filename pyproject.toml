@@ -9,3 +9,10 @@ ignore = ["E501"]
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.pytest.ini_options]
+# experiments/ 下的 test_*.py 是反爬技术选型的探索脚本（零 assert、零 def test_，
+# docstring 自述「实验」），只因命名前缀被 pytest 误收集，且依赖 selenium_stealth /
+# undetected_chromedriver 等未安装的可选包 → 会让 `pytest tools/` 整体收集失败。
+# 保留文件本身（是有价值的选型记录），仅排除出测试收集。
+norecursedirs = ["tools/anjuke_crawler/experiments", "*/__pycache__", ".git"]

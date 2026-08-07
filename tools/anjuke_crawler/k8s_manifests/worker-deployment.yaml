@@ -1,0 +1,47 @@
+# 分布式 Worker 副本集（多 Pod 横向扩展抓取吞吐）
+# 部署：kubectl apply -f worker-deployment.yaml
+# ⚠️ hostPath 需改为本仓库在你 k8s 节点上的绝对路径。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8s-crawler-worker
+  labels:
+    app: k8s-crawler-worker
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: k8s-crawler-worker
+  template:
+    metadata:
+      labels:
+        app: k8s-crawler-worker
+    spec:
+      containers:
+      - name: worker
+        image: python:3.10-slim
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          pip install curl_cffi lxml redis &&
+          cd /app/tools &&
+          python -m anjuke_crawler.k8s.worker
+        env:
+        - name: REDIS_HOST
+          value: "redis-service"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        volumeMounts:
+        - name: app-code
+          mountPath: /app
+        workingDir: /app
+      volumes:
+      - name: app-code
+        hostPath:
+          # TODO: 改为本仓库在 k8s 节点上的真实路径
+          path: /home/kang/GitHub/SpaceFin-Agent
+          type: Directory

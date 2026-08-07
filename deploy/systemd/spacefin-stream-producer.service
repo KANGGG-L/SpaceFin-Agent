@@ -1,0 +1,35 @@
+# spacefin-stream-producer.service —— 实时链路 producer（Kafka+Flink 接入层）
+# 读 ods_cdc_log 发 Kafka topic spacefin.cdc.log（--loop --interval 2 常驻轮询）。
+# 之前用 nohup 裸跑：会话退出即丢进程。托管后由 systemd 保证常驻与自动拉起。
+#
+# 安装（用户级，推荐）：
+#   1) mkdir -p ~/.config/systemd/user
+#   2) cp deploy/systemd/spacefin-stream-producer.service ~/.config/systemd/user/
+#   3) systemctl --user daemon-reload && systemctl --user enable --now spacefin-stream-producer
+#   4) 无人登录也要常驻：sudo loginctl enable-linger $USER（linger 打开后重启宿主也会自动拉起）
+# 验证：journalctl --user -u spacefin-stream-producer -f 应无报错；topic 水位推进。
+# 前置：MySQL 已启动、Kafka 容器已启动、ods_cdc_log 有数据。
+#
+# 注意：ExecStart 硬编码了本机仓库路径 /home/azureuser/SpaceFin-Agent，
+#       换机器部署需同步改这里（或用 EnvironmentFile 模式，见 spacefin-cdc.service）。
+
+[Unit]
+Description=SpaceFin stream producer -> Kafka (realtime layer)
+After=network-online.target spacefin-mysql.service spacefin-kafka.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 同上：sh -c 先 cd 到仓库根再 exec python，确保 tools/ 模块相对导入正确。
+ExecStart=/bin/sh -c 'cd /home/azureuser/SpaceFin-Agent && exec tools/orchestrator/.venv/bin/python tools/stream/producer.py --loop --interval 2'
+Restart=always
+RestartSec=5
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=spacefin-stream-producer
+
+[Install]
+WantedBy=default.target

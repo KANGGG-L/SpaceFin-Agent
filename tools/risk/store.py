@@ -1,0 +1,515 @@
+"""风险结果读写层：全量重算与 CDC 增量重算共用同一套加载 / 落库语义。
+
+拆出本模块的原因：CDC 消费链要按 loan_id 做**局部**重算，而 tools/risk/main.py 原先是
+「DELETE 全表 + 全量 INSERT」。两套 SQL 各写一遍必然漂移（字段顺序、五级分类口径、
+预警去重规则），一旦漂移，增量结果与全量结果就对不上，验收时无法互证。故统一收口于此：
+main.py 与 tools/cdc/consumer.py 都只调用这里的函数。
+
+关键语义约定：
+- `upsert_dws` 用 ON DUPLICATE KEY UPDATE，按 loan_id 幂等覆盖，增量与全量结果一致。
+- `replace_alerts` 只删「本批 loan_id + 当日」的预警再插入，不清全表——否则增量消费一次
+  就会把当日其它贷款的预警抹掉。
+- `refresh_ads_risk_class` 从 dws_risk_class 现状聚合，而不是从本批 rows 聚合：汇总表是
+  全量口径，增量改一笔也必须让占比重新对齐全量分母。
+"""
+
+from __future__ import annotations
+
+import config
+import risk_engine
+
+DWS_INSERT_SQL = (
+    "INSERT INTO dws_risk_class "
+    "(loan_id, customer_id, collateral_id, balance, interest_rate, market_valuation, "
+    " ltv, risk_class, low_confidence, is_high_risk_zone, alert, alert_level, "
+    " valuation_deviation_pct, abnormal_valuation, model_version) "
+    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+    "ON DUPLICATE KEY UPDATE "
+    " customer_id=VALUES(customer_id), collateral_id=VALUES(collateral_id), "
+    " balance=VALUES(balance), interest_rate=VALUES(interest_rate), "
+    " market_valuation=VALUES(market_valuation), ltv=VALUES(ltv), "
+    " risk_class=VALUES(risk_class), low_confidence=VALUES(low_confidence), "
+    " is_high_risk_zone=VALUES(is_high_risk_zone), alert=VALUES(alert), "
+    " alert_level=VALUES(alert_level), "
+    " valuation_deviation_pct=VALUES(valuation_deviation_pct), "
+    " abnormal_valuation=VALUES(abnormal_valuation), "
+    " model_version=VALUES(model_version), "
+    " etl_ts=CURRENT_TIMESTAMP"
+)
+
+ALERT_INSERT_SQL = (
+    "INSERT INTO ads_ltv_alerts "
+    "(loan_id, customer_id, collateral_id, loan_balance, market_valuation, ltv, "
+    " risk_class, is_high_risk_zone, alert_level, alert_date) "
+    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+)
+
+
+# ---------------------------------------------------------------- 业务库读取
+
+
+def _in_clause(ids: list) -> tuple[str, list]:
+    """构造 IN (%s,%s,...) 片段；ids 为空时调用方应短路，不要走到这里。"""
+    return "(" + ",".join(["%s"] * len(ids)) + ")", list(ids)
+
+
+def load_loans(conn, loan_ids: list | None = None) -> list[dict]:
+    """读贷款台账；loan_ids 为 None 取全量，否则只取指定几笔（CDC 增量路径）。"""
+    sql = (
+        "SELECT loan_id, customer_id, collateral_id, loan_amount, balance, "
+        "interest_rate, risk_class, origination_date FROM loan"
+    )
+    params: list = []
+    if loan_ids is not None:
+        if not loan_ids:
+            return []
+        frag, params = _in_clause(loan_ids)
+        sql += f" WHERE loan_id IN {frag}"
+    cur = conn.cursor()
+    cur.execute(sql, params)
+    cols = [d[0] for d in cur.description]
+    rows = [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+    cur.close()
+    return rows
+
+
+def load_collaterals(conn, collateral_ids: list | None = None) -> dict:
+    """读抵押物主档，返回 {collateral_id: row}。"""
+    sql = (
+        "SELECT collateral_id, property_addr, lat, lng, area, age, true_market_price, "
+        "poi_density, commute_min, is_high_risk_zone, spatial_feat_missing_pct FROM collateral"
+    )
+    params: list = []
+    if collateral_ids is not None:
+        if not collateral_ids:
+            return {}
+        frag, params = _in_clause(collateral_ids)
+        sql += f" WHERE collateral_id IN {frag}"
+    cur = conn.cursor()
+    cur.execute(sql, params)
+    cols = [d[0] for d in cur.description]
+    rows = [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+    cur.close()
+    for r in rows:
+        # 标度统一（SPF-AC04）：collateral.spatial_feat_missing_pct 存的是 0–1 小数，
+        # 而 dws_spatial_feature 同名列与 config.LOW_CONF_MISSING_PCT 都是 0–100 百分数。
+        # 旧实现不做换算，`0.30 >= 25.0` 恒 False → AC-04 低置信路径全库从未触发。
+        # 在唯一的数据入口统一成 0–100，业务逻辑（risk_engine）不再感知标度差异。
+        if r.get("spatial_feat_missing_pct") is not None:
+            v = float(r["spatial_feat_missing_pct"])
+            r["spatial_feat_missing_pct"] = v * 100.0 if v <= 1.0 else v
+    return {r["collateral_id"]: r for r in rows}
+
+
+def load_customers(conn, customer_ids: list | None = None) -> dict:
+    """读客户主档，返回 {customer_id: row}。"""
+    sql = "SELECT customer_id, credit_score, income_monthly, debt_ratio FROM customer"
+    params: list = []
+    if customer_ids is not None:
+        if not customer_ids:
+            return {}
+        frag, params = _in_clause(customer_ids)
+        sql += f" WHERE customer_id IN {frag}"
+    cur = conn.cursor()
+    cur.execute(sql, params)
+    cols = [d[0] for d in cur.description]
+    rows = [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+    cur.close()
+    return {r["customer_id"]: r for r in rows}
+
+
+def loans_by_collateral(conn, collateral_ids: list) -> list[int]:
+    """抵押物变更 → 受影响贷款：估值变了，挂在它上面的贷款 LTV 全部要重算。"""
+    if not collateral_ids:
+        return []
+    frag, params = _in_clause(collateral_ids)
+    cur = conn.cursor()
+    cur.execute(f"SELECT loan_id FROM loan WHERE collateral_id IN {frag}", params)
+    out = [r[0] for r in cur.fetchall()]
+    cur.close()
+    return out
+
+
+def loans_by_customer(conn, customer_ids: list) -> list[int]:
+    """客户变更 → 受影响贷款（当前风险口径未直接用客户特征，仍重算以保持视图新鲜）。"""
+    if not customer_ids:
+        return []
+    frag, params = _in_clause(customer_ids)
+    cur = conn.cursor()
+    cur.execute(f"SELECT loan_id FROM loan WHERE customer_id IN {frag}", params)
+    out = [r[0] for r in cur.fetchall()]
+    cur.close()
+    return out
+
+
+# ---------------------------------------------------------------- 计算
+
+
+def load_spatial(conn) -> tuple[dict, dict]:
+    """从 L2 空间表加载抵押物空间特征（S3，tools/spatial）。
+
+    返回 (spatial_map, zone_risk_map)：
+    - spatial_map: {collateral_id: {poi_density, commute_min, zone_id, spatial_feat_missing_pct}}
+      取 build_date 最新一版（每天重建全量，快照语义）。
+    - zone_risk_map: {zone_id: is_high_risk_zone}，用于把 zone 归属推导为高危区标记。
+
+    空间表可能还没建（S3 模块未跑）——按空表处理，调用方自然回退到 collateral 占位字段。
+    """
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT f.entity_id, f.poi_density, f.commute_min, f.zone_id, f.spatial_feat_missing_pct "
+            "FROM dws_spatial_feature f "
+            "JOIN (SELECT entity_type, MAX(build_date) d FROM dws_spatial_feature "
+            "      WHERE entity_type='collateral' GROUP BY entity_type) m "
+            "  ON f.entity_type=m.entity_type AND f.build_date=m.d "
+            "WHERE f.entity_type='collateral'"
+        )
+        spatial = {}
+        for eid, poi, commute, zone, missing in cur.fetchall():
+            spatial[int(eid)] = {
+                "poi_density": float(poi) if poi is not None else None,
+                "commute_min": float(commute) if commute is not None else None,
+                "zone_id": zone,
+                "spatial_feat_missing_pct": float(missing) if missing is not None else 100.0,
+            }
+        cur.execute("SELECT zone_id, is_high_risk_zone FROM ads_spatial_zone")
+        zone_risk = {z: int(r or 0) for z, r in cur.fetchall()}
+        return spatial, zone_risk
+    except Exception:
+        # 空间表不存在（S3 未跑）→ 空映射，风险引擎维持 collateral 占位空间特征。
+        return {}, {}
+    finally:
+        cur.close()
+
+
+def apply_spatial(collaterals: dict, spatial_map: dict, zone_risk_map: dict) -> None:
+    """把真实空间特征覆盖到抵押物 dict（**有效值才覆盖**）。
+
+    覆盖规则分两档：
+    - poi_density / commute_min：空间表有有效值即覆盖（距离/密度是连续量，稀疏也有信息量）。
+    - spatial_feat_missing_pct：**空间表有该实体的特征即覆盖**，不再以 zone 命中为前提——
+      缺失率是空间特征自身的质量度量，与抵押物是否落入某个价格区块无关；抵押物该落在
+      网格里却没落上，恰恰说明空间信息不足、缺失率应当如实上报（SPF-AC04 修复）。
+    - is_high_risk_zone：**仅在 zone 命中时覆盖**——zone_id 非空说明抵押物落在有样本的
+      价格区块内，区块风险归属可信。zone 为空（如种子随机坐标落在房源聚集区外）时维持
+      collateral 表占位高危标记，否则会把整批贷款打成高危区。
+
+    低置信语义（AC-04）：缺失率 **严格大于** config.LOW_CONF_MISSING_PCT(75) 的笔被标记
+    low_confidence，**抑制自动预警转人工核查**；恰好 = 75 不低置信。合成种子里 200 笔
+    缺失率中位落在 50–75 区间、约半数 >75，与「合成坐标大多是随机撒点、空间特征先天
+    不足」一致。
+    """
+    if not spatial_map or not collaterals:
+        return
+    for cid, feat in spatial_map.items():
+        col = collaterals.get(cid)
+        if col is None:
+            continue
+        if feat["poi_density"] is not None:
+            col["poi_density"] = feat["poi_density"]
+        if feat["commute_min"] is not None:
+            col["commute_min"] = feat["commute_min"]
+        # 缺失率：空间表有该实体即覆盖（不再依赖 zone 命中，见 docstring）
+        if feat["spatial_feat_missing_pct"] is not None:
+            col["spatial_feat_missing_pct"] = feat["spatial_feat_missing_pct"]
+        if feat["zone_id"]:
+            col["is_high_risk_zone"] = zone_risk_map.get(feat["zone_id"], 0)
+
+
+def compute_rows(
+    loans: list[dict],
+    collaterals: dict,
+    customers: dict,
+    dwd_unit: dict,
+    avm_model=None,
+    spatial=None,
+) -> list:
+    """对一批贷款做打宽（估值 → LTV → 五级 → 预警）。增量与全量走同一函数。
+
+    avm_model 为 None 时跳过 AVM 估值（无模型环境与合成地址场景兼容）。
+    spatial 为 (spatial_map, zone_risk_map) 时先做空间特征覆盖（S3 接入）。
+    """
+    if spatial:
+        apply_spatial(collaterals, spatial[0], spatial[1])
+    return [
+        risk_engine.enrich_loan(
+            ln,
+            collaterals.get(ln["collateral_id"]),
+            customers.get(ln["customer_id"]),
+            dwd_unit,
+            config.CITY_MAP,
+            avm_model=avm_model,
+        )
+        for ln in loans
+    ]
+
+
+# ---------------------------------------------------------------- 落库
+
+
+def _ensure_columns(conn, table: str, columns: list[tuple[str, str]]) -> None:
+    """幂等补列：MySQL 8 的 ALTER TABLE 没有 ADD COLUMN IF NOT EXISTS，需先查 information_schema。
+
+    存量表（S6 前的 DWS）只补新列不动老列，且新列全部允许 NULL——避免给已有行强填充
+    默认值导致全表锁/扫描，也让「老数据无偏差列」这一事实保持诚实。
+    """
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s",
+        (table,),
+    )
+    existing = {r[0] for r in cur.fetchall()}
+    for name, ddl in columns:
+        if name not in existing:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+    cur.close()
+
+
+def ensure_ads_tables(conn) -> None:
+    """幂等建 DWS/ADS 表（DDL 需 root，见 config.root_crawl_params）。"""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dws_risk_class (
+            loan_id INT PRIMARY KEY,
+            customer_id INT, collateral_id INT,
+            balance DECIMAL(14,2), interest_rate DECIMAL(5,2),
+            market_valuation DECIMAL(14,2), ltv DECIMAL(8,4),
+            risk_class VARCHAR(8), low_confidence TINYINT,
+            is_high_risk_zone TINYINT, alert TINYINT,
+            alert_level VARCHAR(8) DEFAULT NULL,
+            valuation_deviation_pct DECIMAL(8,4),
+            abnormal_valuation TINYINT,
+            model_version VARCHAR(32),
+            etl_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+    )
+    # 存量表补列（R-UNW-03 偏差/异常标记 + R-UBQ-01 模型版本 + AC-03 alert_level），
+    # CREATE IF NOT EXISTS 对已有表不生效
+    _ensure_columns(
+        conn,
+        "dws_risk_class",
+        [
+            ("alert_level", "VARCHAR(8) DEFAULT NULL"),
+            ("valuation_deviation_pct", "DECIMAL(8,4) DEFAULT NULL"),
+            ("abnormal_valuation", "TINYINT DEFAULT NULL"),
+            ("model_version", "VARCHAR(32) DEFAULT NULL"),
+        ],
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ads_ltv_alerts (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            loan_id INT, customer_id INT, collateral_id INT,
+            loan_balance DECIMAL(14,2), market_valuation DECIMAL(14,2),
+            ltv DECIMAL(8,4), risk_class VARCHAR(8),
+            is_high_risk_zone TINYINT, alert_level VARCHAR(8) DEFAULT NULL,
+            alert_date DATE,
+            etl_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            KEY idx_loan (loan_id), KEY idx_date (alert_date)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+    )
+    # 存量表补列（AC-03 两档预警级别），同样幂等处理
+    _ensure_columns(conn, "ads_ltv_alerts", [("alert_level", "VARCHAR(8) DEFAULT NULL")])
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ads_risk_valuation_alerts (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            alert_code VARCHAR(16), loan_id INT, collateral_id INT,
+            model_version VARCHAR(32),
+            valuation_deviation_pct DECIMAL(8,4),
+            detail VARCHAR(255), alert_date DATE,
+            etl_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            KEY idx_date (alert_date), KEY idx_loan (loan_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ads_risk_class (
+            stat_date DATE, risk_class VARCHAR(8),
+            loan_count INT, balance_total DECIMAL(16,2), balance_pct DECIMAL(8,4),
+            etl_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (stat_date, risk_class)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+    )
+    conn.commit()
+    cur.close()
+
+
+def _dws_tuple(r: dict) -> tuple:
+    return (
+        r["loan_id"],
+        r["customer_id"],
+        r["collateral_id"],
+        r["balance"],
+        r["interest_rate"],
+        r["market_valuation"],
+        r["ltv"],
+        r["risk_class"],
+        int(r["low_confidence"]),
+        r["is_high_risk_zone"],
+        int(r["alert"]),
+        r.get("alert_level"),
+        r.get("valuation_deviation_pct"),
+        int(bool(r.get("abnormal_valuation"))),
+        r.get("model_version") or "unknown",
+    )
+
+
+def upsert_dws(conn, rows: list[dict]) -> int:
+    """按 loan_id UPSERT 打宽明细；返回处理行数。"""
+    if not rows:
+        return 0
+    cur = conn.cursor()
+    cur.executemany(DWS_INSERT_SQL, [_dws_tuple(r) for r in rows])
+    conn.commit()
+    cur.close()
+    return len(rows)
+
+
+def _replace_risk_alerts(conn, rows: list[dict], date: str, cur) -> int:
+    """按批重写人工核查类告警（R-UBQ-01 血缘 / R-UNW-03 异常估值）。
+
+    与 LTV 预警相同的「先删本批当日、再插」语义：增量消费一笔时，该笔当日旧告警状态
+    要被新结果覆盖，否则同一批变更反复消费会把已核销的告警重新堆回表里。
+    """
+    if not rows:
+        return 0
+    loan_ids = [r["loan_id"] for r in rows]
+    frag, params = _in_clause(loan_ids)
+    cur.execute(
+        f"DELETE FROM ads_risk_valuation_alerts WHERE alert_date=%s AND loan_id IN {frag}",
+        [date, *params],
+    )
+    items: list[tuple[str, dict, str]] = []
+    for r in rows:
+        mv = r.get("model_version") or "unknown"
+        # E-06：估值记录缺模型版本 → R-UBQ-01 告警，语义「不可溯源」
+        if mv == "unknown":
+            items.append(("R-UBQ-01", r, "模型版本缺失，估值结论不可溯源"))
+        # R-UNW-03：AVM 偏差超阈值 → 推送人工核查
+        if r.get("abnormal_valuation"):
+            dev = r.get("valuation_deviation_pct")
+            items.append(
+                ("R-UNW-03", r, f"AVM 估值偏差 {dev:.2%} 超阈值" if dev else "AVM 估值偏差超阈值")
+            )
+    if items:
+        cur.executemany(
+            "INSERT INTO ads_risk_valuation_alerts "
+            "(alert_code, loan_id, collateral_id, model_version, valuation_deviation_pct, detail, alert_date) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            [
+                (
+                    code,
+                    r["loan_id"],
+                    r.get("collateral_id"),
+                    r.get("model_version"),
+                    r.get("valuation_deviation_pct"),
+                    detail,
+                    date,
+                )
+                for code, r, detail in items
+            ],
+        )
+    return len(items)
+
+
+def replace_alerts(conn, rows: list[dict], date: str) -> int:
+    """只重写本批 loan_id 在 `date` 当日的预警：先删后插。
+
+    不做全表 DELETE：增量消费一次只该影响这几笔，全表删会误伤当日其它预警。
+    返回 LTV 预警数；血缘/异常估值告警（_replace_risk_alerts）与 LTV 预警同批替换，
+    全量（main.py）与增量（tools/cdc/consumer.py）共用本入口，保证两路径口径一致。
+    """
+    if not rows:
+        return 0
+    loan_ids = [r["loan_id"] for r in rows]
+    frag, params = _in_clause(loan_ids)
+    cur = conn.cursor()
+    cur.execute(
+        f"DELETE FROM ads_ltv_alerts WHERE alert_date=%s AND loan_id IN {frag}",
+        [date, *params],
+    )
+    alerts = [r for r in rows if r["alert"]]
+    if alerts:
+        cur.executemany(
+            ALERT_INSERT_SQL,
+            [
+                (
+                    r["loan_id"],
+                    r["customer_id"],
+                    r["collateral_id"],
+                    r["balance"],
+                    r["market_valuation"],
+                    r["ltv"],
+                    r["risk_class"],
+                    r["is_high_risk_zone"],
+                    r.get("alert_level"),
+                    date,
+                )
+                for r in alerts
+            ],
+        )
+    # 人工核查类告警与 LTV 预警同批清理重写（共享 conn/事务，最后统一 commit）
+    _replace_risk_alerts(conn, rows, date, cur)
+    conn.commit()
+    cur.close()
+    return len(alerts)
+
+
+def delete_loans(conn, loan_ids: list, date: str) -> int:
+    """贷款被删除（CDC DELETE）：清掉其 DWS 明细、LTV 预警与人工核查告警。
+
+    三张表都要清，否则下游会看到「贷款已删但告警仍在」的幽灵敞口/幽灵告警。
+    """
+    if not loan_ids:
+        return 0
+    frag, params = _in_clause(loan_ids)
+    cur = conn.cursor()
+    cur.execute(f"DELETE FROM dws_risk_class WHERE loan_id IN {frag}", params)
+    cur.execute(
+        f"DELETE FROM ads_ltv_alerts WHERE alert_date=%s AND loan_id IN {frag}",
+        [date, *params],
+    )
+    cur.execute(
+        f"DELETE FROM ads_risk_valuation_alerts WHERE alert_date=%s AND loan_id IN {frag}",
+        [date, *params],
+    )
+    conn.commit()
+    cur.close()
+    return len(loan_ids)
+
+
+def refresh_ads_risk_class(conn, date: str) -> dict:
+    """从 dws_risk_class 现状重算当日五级分类汇总（全量口径，SQL 聚合，非逐笔重算）。
+
+    增量改一笔也要刷新它：占比的分母是全量余额，只更新本批会让占比失真。
+    """
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT risk_class, COUNT(*), COALESCE(SUM(balance),0) FROM dws_risk_class GROUP BY risk_class"
+    )
+    got = {r[0]: (int(r[1]), float(r[2])) for r in cur.fetchall()}
+    by_class = {cls: {"count": 0, "balance": 0.0} for cls in config.CLASS_ORDER}
+    for cls, (cnt, bal) in got.items():
+        by_class.setdefault(cls, {"count": 0, "balance": 0.0})
+        by_class[cls] = {"count": cnt, "balance": round(bal, 2)}
+    total = sum(v["balance"] for v in by_class.values())
+    for v in by_class.values():
+        v["balance_pct"] = round(v["balance"] / total, 4) if total else 0.0
+
+    cur.execute("DELETE FROM ads_risk_class WHERE stat_date=%s", (date,))
+    cur.executemany(
+        "INSERT INTO ads_risk_class (stat_date, risk_class, loan_count, balance_total, balance_pct) "
+        "VALUES (%s,%s,%s,%s,%s)",
+        [(date, cls, v["count"], v["balance"], v["balance_pct"]) for cls, v in by_class.items()],
+    )
+    conn.commit()
+    cur.close()
+    return {"by_class": by_class, "total_balance": round(total, 2)}
