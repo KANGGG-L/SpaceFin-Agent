@@ -38,11 +38,11 @@ services:
       start_period: 30s
 
   # --------------------------------------------------------------------------
-  # L5 展示：Superset BI 看板（已接入基础）
+  # L5 展示：Superset BI 看板（已接入 + 投产加固）
   #   连接 Doris(ADS 层, MySQL 协议 9030) / MySQL(3306) 作为自助 BI 层；
   #   与 tools/frontend 驾驶舱互补：驾驶舱=固化 RBAC 决策视图，Superset=探索性分析。
   #   镜像固定 4.1.2（生产建议固定具体版本标签）。
-  #   首次启动需初始化元数据库（见 docs/tech/components/superset.md §4）。
+  #   元数据库改 PostgreSQL（superset-metadata-db），生产不再用 SQLite。
   #   注意：容器内 127.0.0.1 指向自身，连宿主 Doris/MySQL 须用 host.docker.internal
   #   （已加 extra_hosts），对应宿主侧 URI 为 mysql+pymysql://root@127.0.0.1:9030/ads。
   # --------------------------------------------------------------------------
@@ -55,18 +55,38 @@ services:
     restart: unless-stopped
     environment:
       # 演示环境固定 dev key，避免容器重启生成临时 key 导致会话失效；
-      # 生产须用强随机值并通过环境变量 SUPERSET_SECRET_KEY 注入。
+      # 生产须用强随机值并通过环境变量 SUPERSET_SECRET_KEY 注入（见 .env.example）。
       SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-spacefin-superset-dev-secret-fixed}
-      # 元数据用独立库，避免污染业务库；生产改 PostgreSQL
-      SQLALCHEMY_DATABASE_URI: ${SUPERSET_METADATA_DB:-sqlite:////app/superset_home/superset.db}
+      # 元数据库改 PostgreSQL（生产前置）；默认指向本 compose 的 superset-metadata-db。
+      # 注意：compose 不支持嵌套 ${VAR:-...} 插值，故 URI 用扁平默认值
+      # （密码 superset_dev_only 与下方 SUPERSET_PG_PASSWORD 默认值一致）。
+      # 如需回退 SQLite：SUPERSET_METADATA_DB=sqlite:////app/superset_home/superset.db
+      # 生产改密码时须同时覆盖 SUPERSET_PG_PASSWORD 与 SUPERSET_METADATA_DB。
+      SQLALCHEMY_DATABASE_URI: ${SUPERSET_METADATA_DB:-postgresql://superset:superset_dev_only@superset-metadata-db:5432/superset}
+      # 投产加固：挂载自定义配置（RBAC/PII 复用 + 审计钩子），见 deploy/superset/superset_config.py。
+      SUPERSET_CONFIG_PATH: /app/superset_config.py
+      # 审计钩子写 MySQL spacefin.ads_export_audit（与驾驶舱共用同一张审计表）；
+      # 容器内经 compose 服务名 mysql 连 MySQL（同网络 DNS，最稳）。
+      AUDIT_MYSQL_HOST: ${AUDIT_MYSQL_HOST:-mysql}
+      AUDIT_MYSQL_PORT: ${AUDIT_MYSQL_PORT:-3306}
+      AUDIT_MYSQL_USER: ${AUDIT_MYSQL_USER:-root}
+      AUDIT_MYSQL_PASSWORD: ${AUDIT_MYSQL_PASSWORD:-${MYSQL_ROOT_PASSWORD}}
+      AUDIT_MYSQL_DB: ${AUDIT_MYSQL_DB:-spacefin}
     ports:
       - "127.0.0.1:${SUPERSET_PORT:-8088}:8088"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - superset-home:/app/superset_home
+      # 挂载审计/合规配置（已随镜像构建上下文存在，但用宿主最新版覆盖以保证可热改）。
+      - ./deploy/superset/superset_config.py:/app/superset_config.py:ro
+      - ./deploy/superset/audit_writer.py:/app/audit_writer.py:ro
+      - ./deploy/superset/setup_roles.py:/app/setup_roles.py:ro
     depends_on:
-      - mysql
+      mysql:
+        condition: service_started
+      superset-metadata-db:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
       interval: 15s
@@ -74,8 +94,33 @@ services:
       retries: 10
       start_period: 90s
 
+  # --------------------------------------------------------------------------
+  # Superset 元数据库：PostgreSQL（生产前置，替换 SQLite）
+  #   仅绑 127.0.0.1，不对外暴露；数据卷持久化。
+  # --------------------------------------------------------------------------
+  superset-metadata-db:
+    image: postgres:16-alpine
+    container_name: spacefin-superset-metadata
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${SUPERSET_PG_USER:-superset}
+      POSTGRES_PASSWORD: ${SUPERSET_PG_PASSWORD:-superset_dev_only}
+      POSTGRES_DB: ${SUPERSET_PG_DB:-superset}
+    ports:
+      - "127.0.0.1:${SUPERSET_PG_PORT:-5433}:5432"
+    volumes:
+      - superset-metadata-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SUPERSET_PG_USER:-superset} -d ${SUPERSET_PG_DB:-superset}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
 volumes:
   mysql-data:
     name: spacefin-mysql-data
   superset-home:
     name: spacefin-superset-home
+  superset-metadata-db:
+    name: spacefin-superset-metadata-db
