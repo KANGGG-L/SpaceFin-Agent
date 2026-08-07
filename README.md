@@ -56,23 +56,23 @@
 
 产品决策文档之外，本平台的可运行工程实现按 **Sprint 自底向上、按需接入**推进：每个组件在其业务需要出现时才引入，并同步补充[组件技术说明](docs/tech/components/)与下表登记。当前正按真实容器栈逐层落地（L0→L5）。
 
-### 已接入组件
+### 组件清单（按层级）
 
 | 组件                                         | 层级                             | 状态                                                                                                       | 引入 Sprint | 技术说明                                                                                                                                         |
 | -------------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
 | MySQL 业务源库                               | L0 数据源头                      | ✅ 已接入                                                                                                  | Sprint 0    | [mysql-source.md](docs/tech/components/mysql-source.md)                                                                                          |
 | 安居客采集器                                 | L0 公开数据获取                  | ✅ 已接入                                                                                                  | 数据源探索  | [anjuke-crawler.md](docs/tech/components/anjuke-crawler.md)                                                                                      |
-| └ Redis 任务队列                             | 采集中间件                       | ✅ 代码集成                                                                                                | 数据源探索  | [redis-task-queue.md](docs/tech/components/redis-task-queue.md)                                                                                  |
-| └ jhao104/proxy_pool 代理池                  | 采集反爬（IP 轮换）              | ✅ 客户端集成                                                                                              | 数据源探索  | [proxy-pool.md](docs/tech/components/proxy-pool.md)                                                                                              |
-| └ 容器编排采集系统                           | 分布式调度 + 宿主渲染            | ✅ 已接入（2026-08-03 全量跑通）                                                                           | 数据源探索  | [crawler-orchestrator.md](docs/tech/components/crawler-orchestrator.md)                                                                          |
-| └ Airflow 外层编排                           | 每日定时触发 + 收尾（DAG 00:30） | ✅ 已接入                                                                                                  | 数据源探索  | [airflow/README.md](airflow/README.md) · [airflow.md](docs/tech/components/airflow.md)                                                           |
-| └ ETL 数据管道                               | 跨日去重 + DWD 入库 + ODS 湖     | ✅ 已接入                                                                                                  | Sprint 1    | [crawler-etl.md](docs/tech/components/crawler-etl.md)                                                                                            |
-| └ Kubernetes 分布式集群                      | 采集横向扩展                     | ⏸ 清单齐备（待集群）                                                                                       | 数据源探索  | [k8s-crawler-cluster.md](docs/tech/components/k8s-crawler-cluster.md)                                                                            |
+| Redis 任务队列                              | 采集中间件                       | ✅ 代码集成                                                                                                | 数据源探索  | [redis-task-queue.md](docs/tech/components/redis-task-queue.md)                                                                                  |
+| jhao104/proxy_pool 代理池                   | 采集反爬（IP 轮换）              | ✅ 客户端集成                                                                                              | 数据源探索  | [proxy-pool.md](docs/tech/components/proxy-pool.md)                                                                                              |
+| 容器编排采集系统                             | 分布式调度 + 宿主渲染            | ✅ 已接入                                                                                                  | 数据源探索  | [crawler-orchestrator.md](docs/tech/components/crawler-orchestrator.md)                                                                          |
+| Airflow 外层编排                             | 每日定时触发 + 收尾（DAG 00:30） | ✅ 已接入                                                                                                  | 数据源探索  | [airflow/README.md](airflow/README.md) · [airflow.md](docs/tech/components/airflow.md)                                                           |
+| ETL 数据管道                                 | 跨日去重 + DWD 入库 + ODS 湖     | ✅ 已接入                                                                                                  | Sprint 1    | [crawler-etl.md](docs/tech/components/crawler-etl.md)                                                                                            |
+| Kubernetes 分布式集群                        | 采集横向扩展                     | ⏸ 清单齐备（待集群）                                                                                       | 数据源探索  | [k8s-crawler-cluster.md](docs/tech/components/k8s-crawler-cluster.md)                                                                            |
 | MySQL binlog CDC（I-01）                     | L0 变更接入                      | ✅ 已接入                                                                                                  | Sprint 1    | [cdc-downstream.md](docs/tech/components/cdc-downstream.md)                                                                                      |
-| └ CDC 下游消费链                             | L0 增量同步                      | ✅ 已接入（改一笔 loan 秒级同步：≤10s 验收线，实测 3s）                                                    | Sprint 1    | [cdc-downstream.md](docs/tech/components/cdc-downstream.md)                                                                                      |
+| CDC 下游消费链                               | L0 增量同步                      | ✅ 已接入（改一笔 loan 秒级同步：≤10s 验收线，实测 3s）                                                    | Sprint 1    | [cdc-downstream.md](docs/tech/components/cdc-downstream.md)                                                                                      |
 | Doris + MinIO 湖仓                           | L0 分层                          | ✅ 已接入（ODS/DWD/DWS/ADS 四层 24 表，与 MySQL 对账一致）                                                 | Sprint 1    | [doris-lake.md](docs/tech/components/doris-lake.md)                                                                                              |
 | Kafka + Flink 实时                           | L1                               | ✅ 已接入（CDC→Kafka→Flink 实时预警，3s 端到端；含 rebuild.sh 一键重建）                                   | Sprint 2    | [kafka-flink-realtime.md](docs/tech/components/kafka-flink-realtime.md)                                                                          |
-| AVM（GBDT+空间特征）                         | L3                               | ✅ 已接入（精度@覆盖率：45% 覆盖 MAPE 9.88% ≤10% 达标；全量 14.59%；基线 20.6%；版本 2026-08-05-r11）      | Sprint 2    | [avm.md](docs/tech/components/avm.md) · [tools/avm/README.md](tools/avm/README.md) · [cdc-downstream.md](docs/tech/components/cdc-downstream.md) |
+| AVM（GBDT+空间特征）                         | L3                               | ✅ 已接入（精度@覆盖率：45% 覆盖 MAPE 9.88% ≤10% 达标；全量 14.59%；基线 20.6%）      | Sprint 2    | [avm.md](docs/tech/components/avm.md) · [tools/avm/README.md](tools/avm/README.md) · [cdc-downstream.md](docs/tech/components/cdc-downstream.md) |
 | 风险引擎（LTV 两档预警 / 五级分类 / 低置信） | L3                               | ✅ 已接入（LTV 警示线 0.75 / 强预警线 0.85，均可配置，等号边界严格大于不触发；低置信：空间特征缺失率 >75） | Sprint 2    | [risk-engine.md](docs/tech/components/risk-engine.md)                                                                                            |
 | L2 空间特征（高危区/POI/通勤）               | L2                               | ✅ 已接入（单机近似，降级 Sedona）                                                                         | Sprint 3    | [spatial-feature.md](docs/tech/components/spatial-feature.md)                                                                                    |
 | 预警推送（I-05 贷后保全）                    | L4 应用接口                      | ✅ 已接入（T+1 推送）                                                                                      | Sprint 4    | [alerting-iv05.md](docs/tech/components/alerting-iv05.md)                                                                                        |
@@ -95,18 +95,18 @@
 
 ## 落地与迁移（采集系统）
 
-采集系统主体（调度 / 每城 IP 预算 / 增量断点续爬 / ETL / Airflow 编排）已实现并合入 develop；剩余为 Linux 迁移与验收：
+采集系统主体（调度 / 每城 IP 预算 / 增量断点续爬 / ETL / Airflow 编排）已实现并合入 dev；剩余为 Linux 迁移与验收：
 
 | 项                                                            | 状态                    |
 | ------------------------------------------------------------- | ----------------------- |
-| 定时触发（Airflow DAG `guangdong_daily_crawl`，00:30）        | ✅ 已实现并合入 develop |
+| 定时触发（Airflow DAG `guangdong_daily_crawl`，00:30）        | ✅ 已实现并合入 dev |
 | ETL 跨日去重 / 入库 / 数据湖落盘（DAG 收尾自动执行）          | ✅ 已实现               |
 | 轮次策略（取消 MAX_ROUNDS=3，读完/预算耗尽即终态）            | ✅ 已实现               |
 | 每城 IP 预算（sale 600 / fangyuan 400+免费池，广深 15%）      | ✅ 已实现               |
 | 增量断点续爬 + 回扫头部 2-3 页                                | ✅ 已实现               |
 | Linux 新机部署（launchd → systemd、Airflow 同机、环境装依赖） | ⏳ 待执行               |
 
-> ✅ **渲染链路已验证**：fangyuan 渲染依赖宿主 Chrome。容器 Chrome（Linux/headless）曾被反爬按指纹软拦截（返回空心壳页，无 `zu-itemmod`），但空壳页识别已落地（66 样本零错判），且 `tools/orchestrator/render_smoke_test.sh`（`/render` 拿 zu-itemmod）已通过、2026-08-03 全量跑通（sale 21 城 186,635 行 / fangyuan 出数页率 2.82%→33.33%）。新机部署仍建议先跑一次渲染冒烟测试，但此项已非「未实测」风险。
+> ✅ **渲染链路已验证**：fangyuan 渲染依赖宿主 Chrome。容器 Chrome（Linux/headless）曾被反爬按指纹软拦截（返回空心壳页，无 `zu-itemmod`），但空壳页识别已落地（66 样本零错判），且 `tools/orchestrator/render_smoke_test.sh`（`/render` 拿 zu-itemmod）已通过（sale 21 城 186,635 行 / fangyuan 出数页率 2.82%→33.33%）。新机部署仍建议先跑一次渲染冒烟测试，但此项已非「未实测」风险。
 
 ### 本地运行
 
@@ -162,11 +162,11 @@ nohup tools/orchestrator/.venv/bin/python tools/frontend/app.py \
 
 > 前端依赖 `output/` 下产物（如 `output/avm/avm_report.json`、`output/spatial/spatial_report.json`、`output/risk/dws_risk_class.csv`）；若演示机未跑过 pipeline，对应页显示「产物缺失」空态（已优雅处理，不崩溃）。演示前请确认产物已生成。
 
-## 7 天风险演进演示（2026-08-01 ~ 08-07，事件城市：广州）
+## 7 天风险演进演示（事件城市：广州）
 
 平台内置一套 **7 天风险演进剧本**（`docs/demo/script_7d.md`）与验收标准（`docs/demo/acceptance.md`），完整演示「数据底座 → 估值 → LTV → 预警 → 人工处置 → 闭环」链路：
 
-- **剧本主线**：8 月 4 日广州核心区挂牌价异动下探 → 数据底座 24 小时内传导到抵押物估值（AVM 重训）→ 广州贷款 LTV 集体上穿预警线 → 8 月 5 日预警达峰 → 风控批量确认与处置 → 8 月 7 日企稳收口。
+- **剧本主线**：第 4 天广州核心区挂牌价异动下探 → 数据底座 24 小时内传导到抵押物估值（AVM 重训）→ 广州贷款 LTV 集体上穿预警线 → 第 5 天预警达峰 → 风控批量确认与处置 → 第 7 天企稳收口。
 - **灌数方式**：`tools/dev/backfill_7d.py --all` 逐日调用**真实引擎**（`tools/risk/main.py --date X --write-db` + `tools/alerting/main.py --date X`），处置记录复用 `ads_alert_confirm`（新增 `disposition_status / disposition_by / disposition_ts` 字段）。
 - **数据规模**：客户 / 抵押物 / 贷款三表扩至 **5,000 笔**（广州约 1,250 笔，占比 25%）；`seed/generate_seed.py 5000` 重新生成并灌库。
 
@@ -200,8 +200,8 @@ nohup tools/orchestrator/.venv/bin/python tools/frontend/app.py \
 
 **亮点 / 已实证**：
 
-- AC-07 精度@覆盖率达标：45% 覆盖下 MAPE 9.88% ≤ 10%（模型版本 2026-08-05-r11；全量 14.59%，基线 20.6%）
-- 38% 异常估值经三分量归因查明为「基准自指」——`true_market_price` 由 08-04 版模型自己生成，真实模型误差仅 1/200 笔，故不做校正层
+- AC-07 精度@覆盖率达标：45% 覆盖下 MAPE 9.88% ≤ 10%（全量 14.59%，基线 20.6%）
+- 38% 异常估值经三分量归因查明为「基准自指」——`true_market_price` 由早期版本模型自己生成，真实模型误差仅 1/200 笔，故不做校正层
 - Kafka + Flink 3s 端到端实时预警
 
 **未验证假设**：H1/H5 已在数据侧实证；H3 已由最小 Critic 原型验证达成（美化偏见 KS 可检测：0.257 → 校准后 0.028 ≤ 0.05，机制演示口径见 [tools/persona/README.md](tools/persona/README.md)，真实基准属商用前置）。
