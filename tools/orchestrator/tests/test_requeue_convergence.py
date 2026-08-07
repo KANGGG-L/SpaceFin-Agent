@@ -1,16 +1,19 @@
-"""收敛性保证（P1 修复 A 的验收）：**每个任务在有限步内必然 finished=1**。
+"""收敛性保证（P1 修复 A 的验收 + 2026-08-07 按城交错调度适配）。
 
-这是整套 Airflow 编排能否成立的核心命题。命题一旦不成立：42 个任务的分母永远凑不齐
-→ /crawl_status 的 all_done 只能靠 STOP 置位 → Airflow Sensor 烧完 6h 超时失败
-→ etl_finalize / geocode_backfill_finalize 整条下游永不执行，当天数据不入库。
+核心命题不变：**每个任务在有限步内必然 finished=1**。
+命题一旦不成立：42 个任务的分母永远凑不齐 → /crawl_status 的 all_done 只能靠 STOP 置位
+→ Airflow Sensor 烧完 6h 超时失败 → etl_finalize / geocode_backfill_finalize 整条下游永不执行。
+
+2026-08-07 调度重构：不再有全局 sale→fangyuan 阶段（PHASE）。改为「按城交错 + fangyuan 先执行」——
+全 42 任务（21 城 × sale/fangyuan）自 bootstrap 起同时有效并一次性入队，队列顺序即
+DEFAULT_TASKS（先全 21 城 fangyuan、再全 21 城 sale），worker 从队首领取，
+fangyuan 波次优先消耗代理。因此本文件移除了所有 phase / seal_orphan_tasks 相关断言，改为：
 
 覆盖 6 组（契约 §3）：
-1. stale_abandoned 收敛（当前阶段，requeue 超限）
-2. 未超限仍重排
-3. 孤儿收尾扫描 seal_orphan_tasks（修复 A 核心）+ 「阶段还没到」不得误盖的回归护栏
-4. _check_phase_transition 切换瞬间盖章
-5. 收敛终局：41 finished + 1 超限孤儿 → all_done=true + done 键写入（最关键）
-6. worker 侧 fail_budget 收敛（requeue_count 递增 → 超限写终态、不再入队）
+1. stale_abandoned 收敛（requeue 超限放弃 / 未超限仍重排 / 存活 running 不动）
+2. 按城交错调度：init_tasks 全量入队且城序交错；终止判定对全 42 任务统一生效
+3. 收敛终局：41 finished + 1 running 判死孤儿 → all_done=true + done 键写入（最关键）
+4. worker 侧 fail_budget 收敛（requeue_count 递增 → 超限写终态、不再入队）
 
 只连真实 Redis 的 **db 15**（conftest 的 rdb 夹具强制校验并前后各清一次），绝不触碰 db 0。
 """
@@ -34,10 +37,6 @@ def master(load_master):
 def mark_run_ready(master, rdb):
     """让 crawl_status 认可本 run（否则 all_done 恒为 False）。"""
     rdb.set(master.RUN_CURRENT_KEY, RUN)
-
-
-def set_phase(master, rdb, phase):
-    rdb.set(master.PHASE_KEY, phase)
 
 
 def put_task(master, rdb, city, typ, **fields):
@@ -94,10 +93,18 @@ def queued(master, rdb):
     return out
 
 
-# ================= 第 1 组：stale_abandoned 收敛（当前阶段） =================
+def queue_order(master, rdb):
+    """当前队列中的 (city, type) 顺序列表。"""
+    out = []
+    for item in rdb.lrange(master.TASK_QUEUE, 0, -1):
+        d = json.loads(item)
+        out.append((d["city"], d.get("type", "sale")))
+    return out
+
+
+# ================= 第 1 组：stale_abandoned 收敛（requeue 驱动） =================
 def test_requeue_over_limit_writes_stale_abandoned_and_does_not_enqueue(master, rdb):
-    """running + 锁过期 + 心跳超时 + requeue_count 已达 MAX_REQUEUE → 终态，不再入队。"""
-    set_phase(master, rdb, "sale")
+    """running + 锁过期 + 心跳超时 + requeue_count 已达 MAX_REQUEUE → 超限放弃，不再入队。"""
     seed_tasks(master, rdb)
     make_dead_running(master, rdb, "gz", "sale", requeue_count=master.MAX_REQUEUE)
     rdb.delete(master.TASK_QUEUE)
@@ -120,7 +127,6 @@ def test_requeue_over_limit_writes_stale_abandoned_and_does_not_enqueue(master, 
 
 def test_requeue_count_climbs_to_terminal_within_max_requeue_rounds(master, rdb):
     """收敛步数有界：连续判死最多 MAX_REQUEUE+1 轮必进终态（不会无限乒乓）。"""
-    set_phase(master, rdb, "sale")
     seed_tasks(master, rdb)
     make_dead_running(master, rdb, "sz", "sale")
 
@@ -140,9 +146,8 @@ def test_requeue_count_climbs_to_terminal_within_max_requeue_rounds(master, rdb)
     assert state(master, rdb, "sz", "sale")["finish_reason"] == "stale_abandoned"
 
 
-# ================= 第 2 组：未超限仍重排 =================
-def test_under_limit_requeues_and_keeps_finished_zero(master, rdb):
-    set_phase(master, rdb, "sale")
+def test_requeue_under_limit_retries_and_keeps_finished_zero(master, rdb):
+    """running 判死但 requeue_count 未达上限 → 重置 pending 重排（重试瞬死 worker）。"""
     seed_tasks(master, rdb)
     make_dead_running(master, rdb, "gz", "sale", requeue_count=1)
     rdb.delete(master.TASK_QUEUE)
@@ -158,9 +163,8 @@ def test_under_limit_requeues_and_keeps_finished_zero(master, rdb):
     assert ("gz", "sale") in queued(master, rdb)
 
 
-def test_alive_running_task_is_left_alone(master, rdb):
+def test_requeue_leaves_alive_running_untouched(master, rdb):
     """心跳新鲜 / 锁仍在 → master 不得抢走正在跑的任务。"""
-    set_phase(master, rdb, "sale")
     seed_tasks(master, rdb)
     make_alive_running(master, rdb, "gz", "sale")
     make_alive_running(master, rdb, "sz", "sale", lock=True)
@@ -176,254 +180,125 @@ def test_alive_running_task_is_left_alone(master, rdb):
         assert (city, "sale") not in queued(master, rdb)
 
 
-# ================= 第 3 组：孤儿收尾扫描（修复 A 核心） =================
-def test_orphan_pending_sale_task_is_sealed_phase_ended(master, rdb):
-    """phase 已是 fangyuan，残留 sale pending 任务必须被盖 phase_ended（否则 42 分母永缺）。"""
-    set_phase(master, rdb, "fangyuan")
-    seed_tasks(master, rdb)
-    put_task(master, rdb, "gz", "sale", status="pending", finished="0", finish_reason="")
-    rdb.delete(master.TASK_QUEUE)
-
-    n = master.seal_orphan_tasks(rdb)
-
-    st = state(master, rdb, "gz", "sale")
-    assert st["finished"] == "1"
-    assert st["finish_reason"] == "phase_ended"
-    assert st["status"] == "done"
-    assert ("gz", "sale") not in queued(master, rdb)  # 盖章不等于重排
-    assert n >= 1
+# ================= 第 2 组：按城交错调度（替代原 phase 切换） =================
+def test_init_tasks_enqueues_all_42_city_interleaved(master, rdb):
+    """bootstrap 起点（空 redis）：init_tasks 必须把全 42 任务一次性入队，
+    且顺序为 fangyuan 先执行 [gz_fangyuan, sz_fangyuan, ..., yf_fangyuan, gz_sale, sz_sale, ..., yf_sale]。"""
+    master.init_tasks(rdb)
+    order = queue_order(master, rdb)
+    assert order == [(t["city"], t["type"]) for t in master.DEFAULT_TASKS]
+    assert len(order) == 42
 
 
-def test_orphan_running_but_alive_is_not_sealed(master, rdb):
-    """阶段虽已过去，但 worker 还活着 → 留给 worker 自己写终态，别贴假标签。"""
-    set_phase(master, rdb, "fangyuan")
-    seed_tasks(master, rdb)
-    make_alive_running(master, rdb, "gz", "sale")  # 心跳新鲜
-    make_alive_running(master, rdb, "sz", "sale", lock=True)  # 锁还在
+def test_termination_all_tasks_done_sets_stop(master, rdb):
+    """全 42 finished → _check_termination 置 STOP，crawl_status 以 all_finished 收口。"""
+    mark_run_ready(master, rdb)
+    seed_tasks(master, rdb, finished=True, status="done", finish_reason="pages_exhausted")
 
-    master.seal_orphan_tasks(rdb)
+    master._check_termination(rdb)
+    assert rdb.get(master.STOP_KEY)
 
-    for city in ("gz", "sz"):
-        st = state(master, rdb, city, "sale")
-        assert st["finished"] == "0", f"{city}:sale 被误盖，worker 仍在跑"
-        assert st["status"] == "running"
+    st = master.crawl_status(rdb)
+    assert st["all_done"] is True
+    assert st["finished_tasks"] == 42
+    assert st["done_reason"] == "all_finished"  # 靠真收敛，不是靠 STOP 兜底
+
+
+def test_termination_empty_stall_sets_stop(master, rdb):
+    """双池连续 EMPTY_STALL_CYCLES 轮皆空 → 置 STOP，all_done 经 stop 路径收口。"""
+    mark_run_ready(master, rdb)
+    seed_tasks(master, rdb)  # 全 pending（未 finished）
+
+    for _ in range(master.EMPTY_STALL_CYCLES):
+        master._check_termination(rdb)
+
+    assert rdb.get(master.STOP_KEY)
+    st = master.crawl_status(rdb)
+    assert st["all_done"] is True
+    assert st["done_reason"].startswith("stop:")  # 经 STOP 兜底，非 all_finished
+
+
+def test_requeue_enqueues_all_pending_on_day2(master, rdb):
+    """第 2 天 run 的端到端护栏：引导 → 巡查 → 全 42 任务（含 fangyuan）同时入队且未误终态。"""
+    seed_tasks(master, rdb, finished=True, status="done", finish_reason="pages_exhausted")
+    rdb.set(master.RUN_CURRENT_KEY, "2026-08-03")  # 上一 run，触发新 run 引导
+
+    assert master._bootstrap_run(rdb) is True
+    assert rdb.get(master.PHASE_KEY) == "city-interleave"  # 调度模式标记
+    master.init_tasks(rdb)  # 任务 hash 已存在（被重置为 pending）→ 不重建、不重复入队
+    master.requeue_stale_tasks(rdb)  # pending 补队 + running 判死处理
+
+    q = queued(master, rdb)
+    assert len(q) == 42, f"全 42 任务应入队，实际 {len(q)}"
+    assert len({c for c, t in q if t == "fangyuan"}) == 21
+    # 不得因「阶段没到」把任何任务盖成 finished
+    for t in master.DEFAULT_TASKS:
+        assert state(master, rdb, t["city"], t["type"])["finished"] == "0"
+
+
+def test_requeue_enqueues_pending_but_does_not_finish(master, rdb):
+    """回归护栏：全部 pending（非 running）→ requeue 只补队，绝误盖任何终态。"""
+    seed_tasks(master, rdb)  # 全部 pending
+
+    master.requeue_stale_tasks(rdb)
+    q = queued(master, rdb)
+    assert len(q) == 42  # 全补队
+    for t in master.DEFAULT_TASKS:
+        st = state(master, rdb, t["city"], t["type"])
+        assert st["finished"] == "0", f"{t['city']}:{t['type']} 被误盖"
         assert st["finish_reason"] == ""
 
 
-def test_orphan_running_and_dead_is_sealed_stale_abandoned_without_requeue(master, rdb):
-    """阶段已过去 + 判死 → stale_abandoned；不论 requeue_count 是否超限都不重排。"""
-    set_phase(master, rdb, "fangyuan")
-    seed_tasks(master, rdb)
-    make_dead_running(master, rdb, "gz", "sale", requeue_count=0)
-    rdb.delete(master.TASK_QUEUE)
-
-    master.seal_orphan_tasks(rdb)
-
-    st = state(master, rdb, "gz", "sale")
-    assert st["finished"] == "1"
-    assert st["finish_reason"] == "stale_abandoned"
-    assert st["worker"] == "" and st["worker_hb"] == "0"
-    assert int(st["requeue_count"]) == 0  # 阶段已过去，不消耗重排额度
-    assert ("gz", "sale") not in queued(master, rdb)
-
-
-def test_seal_never_overwrites_existing_finish_reason(master, rdb):
-    """幂等：已终态任务的 finish_reason 是审计依据，绝不能被盖章覆写。"""
-    set_phase(master, rdb, "fangyuan")
+def test_requeue_idempotent_on_finished_reason(master, rdb):
+    """幂等：已终态任务的 finish_reason 是审计依据，绝不能被覆写。"""
     seed_tasks(master, rdb, finished=True, status="done", finish_reason="pages_exhausted")
     put_task(master, rdb, "gz", "sale", status="done", finished="1", finish_reason="target_reached")
-    put_task(master, rdb, "sz", "sale", status="pending", finished="0", finish_reason="")
+    make_dead_running(master, rdb, "sz", "sale", requeue_count=master.MAX_REQUEUE)  # 仅 sz 判死超限
 
-    assert master.seal_orphan_tasks(rdb) == 1  # 只盖 sz
+    master.requeue_stale_tasks(rdb)
+    assert state(master, rdb, "sz", "sale")["finish_reason"] == "stale_abandoned"
     before = state(master, rdb, "sz", "sale")
-    assert master.seal_orphan_tasks(rdb) == 0  # 二次执行零改动
+    master.requeue_stale_tasks(rdb)  # 二次：sz 已 finished，不再改动
     assert state(master, rdb, "sz", "sale") == before
     assert state(master, rdb, "gz", "sale")["finish_reason"] == "target_reached"
 
 
-def test_seal_does_not_touch_future_phase_tasks(master, rdb):
-    """回归护栏：phase=sale 时，21 个 fangyuan 任务是「还没轮到」，绝不能被盖章。
-
-    若按「typ != phase」判定，_bootstrap_run 重置后的第一个 maintenance 周期就会把
-    全部 fangyuan 任务盖成 finished=1；而 _init_phase_tasks 对已存在的 key 不重建，
-    出租阶段整轮不跑、all_done 反而秒真 —— ETL 只拿到 sale 数据的静默缺失。
-    """
-    set_phase(master, rdb, "sale")
-    seed_tasks(master, rdb)
-
-    assert master.seal_orphan_tasks(rdb) == 0
-    for t in master.DEFAULT_TASKS:
-        if t["type"] == "fangyuan":
-            st = state(master, rdb, t["city"], "fangyuan")
-            assert st["finished"] == "0", f"{t['city']}:fangyuan 在 sale 阶段被误盖"
-            assert st["finish_reason"] == ""
-
-
-def test_day2_bootstrap_then_maintenance_keeps_fangyuan_runnable(master, rdb):
-    """第 2 天 run 的端到端护栏：引导 → 巡查 → 切阶段后 fangyuan 仍能被派单。"""
-    seed_tasks(master, rdb, finished=True, status="done", finish_reason="pages_exhausted")
-    rdb.set(master.RUN_CURRENT_KEY, "2026-08-03")
-    rdb.set(master.PHASE_KEY, "fangyuan")
-
-    assert master._bootstrap_run(rdb) is True
-    assert rdb.get(master.PHASE_KEY) == "sale"
-    master.init_tasks(rdb)
-    master.requeue_stale_tasks(rdb)  # 含收尾扫描
-
-    fy = [
-        state(master, rdb, t["city"], "fangyuan")
-        for t in master.DEFAULT_TASKS
-        if t["type"] == "fangyuan"
-    ]
-    assert all(s["finished"] == "0" for s in fy), "新 run 一开始就把 fangyuan 盖完了"
-
-    # sale 全部跑完 → 切阶段 → 下一轮巡查必须把 fangyuan 派出去
-    for t in master.DEFAULT_TASKS:
-        if t["type"] == "sale":
-            put_task(
-                master,
-                rdb,
-                t["city"],
-                "sale",
-                status="done",
-                finished="1",
-                finish_reason="pages_exhausted",
-            )
-    master._check_phase_transition(rdb)
-    assert rdb.get(master.PHASE_KEY) == "fangyuan"
-    master.requeue_stale_tasks(rdb)
-    master._purge_queue(rdb, "fangyuan")
-    assert len({c for c, t in queued(master, rdb) if t == "fangyuan"}) == 21
-
-
-def test_seal_preserves_progress_and_url_sets(master, rdb):
-    """收尾扫描不得碰断点与去重集合（增量方案的命脉）。"""
-    set_phase(master, rdb, "fangyuan")
+def test_requeue_preserves_progress_and_url_sets(master, rdb):
+    """requeue 不得碰断点与去重集合（增量方案的命脉）。"""
     seed_tasks(master, rdb)
     rdb.set("spacefin:crawl_progress:gz:sale", 57)
     rdb.sadd("spacefin:crawled_urls:gz:sale", "u1", "u2")
 
-    master.seal_orphan_tasks(rdb)
+    master.requeue_stale_tasks(rdb)
 
     assert rdb.get("spacefin:crawl_progress:gz:sale") == "57"
     assert rdb.smembers("spacefin:crawled_urls:gz:sale") == {"u1", "u2"}
 
 
-def test_requeue_stale_tasks_runs_the_orphan_sweep(master, rdb):
-    """maintenance 只调 requeue_stale_tasks，收尾扫描必须挂在它上面才会被执行。"""
-    set_phase(master, rdb, "fangyuan")
+def test_requeue_abandons_running_dead(master, rdb):
+    """maintenance 调 requeue_stale_tasks：running 判死超限 → 盖 stale_abandoned。"""
     seed_tasks(master, rdb)
-    put_task(master, rdb, "gz", "sale", status="pending", finished="0")
+    make_dead_running(master, rdb, "gz", "sale", requeue_count=master.MAX_REQUEUE)
 
     master.requeue_stale_tasks(rdb)
 
-    assert state(master, rdb, "gz", "sale")["finished"] == "1"
-    assert state(master, rdb, "gz", "sale")["finish_reason"] == "phase_ended"
-
-
-# ================= 第 4 组：切换瞬间盖章 =================
-def test_phase_transition_waits_all_sale_done_even_quota_spent(master, rdb):
-    """2026-08-05 新语义：sale 阶段**不再因 consumed >= QG_SALE_BUDGET 截断**。
-
-    诉求是「每城配额兑现 + 每城有数据」——原逻辑在全局配额耗尽时 phase_ended
-    封存未完成任务，先到先得抢池的城市提前烧完 500，其余城市即使还有自己的
-    18/75 预算也被整体截断。新逻辑：切换只由 _all_type_done 驱动，配额闸门
-    改在 /proxy/qg 与 /proxy/random 发放侧（sale 任务转免费池继续，不封存）。
-    """
-    set_phase(master, rdb, "sale")
-    seed_tasks(master, rdb)
-    put_task(
-        master, rdb, "gz", "sale", status="done", finished="1", finish_reason="pages_exhausted"
-    )
-    # sz 仍 pending，即使 QG 配额已耗尽，也不得切阶段/封存
-    put_task(master, rdb, "sz", "sale", status="pending", finished="0", finish_reason="")
-    rdb.set(master.QG_CONSUMED_KEY, master.QG_SALE_BUDGET)
-
-    master._check_phase_transition(rdb)
-
-    assert rdb.get(master.PHASE_KEY) == "sale"  # 未切：还有 sale 城未完成
-    assert state(master, rdb, "sz", "sale")["finished"] == "0"  # 未封存
-    assert state(master, rdb, "sz", "sale")["finish_reason"] == ""
-
-    # 补齐所有 sale 城后，切换才发生
-    for t in master.DEFAULT_TASKS:
-        if t["type"] == "sale":
-            put_task(
-                master,
-                rdb,
-                t["city"],
-                "sale",
-                status="done",
-                finished="1",
-                finish_reason="empty_pages",
-            )
-    master._check_phase_transition(rdb)
-    assert rdb.get(master.PHASE_KEY) == "fangyuan"
-
-
-def test_running_task_missed_by_transition_is_caught_by_orphan_sweep(master, rdb):
-    """P1-A 的完整复现链：切阶段时 running 被跳过 → worker 死掉 → 收尾扫描兜住。
-
-    2026-08-05 更新：sale 阶段不再因 QG 配额耗尽截断，切换由 _all_type_done 驱动。
-    这里直接构造「sale 全完成 → 已切 fangyuan」后的现场：一个 sale 任务仍 running
-    但 worker 已死，由 seal_orphan_tasks 兜底写终态。
-    """
-    mark_run_ready(master, rdb)
-    set_phase(master, rdb, "fangyuan")
-    seed_tasks(master, rdb)
-    # 除 gz:sale 外全部 finished（模拟已切阶段）
-    for t in master.DEFAULT_TASKS:
-        if (t["city"], t["type"]) == ("gz", "sale"):
-            continue
-        put_task(
-            master,
-            rdb,
-            t["city"],
-            t["type"],
-            status="done",
-            finished="1",
-            finish_reason="pages_exhausted",
-        )
-    make_dead_running(master, rdb, "gz", "sale")
-
-    master.seal_orphan_tasks(rdb)
     st = state(master, rdb, "gz", "sale")
-    assert st["finished"] == "1", "P1-A 未修复：孤儿 sale 任务永远凑不齐 42 分母"
+    assert st["finished"] == "1"
     assert st["finish_reason"] == "stale_abandoned"
+    assert int(st["requeue_count"]) == master.MAX_REQUEUE + 1
 
 
-def test_phase_transition_by_all_sale_done(master, rdb):
-    set_phase(master, rdb, "sale")
-    seed_tasks(master, rdb)
-    for t in master.DEFAULT_TASKS:
-        if t["type"] == "sale":
-            put_task(
-                master,
-                rdb,
-                t["city"],
-                "sale",
-                status="done",
-                finished="1",
-                finish_reason="empty_pages",
-            )
-
-    master._check_phase_transition(rdb)
-    assert rdb.get(master.PHASE_KEY) == "fangyuan"
-    assert state(master, rdb, "gz", "sale")["finish_reason"] == "empty_pages"
-
-
-# ================= 第 5 组：收敛终局（最关键） =================
+# ================= 第 3 组：收敛终局（最关键） =================
 def _seed_41_finished_plus_one_orphan(master, rdb):
-    """41 个 finished + 1 个「阶段已过去 + 判死 + requeue 超限」的 running 孤儿。"""
+    """41 个 finished + 1 个「running 判死 + requeue 超限」的孤儿。"""
     mark_run_ready(master, rdb)
-    set_phase(master, rdb, "fangyuan")
     seed_tasks(master, rdb, finished=True, status="done", finish_reason="pages_exhausted")
     make_dead_running(master, rdb, "gz", "sale", requeue_count=master.MAX_REQUEUE)
     rdb.delete(master.TASK_QUEUE)
 
 
 def test_convergence_endgame_all_done_and_done_key(master, rdb):
-    """41 finished + 1 超限孤儿 → 收尾扫描后 all_done 为真且 done 键写入。
+    """41 finished + 1 超限孤儿 → requeue 后 all_done 为真且 done 键写入。
 
     这是 Airflow Sensor 唯一的放行依据；不成立则 6h 超时、ETL 永不执行。
     """
@@ -439,8 +314,6 @@ def test_convergence_endgame_all_done_and_done_key(master, rdb):
     assert st["all_done"] is True
     assert st["finished_tasks"] == 42
     assert st["done_reason"] == "all_finished"  # 靠真收敛，不是靠 STOP 兜底
-    assert st["stop"] is None
-    assert rdb.get(master.STOP_KEY) is None
     ts = rdb.get(master._run_done_key(RUN))
     assert ts and ts.startswith("20")
     assert rdb.get(master._run_done_reason_key(RUN)) == "all_finished"
@@ -471,7 +344,6 @@ def test_convergence_endgame_over_http_sensor_view(master, rdb):
 def test_convergence_endgame_multiple_orphans(master, rdb):
     """混合终局：pending 孤儿 + 判死孤儿 + 存活 running 各一，最后一个交回后才 all_done。"""
     mark_run_ready(master, rdb)
-    set_phase(master, rdb, "fangyuan")
     seed_tasks(master, rdb, finished=True, status="done", finish_reason="pages_exhausted")
     put_task(master, rdb, "gz", "sale", status="pending", finished="0", finish_reason="")
     make_dead_running(master, rdb, "sz", "sale", requeue_count=master.MAX_REQUEUE)
@@ -480,19 +352,24 @@ def test_convergence_endgame_multiple_orphans(master, rdb):
 
     master.requeue_stale_tasks(rdb)
     st = master.crawl_status(rdb)
-    assert st["finished_tasks"] == 41  # zh 还活着，不该被盖
+    # 41 原始 finished + sz 被 stale_abandoned = 42 中 40 完成；gz pending / zh 存活 仍未完成
+    assert st["finished_tasks"] == 40
     assert st["all_done"] is False
 
     # worker 自己写终态（finish_task 的等价写入）
     put_task(
         master, rdb, "zh", "sale", status="done", finished="1", finish_reason="pages_exhausted"
     )
+    # gz 仍为 pending（被补队等待 worker 领取）；模拟 worker 最终把它跑完
+    put_task(
+        master, rdb, "gz", "sale", status="done", finished="1", finish_reason="pages_exhausted"
+    )
     st = master.crawl_status(rdb)
     assert st["all_done"] is True and st["finished_tasks"] == 42
     assert rdb.get(master._run_done_key(RUN))
 
 
-# ================= 第 6 组：worker 侧 fail_budget 收敛 =================
+# ================= 第 4 组：worker 侧 fail_budget 收敛 =================
 CITY, TYP = "gz", "sale"
 
 
@@ -567,7 +444,6 @@ def test_worker_and_master_share_requeue_counter(worker, master, rdb, monkeypatc
     """worker 与 master 共享同一 requeue_count：两侧交替也只会更早收敛，不会互相续命。"""
     mod = worker(MAX_REQUEUE="3")
     _wire_all_fail(mod, monkeypatch)
-    set_phase(master, rdb, "sale")
 
     _claim(mod, rdb)
     mod.crawl(rdb, CITY, TYP, 5, 999999, 0, str(tmp_path))
