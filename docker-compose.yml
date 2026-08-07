@@ -3,7 +3,7 @@
 # ------------------------------------------------------------------------------
 # 按需接入（Just-in-Time）：组件随业务需要逐步加入，本文件有机增长。
 #   Sprint 0 —— 仅 MySQL 业务源库（模拟金融机构核心业务系统）。
-#   后续组件（Doris / MinIO / Kafka / Flink / Sedona / Superset ...）将在
+#   后续组件（Doris / MinIO / Kafka / Flink / Sedona ...）将在
 #   各自业务需要出现时新增 service，并同步补充 docs/tech/components/ 技术文档。
 #
 # 运行：cp .env.example .env && make up
@@ -37,6 +37,35 @@ services:
       retries: 10
       start_period: 30s
 
+  # --------------------------------------------------------------------------
+  # L5 展示：Superset BI 看板（规划中，考虑接入）
+  #   连接 Doris(ADS 层, MySQL 协议 9030) / MySQL(3306) 作为自助 BI 层；
+  #   与 tools/frontend 驾驶舱互补：驾驶舱=固化 RBAC 决策视图，Superset=探索性分析。
+  #   首次启动需初始化元数据库（见 docs/tech/components/superset.md §4）。
+  # --------------------------------------------------------------------------
+  superset:
+    image: apache/superset:latest   # 生产建议固定具体版本标签
+    container_name: spacefin-superset
+    restart: unless-stopped
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-change-me-in-prod}
+      # 元数据用独立库，避免污染业务库；生产改 PostgreSQL
+      SQLALCHEMY_DATABASE_URI: ${SUPERSET_METADATA_DB:-sqlite:////app/superset_home/superset.db}
+    ports:
+      - "127.0.0.1:${SUPERSET_PORT:-8088}:8088"
+    volumes:
+      - superset-home:/app/superset_home
+    depends_on:
+      - mysql
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
 volumes:
   mysql-data:
     name: spacefin-mysql-data
+  superset-home:
+    name: spacefin-superset-home
