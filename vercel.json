@@ -1,0 +1,12 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "buildCommand": null,
+  "outputDirectory": "tools/frontend/static",
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "https://20.70.128.18.nip.io/api/$1"
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+# spacefin-cdc-consumer.service —— CDC 下游消费链（ODS 变更 → DWS/ADS 增量同步）
+#
+# 与 spacefin-cdc.service 的分工：
+#   spacefin-cdc          binlog → ODS（贴源，不解释语义）
+#   spacefin-cdc-consumer ODS   → DWS/ADS（解释变更，驱动风险重算）
+# 拆成两个 unit 而非一个进程：binlog 读取必须单点常驻（server_id 唯一、位点连续），
+# 一旦下游重算卡住会反压 binlog 消费、拉长位点滞后；分开后下游可独立重启、重放、补跑。
+#
+# 安装（用户级，与 spacefin-cdc 共用同一份 env 文件）：
+#   1) mkdir -p ~/.config/spacefin ~/.config/systemd/user
+#   2) 写 ~/.config/spacefin/cdc.env（勿加引号，systemd 会把引号当值的一部分）：
+#        SPACEFIN_REPO_ROOT=/srv/spacefin-agent
+#        SPACEFIN_CDC_VENV=/srv/spacefin-agent/tools/orchestrator/.venv
+#        SPACEFIN_CDC_CONSUMER_INTERVAL=20     # 可选，轮询间隔秒，默认 20
+#   3) cp deploy/systemd/spacefin-cdc-consumer.service ~/.config/systemd/user/
+#   4) systemctl --user daemon-reload && systemctl --user enable --now spacefin-cdc-consumer
+#   5) 无人登录也要常驻：sudo loginctl enable-linger $USER
+#   前置：spacefin-cdc 已在跑（否则 ods_cdc_log 不会有新事件）；.env 含 MYSQL_ROOT_PASSWORD。
+
+[Unit]
+Description=SpaceFin CDC downstream consumer -> DWS/ADS (S1)
+# 不设 Documentation=：file: URI 必须是绝对路径，而仓库路径因机而异不能硬编码入库
+# （写相对路径 systemd 会报 Invalid URL 并忽略，白白污染 journal）。脚本位置见上方注释。
+After=network-online.target spacefin-cdc.service
+Wants=network-online.target
+# 弱依赖：上游没起来时本服务空转轮询即可，不必强制拉起，避免两个 unit 互相拖垮重启。
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/spacefin/cdc.env
+Environment=SPACEFIN_CDC_CONSUMER_INTERVAL=20
+# ExecStart 的可执行文件不能直接用变量，故用 sh -c 展开 EnvironmentFile 里的路径，
+# 避免把本机绝对路径硬编码进仓库（带本机路径的托管配置不入库）。
+ExecStart=/bin/sh -c 'cd "$SPACEFIN_REPO_ROOT" && exec "$SPACEFIN_CDC_VENV/bin/python" tools/cdc/consumer.py --loop --interval "$SPACEFIN_CDC_CONSUMER_INTERVAL"'
+Restart=always
+RestartSec=5
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=spacefin-cdc-consumer
+
+[Install]
+WantedBy=default.target

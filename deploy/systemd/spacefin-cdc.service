@@ -1,0 +1,34 @@
+# spacefin-cdc.service —— 宿主 MySQL binlog CDC 流（I-01：业务变更 → ODS）
+# 安装（用户级，推荐）：
+#   1) mkdir -p ~/.config/spacefin ~/.config/systemd/user
+#   2) 写 ~/.config/spacefin/cdc.env（勿加引号，systemd 会把引号当值的一部分）：
+#        SPACEFIN_REPO_ROOT=/srv/spacefin-agent
+#        SPACEFIN_CDC_VENV=/srv/spacefin-agent/tools/orchestrator/.venv   # 单一 Python 环境（conda `spark` 或按 tools/orchestrator/requirements.txt 建的 venv）
+#   3) cp deploy/systemd/spacefin-cdc.service ~/.config/systemd/user/
+#   4) systemctl --user daemon-reload && systemctl --user enable --now spacefin-cdc
+#   5) 无人登录也要常驻：sudo loginctl enable-linger $USER
+#   前置：MySQL 容器已启动；.env 含 MYSQL_CDC_USER/MYSQL_CDC_PASSWORD（见 seed 初始化脚本）。
+
+[Unit]
+Description=SpaceFin MySQL binlog CDC -> ODS (I-01)
+# 不设 Documentation=：file: URI 必须是绝对路径，相对路径 systemd 报 Invalid URL 并忽略。
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/spacefin/cdc.env
+# ExecStart 的可执行文件不能直接用变量，故用 sh -c 展开 EnvironmentFile 里的路径，
+# 避免把本机绝对路径硬编码进仓库（带本机路径的托管配置不入库）。
+ExecStart=/bin/sh -c 'cd "$SPACEFIN_REPO_ROOT" && exec "$SPACEFIN_CDC_VENV/bin/python" tools/cdc/main.py'
+Restart=always
+RestartSec=5
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=spacefin-cdc
+
+[Install]
+WantedBy=default.target

@@ -6,7 +6,7 @@
 
 ```bash
 # 1) 本地钩子（Python）
-conda activate spark42
+conda activate spark
 pip install pre-commit
 pre-commit install
 pre-commit install --hook-type commit-msg   # 启用提交信息校验
