@@ -54,7 +54,9 @@ services:
     container_name: spacefin-superset
     restart: unless-stopped
     environment:
-      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-change-me-in-prod}
+      # 演示环境固定 dev key，避免容器重启生成临时 key 导致会话失效；
+      # 生产须用强随机值并通过环境变量 SUPERSET_SECRET_KEY 注入。
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-spacefin-superset-dev-secret-fixed}
       # 元数据用独立库，避免污染业务库；生产改 PostgreSQL
       SQLALCHEMY_DATABASE_URI: ${SUPERSET_METADATA_DB:-sqlite:////app/superset_home/superset.db}
     ports:

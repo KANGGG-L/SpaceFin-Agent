@@ -37,7 +37,7 @@ python deploy/superset/setup_superset.py
 
 可配置环境变量：`SUPERSET_URL` / `SUPERSET_ADMIN` / `SUPERSET_PASSWORD` / `SUPERSET_DORIS_URI`。
 
-> 重复执行幂等：已存在的数据库/数据集会按名复用，图表/仪表盘重建（先清后建见脚本内 TODO）。
+> 幂等说明：数据库 / 数据集按名复用（已存在则直接复用，不重复创建）；但**图表 / 仪表盘不幂等**——`create_chart` / `create_dashboard` 每次执行都会新建（Superset 允许重名），重跑会累积重复图表与仪表盘。建议一次性执行，或在重跑前于 UI 清理旧图表 / 仪表盘。
 
 ## 3. AVM 精度趋势数据
 

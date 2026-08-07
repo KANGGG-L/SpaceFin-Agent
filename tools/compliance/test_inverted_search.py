@@ -45,7 +45,7 @@ def test_table_and_index_exist(prepared):
     try:
         with conn.cursor() as cur:
             cur.execute(f"SHOW TABLES FROM {DATABASE} LIKE '{TABLE}'")
-            assert cur.fetchone() is not None, f"{TABLE} 不应存在"
+            assert cur.fetchone() is not None, f"{TABLE} 应存在"
             cur.execute(f"SHOW INDEX FROM {TABLE}")
             idx = [r[2] for r in cur.fetchall()]
         assert INDEX_NAME in idx, f"倒排索引 {INDEX_NAME} 未建立"

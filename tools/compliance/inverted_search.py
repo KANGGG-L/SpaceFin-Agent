@@ -20,32 +20,23 @@ import time
 
 import pymysql
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 单一真相源：复用湖仓统一配置 tools/lake/config.py（Doris 连接参数），
+# 避免与 config.py 平行重实现导致改端口时两处失同步。
+# 仍允许环境变量 DORIS_* 覆盖（便于 CI / 不同部署环境）。
+from tools.lake.config import DORIS as LAKE_DORIS
 
 
-def _load_env() -> dict:
-    env: dict[str, str] = {}
-    path = os.path.join(REPO_ROOT, ".env")
-    if os.path.exists(path):
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, _, v = line.partition("=")
-                env[k.strip()] = v.strip().strip('"').strip("'")
-    return env
+def _resolve_doris() -> dict:
+    return {
+        "host": os.getenv("DORIS_HOST", LAKE_DORIS["host"]),
+        "port": int(os.getenv("DORIS_QUERY_PORT", str(LAKE_DORIS["query_port"]))),
+        "user": os.getenv("DORIS_USER", LAKE_DORIS["user"]),
+        "password": os.getenv("DORIS_PASSWORD", LAKE_DORIS["password"]),
+        "database": "ads",
+    }
 
 
-_ENV = _load_env()
-
-DORIS = {
-    "host": os.getenv("DORIS_HOST", _ENV.get("DORIS_HOST", "127.0.0.1")),
-    "port": int(os.getenv("DORIS_QUERY_PORT", _ENV.get("DORIS_QUERY_PORT", "9030"))),
-    "user": os.getenv("DORIS_USER", _ENV.get("DORIS_USER", "root")),
-    "password": os.getenv("DORIS_PASSWORD", _ENV.get("DORIS_PASSWORD", "")),
-    "database": "ads",
-}
+DORIS = _resolve_doris()
 
 DATABASE = "ads"
 TABLE = "ads_compliance_audit"

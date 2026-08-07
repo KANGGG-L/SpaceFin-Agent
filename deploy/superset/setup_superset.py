@@ -98,6 +98,14 @@ def ensure_database(token: str, csrf: str) -> int:
 
 
 def ensure_dataset(token: str, csrf: str, db_id: int, table: str, schema: str = "ads") -> int:
+    # 先按 table_name + schema 查重（幂等：已存在则直接复用，避免重跑累积 / 422 崩溃）
+    q = urllib.parse.quote("(page_size:100)")
+    s0, b0 = _req("GET", f"/api/v1/dataset/?q={q}", token)
+    if s0 == 200:
+        for d in b0.get("result", []):
+            if d.get("table_name") == table and d.get("schema") == schema:
+                return d["id"]
+    # 不存在则创建
     status, body = _req(
         "POST",
         "/api/v1/dataset/",
@@ -112,12 +120,11 @@ def ensure_dataset(token: str, csrf: str, db_id: int, table: str, schema: str = 
     if status == 201:
         return body["id"]
     if status == 422:
-        q = urllib.parse.quote(
-            f"(filters:!((col:table_name,opr:eq,value:{table}),(col:schema,opr:eq,value:{schema}))"
-        )
-        s2, b2 = _req("GET", f"/api/v1/dataset/?q={q}", token)
-        if s2 == 200 and b2.get("result"):
-            return b2["result"][0]["id"]
+        # 竞态：查询至创建之间被他人创建 → 重新查一次按 table_name + schema 匹配
+        s1, b1 = _req("GET", f"/api/v1/dataset/?q={q}", token)
+        for d in b1.get("result", []):
+            if d.get("table_name") == table and d.get("schema") == schema:
+                return d["id"]
     raise RuntimeError(f"建数据集 {table} 失败 {status}: {body}")
 
 

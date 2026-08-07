@@ -72,9 +72,11 @@ python deploy/superset/setup_superset.py
 > 连接 Doris 的 URI（容器视角）：`mysql+pymysql://root@host.docker.internal:9030/ads`；
 > 宿主等价：`mysql+pymysql://root@127.0.0.1:9030/ads`。
 
-## 5. 合规（接入前必须解决）
+## 5. 合规（投产前必须解决，当前未落地）
 
-- 复用现有 RBAC 与 PII 脱敏通道（`tools/frontend/data_classification.py` + `ads_export_audit`），Superset 查询 likewise 受控；
+> ⚠️ 下列为**投产前必须满足的合规约束**，当前演示版**尚未实现**（见 §6 诚实标注），不得解读为「已复用 / 已受控」。
+
+- 投产前**必须复用**现有 RBAC 与 PII 脱敏通道（`tools/frontend/data_classification.py` + `ads_export_audit`），Superset 查询须与其同样受控；
 - 看板分享需带权限边界，避免把敏感明细直接暴露给无权限角色；
 - 投产前完成法律审查（同 [anjuke-crawler.md](anjuke-crawler.md) §6）。
 

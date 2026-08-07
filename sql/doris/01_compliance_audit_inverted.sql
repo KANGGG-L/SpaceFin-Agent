@@ -45,6 +45,10 @@ INSERT INTO ads.ads_compliance_audit (id, audit_type, audit_text, biz_id, operat
 -- 在审计文本列上建 Doris 倒排索引（中文分词）
 --   建完索引需 BUILD INDEX 使其在存量数据上生效。
 -- ----------------------------------------------------------------------------
+-- 注：Doris 不支持 `BUILD INDEX IF NOT EXISTS` 语法。本 SQL 为一次性建表/建索引脚本，
+-- 重复 SOURCE 时 ADD INDEX 因 IF NOT EXISTS 安全，但 BUILD INDEX 对已建索引在部分版本
+-- 可能报错。生产环境幂等维护由 Python 路径 tools/compliance/inverted_search.py:
+-- ensure_audit_table（含 _index_exists 守卫）负责，建议优先走该路径。
 ALTER TABLE ads.ads_compliance_audit
   ADD INDEX IF NOT EXISTS idx_audit_text(audit_text) USING INVERTED PROPERTIES("parser" = "chinese");
 
