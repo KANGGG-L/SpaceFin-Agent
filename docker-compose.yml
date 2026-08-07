@@ -3,7 +3,7 @@
 # ------------------------------------------------------------------------------
 # 按需接入（Just-in-Time）：组件随业务需要逐步加入，本文件有机增长。
 #   Sprint 0 —— 仅 MySQL 业务源库（模拟金融机构核心业务系统）。
-#   后续组件（Doris / MinIO / Kafka / Flink / Sedona / Superset ...）将在
+#   后续组件（Doris / MinIO / Kafka / Flink / Sedona ...）将在
 #   各自业务需要出现时新增 service，并同步补充 docs/tech/components/ 技术文档。
 #
 # 运行：cp .env.example .env && make up
@@ -37,6 +37,45 @@ services:
       retries: 10
       start_period: 30s
 
+  # --------------------------------------------------------------------------
+  # L5 展示：Superset BI 看板（已接入基础）
+  #   连接 Doris(ADS 层, MySQL 协议 9030) / MySQL(3306) 作为自助 BI 层；
+  #   与 tools/frontend 驾驶舱互补：驾驶舱=固化 RBAC 决策视图，Superset=探索性分析。
+  #   镜像固定 4.1.2（生产建议固定具体版本标签）。
+  #   首次启动需初始化元数据库（见 docs/tech/components/superset.md §4）。
+  #   注意：容器内 127.0.0.1 指向自身，连宿主 Doris/MySQL 须用 host.docker.internal
+  #   （已加 extra_hosts），对应宿主侧 URI 为 mysql+pymysql://root@127.0.0.1:9030/ads。
+  # --------------------------------------------------------------------------
+  superset:
+    build:
+      context: ./deploy/superset
+      dockerfile: Dockerfile
+    image: spacefin-superset:4.1.2
+    container_name: spacefin-superset
+    restart: unless-stopped
+    environment:
+      # 演示环境固定 dev key，避免容器重启生成临时 key 导致会话失效；
+      # 生产须用强随机值并通过环境变量 SUPERSET_SECRET_KEY 注入。
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-spacefin-superset-dev-secret-fixed}
+      # 元数据用独立库，避免污染业务库；生产改 PostgreSQL
+      SQLALCHEMY_DATABASE_URI: ${SUPERSET_METADATA_DB:-sqlite:////app/superset_home/superset.db}
+    ports:
+      - "127.0.0.1:${SUPERSET_PORT:-8088}:8088"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - superset-home:/app/superset_home
+    depends_on:
+      - mysql
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 90s
+
 volumes:
   mysql-data:
     name: spacefin-mysql-data
+  superset-home:
+    name: spacefin-superset-home

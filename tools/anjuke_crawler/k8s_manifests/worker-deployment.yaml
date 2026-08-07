@@ -42,6 +42,6 @@ spec:
       volumes:
       - name: app-code
         hostPath:
-          # TODO: 改为本仓库在 k8s 节点上的真实路径
-          path: /home/kang/GitHub/SpaceFin-Agent
+          # 必须改为本仓库在 k8s 节点上的绝对路径，否则 Pod 内 /app 为空、worker 启动失败
+          path: /home/kang/GitHub/SpaceFin-Agent  # TODO: 替换为目标节点真实路径后方可 kubectl apply
           type: Directory

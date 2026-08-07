@@ -1,5 +1,7 @@
 export default {
   extends: ["@commitlint/config-conventional"],
+  // 跳过 merge 提交（形如 "Merge xxx: ..."），避免历史 feature 合并提交触发类型检查
+  ignores: [(message) => /^Merge\s/.test(message)],
   rules: {
     // 允许的提交类型（与项目阶段/职责对应）
     "type-enum": [
