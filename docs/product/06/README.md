@@ -32,7 +32,7 @@ SpaceFin-Agent 是**最终交付版本（final deliverable）**，不是 MVP 原
 
 ## 2. 测试结论
 
-- **自动化测试**：15 模块（新增 `tools/compliance` 倒排索引 I-04 真机测试 3 项），共 **646 项**，其中 **645 passed + 1 skipped**（skipped = 活体 Chrome 冒烟测试，`ANJUKE_TEST_LIVE=1` 显式启用，非缺陷）。2026-08-07 全仓实测 **645 passed + 1 skipped**，较 2026-08-05 基线（560 passed）的新增主要来自分支 `feat/inverted-index-superset` 的 I-04 倒排索引检索与既有模块回归补全，**无失败、无回归**。
+- **自动化测试**：15 模块（新增 `tools/compliance` 倒排索引 I-04 真机测试 3 项），共 **646 项**，其中 **645 passed + 1 skipped**（skipped = 活体 Chrome 冒烟测试，`ANJUKE_TEST_LIVE=1` 显式启用，非缺陷）。2026-08-07 全仓实测 **645 passed + 1 skipped**，较 2026-08-05 基线（560 passed）的新增主要来自分支 `feat/inverted-index-superset` 的 I-04 倒排索引检索与既有模块回归补全，**无失败、无回归**。投产加固分支 `feat/superset-prod-hardening` 新增 `deploy/superset/test_superset_compliance.py`（3 项真机断言：视图脱敏形态 / 视图存在 / 审计钩子落库），服务在线时计入、离线时自动 skip。
 - **缺陷分布**：0 P0 / 0 P1 / 5 P2（均已修复并合入 develop）/ 0 P3；本轮（I-04 + Superset）新增 P2-1~P2-3（superset.md §5/§6 合规声明矛盾 / README 虚构「先清后建 TODO」/ `setup_superset.py` 重入 bug）与 P3-1~P3-5，均已在 `feat/inverted-index-superset` 收口（含修复 `ensure_dataset` 422 幂等、真正 `import tools.lake.config` 为单一真相源等）。
 - **用例覆盖**：功能 8/8（TC-01～08）+ 边界 6 项（B-01～06）+ 异常 6 项（E-01～06）+ 回归 R-01～06 范围定义齐备；I-04 倒排索引检索新增 3 项真机断言（表/索引存在、敏感词命中、无关词零误报，检索 4–7ms）。
 
@@ -62,7 +62,7 @@ SpaceFin-Agent 是**最终交付版本（final deliverable）**，不是 MVP 原
 | G7 | 实时反欺诈闭环 | ➖ Non-goals | PRD 明确 Non-goals（L1），仅做预警联动不闭环 |
 | G8 | 生产高可用 / 监控 | ✅ 已交付 | `tools/ops/manage.sh` 已有 `status` + 容器 `unless-stopped` 自拉起；`/metrics` 健康端点 + 告警阈值已加（纯代码）。**实现于 feature/final-buildout（commit f3c9fde）**。多副本 HA / 生产监控栈（Prometheus 等）属外部基础设施依赖 |
 | G9 | Doris 倒排索引审计检索（I-04，L5 合规） | ✅ 已交付 | `sql/doris/01_compliance_audit_inverted.sql` 建 `ads_compliance_audit` + 中文倒排索引（`USING INVERTED, chinese`）；`tools/compliance/inverted_search.py` 提供毫秒级敏感词检索（连接以 `tools/lake/config.py` 为单一真相源）；pytest 3 项真机全绿（检索 4–7ms、敏感词命中、无关词零误报）。**实现于 feat/inverted-index-superset**。生产需由贷后/申请流水持续写入 `ads_compliance_audit` |
-| G10 | Superset BI 看板（L5 展示） | ✅ 已交付 | Superset 4.1.2 已真机拉起（`/health` 200）、连 Doris ADS、经 API 落库 3 图表（资产质量/五级分类/AVM 趋势）+ 1 仪表盘「房产金融风险概览」，与 S5 驾驶舱读同一份数据、口径一致。**实现于 feat/inverted-index-superset**。`setup_superset.py` 已修复数据集幂等（422 按 `table_name+schema` 查重复用）。投产前须复用 RBAC/PII 脱敏约束（见 superset.md §5/§6 诚实标注），元数据库改 PostgreSQL + 强密码 + 固定 `SUPERSET_SECRET_KEY` 为生产前置项 |
+| G10 | Superset BI 看板（L5 展示） | ✅ 已交付 | Superset 4.1.2 已真机拉起（`/health` 200）、连 Doris ADS、经 API 落库 3 图表（资产质量/五级分类/AVM 趋势）+ 1 仪表盘「房产金融风险概览」，与 S5 驾驶舱读同一份数据、口径一致。**投产加固（feat/superset-prod-hardening，2026-08-07）已落地 RBAC/PII/审计**：元数据库改 PostgreSQL、固定 `SUPERSET_SECRET_KEY`、管理员强密码；仅注册 Doris 脱敏视图（`v_*`，PII 同 `mask_value` 口径）；四角色 RBAC（Admin/Risk/DA/Postloan，经 `setup_roles.py` 落地，关闭 Alpha SQL Lab 写）；查询/导出经 `superset_config.py` 钩子写 `spacefin.ads_export_audit`（与驾驶舱同一张审计表）；`deploy/superset/test_superset_compliance.py` 真机断言全绿。 |
 | H4 | 试点行 / 机构试用意向（假设 H4） | ⛔ 外部依赖 | 需真实机构签约 / ≥2 家试点行意向，无法凭代码达成。**诚实声明未达成**（阶段 0 / 阶段 4 Q1·A-01） |
 
 ---

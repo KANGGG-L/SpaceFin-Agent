@@ -1,9 +1,15 @@
-"""Superset 资产导入脚本（I-04/Sprint6 BI 层）。
+"""Superset 资产导入脚本（投产加固 · L5 BI 层）。
 
 在 Superset 已启动并完成 db upgrade / init / create-admin 后运行本脚本：
   1. 连接 Doris ADS 层（mysql+pymysql，容器内经 host.docker.internal:9030）；
-  2. 注册 3 个数据集：ads_risk_class / ads_avm_precision_trend / ads_city_avg_price；
+  2. 注册脱敏视图数据集（仅注册视图，不注册裸明细基表，复用驾驶舱 PII 口径）：
+     v_risk_class / v_avm_precision_trend / v_city_avg_price / v_compliance_audit /
+     v_ltv_alerts_masked（视图定义见 sql/doris/02_superset_pii_views.sql）；
   3. 建 3 个图表 + 1 个示例仪表盘「房产金融风险概览」。
+
+RBAC（四角色映射）走容器内 security_manager（本部署未启用 roles REST 端点）：
+  docker compose exec superset python /app/setup_roles.py
+见 deploy/superset/README.md §2。
 
 运行：python deploy/superset/setup_superset.py
 环境变量：SUPERSET_URL(默认 http://127.0.0.1:8088) / SUPERSET_ADMIN / SUPERSET_PASSWORD
@@ -174,11 +180,15 @@ def main() -> int:
     db_id = ensure_database(token, csrf)
     print(f"[2/4] Doris 数据库连接 id={db_id} ({DORIS_URI})")
 
-    rc = ensure_dataset(token, csrf, db_id, "ads_risk_class")
-    avm = ensure_dataset(token, csrf, db_id, "ads_avm_precision_trend")
-    cap = ensure_dataset(token, csrf, db_id, "ads_city_avg_price")
+    rc = ensure_dataset(token, csrf, db_id, "v_risk_class")
+    avm = ensure_dataset(token, csrf, db_id, "v_avm_precision_trend")
+    cap = ensure_dataset(token, csrf, db_id, "v_city_avg_price")
+    # 受限/脱敏视图也注册为数据集，但 RBAC（setup_roles.py）仅对 admin/risk 等授权可见。
+    ensure_dataset(token, csrf, db_id, "v_compliance_audit")
+    ensure_dataset(token, csrf, db_id, "v_ltv_alerts_masked", schema="ods")
     print(
-        f"[3/4] 数据集: ads_risk_class={rc} ads_avm_precision_trend={avm} ads_city_avg_price={cap}"
+        f"[3/4] 数据集(视图): v_risk_class={rc} v_avm_precision_trend={avm} v_city_avg_price={cap}"
+        " + 受限 v_compliance_audit / v_ltv_alerts_masked(ods)"
     )
 
     c1 = create_chart(

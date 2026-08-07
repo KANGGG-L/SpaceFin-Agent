@@ -1,6 +1,6 @@
 # 组件技术说明 · Superset BI 看板（L5 展示 / BI 层）
 
-> **状态**：✅ 已接入（Superset 4.1.2 已起、连 Doris ADS，3 图表+示例仪表盘已建）
+> **状态**：✅ 已接入 + 投产加固（Superset 4.1.2 已起、连 Doris ADS，3 图表+示例仪表盘已建；PG 元数据 + PII 脱敏视图 + 四角色 RBAC + 审计钩子已落地）
 > **能力地图层级**：L5 展示
 > **引入原则**：按需接入。与既有 `tools/frontend` 零依赖驾驶舱互补——驾驶舱是固化的 RBAC 决策视图，Superset 提供自助式探索性 BI。
 
@@ -72,26 +72,42 @@ python deploy/superset/setup_superset.py
 > 连接 Doris 的 URI（容器视角）：`mysql+pymysql://root@host.docker.internal:9030/ads`；
 > 宿主等价：`mysql+pymysql://root@127.0.0.1:9030/ads`。
 
-## 5. 合规（投产前必须解决，当前未落地）
+## 5. 合规（已落地，投产加固 2026-08-07）
 
-> ⚠️ 下列为**投产前必须满足的合规约束**，当前演示版**尚未实现**（见 §6 诚实标注），不得解读为「已复用 / 已受控」。
+> ✅ 下列合规约束已在 `feat/superset-prod-hardening` 落地，与驾驶舱 `tools/frontend`
+> 同一套 RBAC / PII 脱敏 / 审计通道打通，消除「驾驶舱合规、Superset 裸数」破防。
 
-- 投产前**必须复用**现有 RBAC 与 PII 脱敏通道（`tools/frontend/data_classification.py` + `ads_export_audit`），Superset 查询须与其同样受控；
-- 看板分享需带权限边界，避免把敏感明细直接暴露给无权限角色；
-- 投产前完成法律审查（同 [anjuke-crawler.md](anjuke-crawler.md) §6）。
+- **PII 脱敏视图**：Superset 只注册 Doris 脱敏视图（见 `sql/doris/02_superset_pii_views.sql`），
+  不注册裸明细基表；敏感列按 `data_classification.mask_value` 同口径脱敏
+  （`CONCAT('c****', RIGHT(col,4))`），如 `v_ltv_alerts_masked.customer_id`。
+- **RBAC 四角色**：复用 Superset 原生角色模型（Admin/Risk/DA/Postloan），经容器内
+  `security_manager` 映射数据集/看板权限（Admin 全量；Risk 全 5 视图；DA 限聚合+趋势；
+  Postloan 限贷后脱敏明细），并关闭 Alpha 的 SQL Lab 写权限。落地见 `setup_roles.py`。
+- **审计闭环**：查询/导出经 `superset_config.py` 的 `after_request` 钩子写
+  `spacefin.ads_export_audit`（与驾驶舱同一张表、同字段），合并审计通道。
+- 看板分享须带权限边界；投产前仍建议完成法律审查（同 [anjuke-crawler.md](anjuke-crawler.md) §6）。
 
 ## 6. 诚实标注
 
-**已接入（2026-08-07）**：Superset 4.1.2 已真机拉起，`/health` 返回 200；已连 Doris ADS 并
-建 3 个图表（资产质量概览 / 五级分类分布 / AVM 精度趋势）+ 示例仪表盘「房产金融风险概览」
-（见 `deploy/superset/README.md`）。验证要点：
-- 数据源「Doris ADS」创建成功，3 数据集 + 3 图表 + 1 仪表盘经 API 落库；
-- 在 Superset 容器内对 Doris 直跑三图对应 SQL 均返回真实数据（连接与口径已验证）。
+**已接入 + 投产加固（2026-08-07）**：Superset 4.1.2 已真机拉起，`/health` 返回 200；已连
+Doris ADS 并建 3 图表（资产质量概览 / 五级分类分布 / AVM 精度趋势）+ 示例仪表盘
+「房产金融风险概览」。投产加固（分支 `feat/superset-prod-hardening`）进一步完成：
+- 元数据库改 **PostgreSQL**（`superset-metadata-db` service），固定 `SUPERSET_SECRET_KEY`、
+  管理员强密码（`SUPERSET_PASSWORD`）经 `.env` 注入；
+- **PII 脱敏视图**（`v_*`）作为 Superset 唯一入口，敏感列同口径脱敏；
+- **RBAC 四角色**映射（Admin/Risk/DA/Postloan）+ 关闭 Alpha SQL Lab 写；
+- **审计钩子**写 `spacefin.ads_export_audit`，与驾驶舱合并审计。
+
+验证要点：
+- 数据源「Doris ADS」创建成功，5 个脱敏视图数据集 + 3 图表 + 1 仪表盘经 API 落库；
+- `pytest deploy/superset/test_superset_compliance.py` 真机断言：脱敏视图列形态
+  （`c****{后4位}`）、视图存在、审计钩子落 `ads_export_audit`（全绿）；
+- 容器内对 Doris 直跑三图对应 SQL 均返回真实数据（连接与口径已验证）。
 
 待人工确认 / 已知约束：
 - 通过脚本化 `api/v1/chart/data`（嵌套 `datasource`）调用在 4.1.2 触发
   `QueryContextFactory.create() missing datasource` 的服务端已知 quirk，与 UI 经 slice 解析
   datasource 的路径不同；建议浏览器打开 `http://127.0.0.1:8088` 用 admin 登录人工确认渲染。
-- 看板**未**接既有 RBAC/PII 脱敏（驾驶舱侧已内建）；生产前须复用
-  `tools/frontend/data_classification.py` + `ads_export_audit` 约束，避免敏感明细裸曝（见 §5）。
-- 元数据库为 SQLite、管理员密码为 dev 值，投产前须改 PostgreSQL + 强密码 + 固定 `SUPERSET_SECRET_KEY`。
+- 本部署未启用 `/api/v1/security/roles/` REST 端点，RBAC 经容器内 `security_manager`
+  （`setup_roles.py`）落地，不走 REST。
+- 真实外部依赖（G1 真实数据源 / G3 算法备案 / H4 试点行）见阶段 6 文档，不属本组件范围。

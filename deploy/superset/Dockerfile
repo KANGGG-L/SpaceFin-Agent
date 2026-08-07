@@ -3,5 +3,8 @@
 FROM apache/superset:4.1.2
 
 USER root
+# PyMySQL：Doris 走 MySQL 协议接入必需。
 RUN pip install --no-cache-dir pymysql
+# psycopg2-binary：元数据库改 PostgreSQL 必需，否则 PG URI 启动报驱动缺失。
+RUN pip install --no-cache-dir psycopg2-binary
 USER superset
