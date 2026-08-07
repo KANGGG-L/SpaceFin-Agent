@@ -54,15 +54,26 @@
   维护线程补拉另加**需求闸门**——近 120s 无实际发放则跳过，避免「提取→55s 过期」烧配额）、
   免费池（`spacefin:proxy_pool:free`，仅青果为空时兜底填充；**本轮发放总量上限
   `FREE_BUDGET`（默认 1000）**，到限后本轮不再发免费代理）；为每个 worker 同步 proxy list；
-- **青果 IP 分配**：总量 `QG_BUDGET`=1000/天，sale 阶段 `QG_SALE_BUDGET`=500（青果 + 免费池兜底）、
-  fangyuan 阶段用剩余 500；每城预算按 `BUDGET_TOP_CITIES` 分档（广深各 ~15%，其余 19 城平分），
-  见 compose 的 `IP_BUDGET_SALE/FY_TOP`（75）与 `IP_BUDGET_SALE/FY_OTHER`（18）；
-- leader 初始化 21 城任务到 `spacefin:tasks` 队列，回收心跳超时任务。
+- **青果 IP 分配**：总量 `QG_BUDGET`=1000/天，按城每类型预算由 `try_consume_ip` 单独保障
+  （sale 合计 500 / fangyuan 合计 500，与各城预算之和一致），`QG_SALE_BUDGET` 仅为 `/tasks`
+  回显的**历史观测字段**，不再作为发放闸门；
+  每城预算按 `BUDGET_TOP_CITIES` 分档（广深各 60、其余 19 城各 20），
+  见 compose 的 `IP_BUDGET_SALE/FY_TOP`（60）与 `IP_BUDGET_SALE/FY_OTHER`（20）；
+- **fangyuan 仅用青果（qg only）**：`/proxy/free` 与 `/proxy/random` 对 fangyuan 均不回落免费池，
+  免费池兜底仅限 sale；
+- **调度顺序（2026-08-07 起：按城交错 city-interleave + fangyuan 先执行）**：全 42 任务
+  （21 城 × sale/fangyuan）自 bootstrap 起同时有效并一次性入队，队列顺序为**先全 21 城 fangyuan、
+  再全 21 城 sale**（`[gz_fangyuan, sz_fangyuan, ..., yf_fangyuan, gz_sale, sz_sale, ..., yf_sale]`），
+  worker 从队首领取 → fangyuan 波次优先消耗其 500 qg、再进入 sale 波次（qg 500 + 免费池兜底），
+  不再有全局 sale→fangyuan 阶段切换与阶段闸门；
+- leader 初始化 42 任务到 `spacefin:tasks` 队列，回收心跳超时任务（running 判死先重试、
+  超 `MAX_REQUEUE` 再盖 `stale_abandoned` 终态，保证 42 任务有限步内必全 finished）。
 
 **worker（泛化，N 个）**
 - 启动注册到 `spacefin:workers`；循环 `LPOP spacefin:tasks` 领任务
   `{city, pages, target}`；
-- 取代理优先级：青果池（`/proxy/qg`）→ 免费池（`/proxy/free`）→ Redis proxy list；
+- 取代理：`/proxy/random`（青果优先、青果空则回落免费池；**fangyuan 仅取青果，不回落免费池**）；
+  master 另提供 `/proxy/qg`/`/proxy/free` 直取端点与 Redis proxy list 兜底；
   **代理复用**——一个代理连抓多页（青果 1 IP ≈ 7 页/475 条）直到被拦才换，
   最大化配额利用率；
 - 持续向 `spacefin:task:{city}` 上报 `count` + `worker_hb`（心跳）；

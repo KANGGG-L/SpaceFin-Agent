@@ -56,7 +56,7 @@ def test_bootstrap_resets_run_state(master, rdb):
 
     assert rdb.get(master.STOP_KEY) is None
     assert rdb.get(master.EMPTY_CYCLES_KEY) is None
-    assert rdb.get(master.PHASE_KEY) == "sale"
+    assert rdb.get(master.PHASE_KEY) == "city-interleave"
     assert rdb.get(master.QG_CONSUMED_KEY) is None
     assert rdb.llen(master.TASK_QUEUE) == 0
     assert rdb.get(master.RUN_CURRENT_KEY) == NEW
@@ -123,7 +123,7 @@ def test_first_boot_with_empty_redis(master, rdb):
     """首次启动（无任何状态）：也算新 run，不得因 task hash 不存在而报错。"""
     assert master._bootstrap_run(rdb) is True
     assert rdb.get(master.RUN_CURRENT_KEY) == NEW
-    assert rdb.get(master.PHASE_KEY) == "sale"
+    assert rdb.get(master.PHASE_KEY) == "city-interleave"
     # task hash 不存在的由 init_tasks 创建，此处只需保证预算表已落盘
-    assert int(rdb.get(f"{master.IP_BUDGET_PREFIX}gz:sale")) == 91
-    assert int(rdb.get(f"{master.IP_BUDGET_PREFIX}yf:fangyuan")) == 14
+    assert int(rdb.get(f"{master.IP_BUDGET_PREFIX}gz:sale")) == 60
+    assert int(rdb.get(f"{master.IP_BUDGET_PREFIX}yf:fangyuan")) == 20

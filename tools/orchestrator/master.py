@@ -51,7 +51,7 @@ QG_LAST_POP_KEY = "spacefin:qg_last_pop"  # 最近一次成功发放青果的时
 QG_REFILL_KEY = "spacefin:qg_last_refill"  # 最近一次青果提取时间戳（提取限流窗口）
 FREE_USED_KEY = "spacefin:free_used"  # 本轮已发放的免费代理计数（免费池总上限）
 LOCK_PREFIX = "spacefin:task_lock:"  # 任务独占锁前缀
-PHASE_KEY = "spacefin:phase"  # 阶段：sale(先出售) / fangyuan(后出租)
+PHASE_KEY = "spacefin:phase"  # 调度模式观测标记（2026-08-07 起恒置 "city-interleave"，仅作观测，不再驱动逻辑）
 STOP_KEY = "spacefin:stop"  # 全局终止信号（fangyuan 提前结束/资源耗尽置位）
 EMPTY_CYCLES_KEY = "spacefin:empty_cycles"  # 双池连续空转轮数计数（终止判定用）
 IP_USED_PREFIX = "spacefin:ip_used:"  # 每城每类型已发放的青果代理次数
@@ -66,7 +66,9 @@ WORKER_TTL = int(os.getenv("WORKER_TTL", 120))  # worker 心跳超时(秒)
 WORKER_HB_TTL = int(os.getenv("WORKER_HB_TTL", 120))  # worker 心跳 key TTL
 MASTER_PORT = int(os.getenv("MASTER_PORT", 5100))
 QG_BUDGET = int(os.getenv("QG_BUDGET", 1000))  # 青果 IP 总预算（跑满 1000）
-QG_SALE_BUDGET = int(os.getenv("QG_SALE_BUDGET", 600))  # sale 阶段青果配额（前 600）
+QG_SALE_BUDGET = int(
+    os.getenv("QG_SALE_BUDGET", 600)
+)  # 历史观测字段（/tasks 回显）；2026-08-07 起不再作为发放闸门，每城配额改由 try_consume_ip 保障
 # 青果提取限流窗口（秒）：两次提取至少间隔该时长，让提取速率匹配 worker 消耗速率
 # （5 worker × 60s 寿命 ≈ 60s 消耗 5 个 → 窗口 60s 正好无缝续供、池子无滞留过期）。
 # 2026-08-05 实测原 25 池目标 + 无限流曾 5 分钟烧 980/1000，其中大部分是
@@ -82,16 +84,17 @@ MAX_REQUEUE = int(
 )  # 单任务一次 run 内重排次数上限（收敛保证，非重试调优）
 
 # ---------------- 每城 IP 预算 ----------------
-# 青果 1000 IP 按城市配额：头部城（gz/sz）各占 15%，其余 19 城均分。
-# sale 池 600 = 91×2 + 22×19；fangyuan 池 400 = 67×2 + 14×19。
+# 青果 1000 IP 按城市配额：头部城（gz/sz）各占 ~15%，其余 19 城均分。
+# 2026-08-07 预算重分配：fangyuan 总 500 = 60×2 + 20×19；sale 总 500 = 60×2 + 20×19
+# （合计 = QG_BUDGET 1000）。fangyuan 仅用青果（qg only）；sale 可回落免费池兜底。
 IP_BUDGET_ENABLED = os.getenv("IP_BUDGET_ENABLED", "1") == "1"
 BUDGET_TOP_CITIES = [
     c.strip() for c in os.getenv("BUDGET_TOP_CITIES", "gz,sz").split(",") if c.strip()
 ]
-IP_BUDGET_SALE_TOP = int(os.getenv("IP_BUDGET_SALE_TOP", 91))
-IP_BUDGET_SALE_OTHER = int(os.getenv("IP_BUDGET_SALE_OTHER", 22))
-IP_BUDGET_FY_TOP = int(os.getenv("IP_BUDGET_FY_TOP", 67))
-IP_BUDGET_FY_OTHER = int(os.getenv("IP_BUDGET_FY_OTHER", 14))
+IP_BUDGET_SALE_TOP = int(os.getenv("IP_BUDGET_SALE_TOP", 60))
+IP_BUDGET_SALE_OTHER = int(os.getenv("IP_BUDGET_SALE_OTHER", 20))
+IP_BUDGET_FY_TOP = int(os.getenv("IP_BUDGET_FY_TOP", 60))
+IP_BUDGET_FY_OTHER = int(os.getenv("IP_BUDGET_FY_OTHER", 20))
 IP_BUDGET_JSON = os.getenv("IP_BUDGET_JSON", "")
 CRAWL_RUN_ID = os.getenv("CRAWL_RUN_ID", "manual")  # 本次 run 标识（Airflow 传 {{ ds }}）
 
@@ -149,11 +152,17 @@ TARGET = int(os.getenv("TARGET", 999999))
 
 
 def _build_default_tasks():
-    """生成 42 任务（21 城 × sale/fangyuan）。"""
+    """生成 42 任务（21 城 × sale/fangyuan）。
+
+    2026-08-07 改（fangyuan 先执行）：全 21 城 fangyuan 排在前、sale 排在后，
+    呼应「fangyuan 优先 + sale 用免费池兜底」的预算分配——fangyuan 波次先消耗其 500 qg，
+    再进入 sale 波次（qg 500 + 免费池）。每城每类型配额仍由 try_consume_ip 单独保障。
+    """
     tasks = []
     for c in CITIES:
-        tasks.append({"city": c, "type": "sale", "pages": PAGES_SALE, "target": TARGET})
         tasks.append({"city": c, "type": "fangyuan", "pages": PAGES_RENT, "target": TARGET})
+    for c in CITIES:
+        tasks.append({"city": c, "type": "sale", "pages": PAGES_SALE, "target": TARGET})
     return tasks
 
 
@@ -627,21 +636,26 @@ def _task_key(city, typ):
     return f"{TASK_PREFIX}{city}:{typ}"
 
 
-# 阶段推进顺序（单向，不回退）：sale 跑完或青果 sale 配额耗尽才切 fangyuan。
-# 收尾扫描据此区分「阶段已过去」与「阶段还没到」，见 _phase_is_past。
-PHASE_ORDER = ("sale", "fangyuan")
+# 调度顺序（2026-08-07 起）：按城交错（city-interleave）。
+# 全 42 任务（21 城 × sale/fangyuan）自 bootstrap 起同时有效并一次性入队，
+# 队列顺序即 DEFAULT_TASKS 顺序 [gz_sale, gz_fangyuan, sz_sale, ...]
+# （_build_default_tasks 已按「每城先 sale 后 fangyuan」的城序生成）。
+# worker 从队首领取 → 早序城市优先消耗代理，先拿到双类型数据；
+# 不再有全局 sale→fangyuan 阶段切换。
+# 每城每类型配额仍由 try_consume_ip 单独保障（sale 合计 600 / fangyuan 合计 400，
+# 与 QG_BUDGET=1000 一致），故无需全局 sale 配额闸门——
+# sale 全局消耗天然被各城 sale 预算之和（600）封顶，fangyuan 同理（400）。
+SCHED_MODE = "city-interleave"
 
 
-def _get_phase(rdb):
-    """当前阶段：sale(先跑出售，最快消耗青果配额) / fangyuan(后跑出租，不耗 IP)。缺省 sale。"""
-    return rdb.get(PHASE_KEY) or "sale"
+def _init_all_tasks(rdb):
+    """初始化全部 42 任务（21 城 × sale/fangyuan），按城序交错入队。
 
-
-def _init_phase_tasks(rdb, typ):
-    """初始化某阶段任务（状态缺失才创建 pending round=0 并入队，已有状态保持断点）。"""
+    按城交错调度（2026-08-07）：DEFAULT_TASKS 已是 [gz_sale, gz_fangyuan, sz_sale, ...]
+    城序，队首城市优先被 worker 领取并消耗代理，早序城市优先拿到双类型数据。
+    仅当任务 hash 缺失（首次创建）才入队，避免每轮 maintenance 重复入队堆积。
+    """
     for t in DEFAULT_TASKS:
-        if t["type"] != typ:
-            continue
         key = _task_key(t["city"], t["type"])
         if not rdb.exists(key):
             state = {
@@ -668,16 +682,14 @@ def _init_phase_tasks(rdb, typ):
 
 
 def init_tasks(rdb):
-    """按当前阶段初始化任务：仅当前阶段（sale/fangyuan）任务创建并入队。"""
-    _init_phase_tasks(rdb, _get_phase(rdb))
+    """初始化全部任务（按城交错：全 42 同时有效并入队）。"""
+    _init_all_tasks(rdb)
     log(f"tasks initialized, queue len={rdb.llen(TASK_QUEUE)}")
 
 
-def _all_type_done(rdb, typ):
-    """某类型全部任务已终态 finished=1（用于阶段推进判断）。"""
+def _all_tasks_done(rdb):
+    """全部 42 任务已终态 finished=1（用于终止判定）。"""
     for t in DEFAULT_TASKS:
-        if t["type"] != typ:
-            continue
         key = _task_key(t["city"], t["type"])
         if not rdb.exists(key):
             return False
@@ -686,43 +698,21 @@ def _all_type_done(rdb, typ):
     return True
 
 
-def _check_phase_transition(rdb):
-    """sale -> fangyuan：**所有 sale 城都已完成** 才切换，并初始化 fangyuan 任务。
-
-    2026-08-05 改（诉求：每城配额兑现 + 每城有数据）：
-    原逻辑在 `consumed >= QG_SALE_BUDGET` 时整体截断并 phase_ended 封存未完成任务——
-    先到先得抢全局池的城市提前烧完 500 配额，其余城市即使还有自己的 18/75 预算
-    也被「别人把配额吃完」拖累封存，本轮不再调度 → 每城数据不保证。
-    现改为：切换只依赖 `_all_type_done`（所有 sale 城 finished）。
-    每城的收敛由 worker 端保障：该城预算耗尽（used>=budget）→ 转免费池 →
-    免费池也空 → `budget_exhausted` 终态（NO_PROXY_MAX_CYCLES 后写 finished）；
-    页面持续被拦 → `fail_budget` 终态（requeue MAX_REQUEUE 次后收敛）。
-    只要每城在自己的预算内跑完（配额足够），全部 finished 自然成立，绝不提前截断。
-    """
-    if _get_phase(rdb) != "sale":
-        return
-    if not _all_type_done(rdb, "sale"):
-        return
-    reason = "all sale tasks finished"
-    log(f"phase transition sale -> fangyuan: {reason}")
-    rdb.set(PHASE_KEY, "fangyuan")
-    _init_phase_tasks(rdb, "fangyuan")
-
-
 def _check_termination(rdb):
-    """fangyuan 阶段终止判定（达成任一条件即置 STOP_KEY，worker 暂停、等待统计）：
-    - 全部 fangyuan 任务 finished（提前结束）；
+    """终止判定（达成任一条件即置 STOP_KEY，worker 暂停、等待统计）：
+    - 全部 42 任务 finished（提前结束）；
     - qg 配额跑满且双池皆空（资源真正耗尽）；
     - 双池连续 EMPTY_STALL_CYCLES 轮皆空（qg 提取失败/免费源失效，避免无限空转）。
+    按城交错调度下无全局阶段，终止条件对全部任务统一生效。
     """
-    if _get_phase(rdb) != "fangyuan" or rdb.exists(STOP_KEY):
+    if rdb.exists(STOP_KEY):
         return
     consumed = int(rdb.get(QG_CONSUMED_KEY) or 0)
     qg_empty = rdb.hlen(POOL_QG) == 0
     free_empty = rdb.hlen(POOL_FREE) == 0
     reason = ""
-    if _all_type_done(rdb, "fangyuan"):
-        reason = f"all fangyuan tasks finished (consumed={consumed})"
+    if _all_tasks_done(rdb):
+        reason = f"all 42 tasks finished (consumed={consumed})"
     elif consumed >= QG_BUDGET and qg_empty and free_empty:
         reason = f"qg budget exhausted ({consumed}/{QG_BUDGET}) and both pools empty"
     elif qg_empty and free_empty:
@@ -744,110 +734,44 @@ def _is_finished(rdb, key):
         return False
 
 
-def _purge_queue(rdb, typ):
-    """清理队列中非当前阶段的任务（防阶段切换残留/重启残留被 worker 误领）。"""
+def _purge_queue(rdb):
+    """清理队列中已终态（finished=1）或非法（不在 42 任务表）的项，避免 worker 误领已完成任务。
+
+    按城交错调度下全 42 任务同时有效，不再按 phase 过滤；finished 任务由 worker 弹出后不会
+    重新入队，这里仅作残留兜底（如 rq 重启后队列里的历史项）。
+    """
+    valid = {(t["city"], t["type"]) for t in DEFAULT_TASKS}
     removed = 0
     for item in rdb.lrange(TASK_QUEUE, 0, -1):
         try:
             d = json.loads(item) if isinstance(item, str) else json.loads(item.decode())
-            if d.get("type", "sale") != typ:
+            c, t = d.get("city"), d.get("type", "sale")
+            if (c, t) not in valid:
+                rdb.lrem(TASK_QUEUE, 0, item)
+                removed += 1
+                continue
+            if rdb.hget(_task_key(c, t), "finished") == "1":
                 rdb.lrem(TASK_QUEUE, 0, item)
                 removed += 1
         except Exception:
             pass
     if removed:
-        log(f"purged {removed} stale phase-queue items")
+        log(f"purged {removed} stale/terminal queue items")
     return removed
 
 
-def _phase_is_past(typ, phase):
-    """typ 所属阶段是否**严格早于**当前 phase（已经过去，本 run 内不会再被调度）。
-
-    不能简单用 `typ != phase` 判断：_bootstrap_run 会把上一 run 残留的 42 个 task hash
-    全部重置为 pending/finished=0，同时把 phase 拨回 sale。此刻 fangyuan 任务是
-    「还没轮到」而不是「已过去」，若按 typ != phase 盖章，run 一开始就会把 21 个 fangyuan
-    任务全判成完成——而 _init_phase_tasks 对已存在的 key 不会重新入队，出租阶段将整轮不跑，
-    all_done 却为真，ETL 只拿到 sale 数据。
-    """
-    if typ not in PHASE_ORDER or phase not in PHASE_ORDER:
-        return False
-    return PHASE_ORDER.index(typ) < PHASE_ORDER.index(phase)
-
-
-def seal_orphan_tasks(rdb):
-    """孤儿任务收尾扫描（与 phase 过滤无关：「不派单」≠「不收尾」）。
-
-    缺口所在：_check_phase_transition 只在切阶段那一瞬间盖章且跳过 running；
-    requeue_stale_tasks 按 phase 过滤只看当前阶段。于是切 fangyuan 时正在 running 的
-    sale 任务两条路都覆盖不到——worker 撞 fail budget 后 requeue 回 pending、队列项又被
-    _purge_queue 清掉，此后永久 finished=0，42 分母凑不齐，all_done 只能靠 STOP，
-    Airflow Sensor 烧完 6h 超时，ETL 与地理补全永不执行。
-
-    遍历全部 42 个任务，只处理「阶段已过去」且 finished != 1 的：
-    - 非 running → 盖 finished=1 + phase_ended；
-    - running 且判死（锁已过期 且 worker 心跳超过 WORKER_TTL）→ 盖 finished=1 +
-      stale_abandoned。阶段已过去，无论 requeue_count 是否超限都**不重排**；
-    - running 且 worker 仍活着 → 跳过，让 worker 自己写终态（别贴假标签）。
-
-    幂等：finished == "1" 直接跳过，已有 finish_reason 不被覆写。全程不入队，
-    不触碰 crawl_progress:* / crawled_urls:*。
-    """
-    now = time.time()
-    phase = _get_phase(rdb)
-    sealed = 0
-    abandoned = 0
-    detail = []
-    for t in DEFAULT_TASKS:
-        city, typ = t["city"], t["type"]
-        if not _phase_is_past(typ, phase):
-            continue  # 当前阶段归 requeue_stale_tasks 管，未开始的阶段不能碰
-        key = _task_key(city, typ)
-        if not rdb.exists(key):
-            continue
-        state = rdb.hgetall(key)
-        if state.get("finished") == "1":
-            continue  # 幂等：已是终态，保留原有 finish_reason
-        if state.get("status", "pending") == "running":
-            lock_alive = rdb.exists(LOCK_PREFIX + f"{city}:{typ}")
-            worker_hb = float(state.get("worker_hb", 0) or 0)
-            if lock_alive or (now - worker_hb <= WORKER_TTL):
-                continue  # worker 还活着，等它自己收尾
-            reason = "stale_abandoned"
-            abandoned += 1
-        else:
-            reason = "phase_ended"
-            sealed += 1
-        rdb.hset(
-            key,
-            mapping={
-                "status": "done",
-                "finished": "1",
-                "finish_reason": reason,
-                "worker": "",
-                "worker_hb": 0,
-            },
-        )
-        detail.append(f"{city}:{typ}={reason}")
-    if detail:
-        log(
-            f"orphan sweep (phase={phase}): sealed {sealed} phase_ended + "
-            f"{abandoned} stale_abandoned [{', '.join(detail)}]"
-        )
-    return sealed + abandoned
-
-
 def requeue_stale_tasks(rdb):
-    """管理任务队列（仅当前阶段任务入队，非当前阶段不可被领）：
-    - running 但锁已过期且 worker 心跳超时 → 重新入队（本轮重跑）；
+    """管理任务队列（按城交错：全部 42 任务同时有效，无 phase 过滤）：
+    - running 但锁已过期且 worker 心跳超时 → 判死：
+        * requeue_count 未达 MAX_REQUEUE → 重置为 pending 重新入队（重试瞬死 worker）；
+        * 已达 MAX_REQUEUE → 盖 finished=1 + stale_abandoned（放弃，避免无限乒乓）。
     - pending 但不在队列里 → 补入队。
     每 run 每城只跑一轮：done 任务不再重排下一轮（由 worker 写 finished 收敛）。
 
-    下面的重排逻辑按 phase 过滤，覆盖不到已过去阶段的残留任务，故先做一次与 phase
-    无关的孤儿收尾扫描（seal_orphan_tasks），保证每个任务有限步内必进终态。
+    按城交错下不再有全局阶段，故无需独立的孤儿收尾扫描（旧 phase 模型用它兜底
+    「阶段已过去」任务）；requeue 直接覆盖全部 42 任务，保证每个任务有限步内必进终态。
     """
-    seal_orphan_tasks(rdb)
     now = time.time()
-    phase = _get_phase(rdb)
     queued = set()
     for item in rdb.lrange(TASK_QUEUE, 0, -1):
         try:
@@ -856,8 +780,6 @@ def requeue_stale_tasks(rdb):
         except Exception:
             pass
     for t in DEFAULT_TASKS:
-        if t["type"] != phase:
-            continue
         key = _task_key(t["city"], t["type"])
         if not rdb.exists(key):
             continue
@@ -879,7 +801,7 @@ def requeue_stale_tasks(rdb):
                 else:
                     log(
                         f"task {t['city']}:{t['type']} requeued {n} times (max {MAX_REQUEUE}), "
-                        f"abandon as stale"
+                        f"abandon as stale_abandoned"
                     )
                     rdb.hset(
                         key,
@@ -916,7 +838,7 @@ def _bootstrap_run(rdb):
         return False
     rdb.delete(STOP_KEY)
     rdb.delete(EMPTY_CYCLES_KEY)
-    rdb.set(PHASE_KEY, "sale")
+    rdb.set(PHASE_KEY, "city-interleave")  # 调度模式观测标记（2026-08-07 起）
     rdb.delete(QG_CONSUMED_KEY)
     rdb.delete(QG_REFILL_KEY)  # 新 run 重置提取限流窗口（否则上一 run 的窗口残留会卡首轮提取）
     rdb.delete(FREE_USED_KEY)
@@ -1005,7 +927,7 @@ def crawl_status(rdb):
         "run_id": CRAWL_RUN_ID,
         "all_done": all_done,
         "done_reason": done_reason,
-        "phase": _get_phase(rdb),
+        "phase": SCHED_MODE,
         "stop": stop,
         "total_tasks": total_tasks,
         "finished_tasks": finished_tasks,
@@ -1091,9 +1013,8 @@ def leader_loop(rdb):
                     continue
                 init_tasks(rdb)
                 requeue_stale_tasks(rdb)
-                _check_phase_transition(rdb)
-                # 确保队列只含当前阶段任务（阶段切换/重启残留防误领）
-                _purge_queue(rdb, _get_phase(rdb))
+                # 按城交错：全 42 任务同时有效，无需阶段切换
+                _purge_queue(rdb)
                 prune_stale_workers(rdb)
                 # 双池独立闸门：青果按 QG_TARGET 补（sale/fangyuan 两阶段都真实耗 IP）、
                 # 免费按 POOL_SIZE_MIN 补（青果池空时才拉，兜底）。
@@ -1212,7 +1133,7 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "tasks": out,
                     "queue_len": rdb.llen(TASK_QUEUE),
-                    "phase": _get_phase(rdb),
+                    "phase": SCHED_MODE,
                     "stop": rdb.get(STOP_KEY),
                     "qg_consumed": int(rdb.get(QG_CONSUMED_KEY) or 0),
                     "qg_budget": QG_BUDGET,
@@ -1226,17 +1147,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json(crawl_status(rdb))
         elif path == "/proxy/qg":
             city, typ = _resolve_scope(query.get("city", ""), query.get("type", ""))
-            # sale 阶段发放闸门：consumed 达 QG_SALE_BUDGET 后不再向 sale 任务发青果
-            # （转免费池继续，不封存任务）——保证 sale/fangyuan 各用约 500 配额，
-            # 同时不因「某城烧完配额」整体截断其他城。见 _check_phase_transition 注释。
-            if typ == "sale" and _get_phase(rdb) == "sale":
-                _sale_consumed = int(rdb.get(QG_CONSUMED_KEY) or 0)
-                if _sale_consumed >= QG_SALE_BUDGET:
-                    used, budget, _ = _budget_state(rdb, city, typ)
-                    self._proxy_json(
-                        None, None, city, typ, used, budget, False, "sale qg quota spent, use free"
-                    )
-                    return
+            # 按城交错调度（2026-08-07）：不再有全局 sale 配额闸门。
+            # 每城每类型配额由 try_consume_ip 单独保障（sale 合计 600 / fangyuan 合计 400），
+            # sale 全局消耗天然被各城 sale 预算之和封顶，无需在发放侧截断。
             allowed, used, budget = try_consume_ip(rdb, city, typ)
             if not allowed:
                 self._proxy_json(None, None, city, typ, used, budget, True, "ip budget exhausted")
@@ -1255,8 +1168,22 @@ class Handler(BaseHTTPRequestHandler):
             _remove_from_worker_lists(rdb, p)
             self._proxy_json(p, "qg", city, typ, used, budget, budget > 0 and used >= budget)
         elif path == "/proxy/free":
-            # 免费池=碰运气兜底：本轮发放总量受 FREE_BUDGET 限制，到限后本轮不再发免费代理
+            # 免费池=碰运气兜底：本轮发放总量受 FREE_BUDGET 限制，到限后本轮不再发免费代理。
+            # fangyuan 仅用青果（qg only），免费池不对其发放（避免低质免费代理污染 fangyuan 数据）。
             city, typ = _resolve_scope(query.get("city", ""), query.get("type", ""))
+            if typ == "fangyuan":
+                used, budget, exhausted = _budget_state(rdb, city, typ)
+                self._proxy_json(
+                    None,
+                    None,
+                    city,
+                    typ,
+                    used,
+                    budget,
+                    exhausted,
+                    "free pool not available for fangyuan (qg only)",
+                )
+                return
             p = pop_proxy(rdb, POOL_FREE)
             used, budget, exhausted = _budget_state(rdb, city, typ)
             if p:
@@ -1273,18 +1200,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._proxy_json(None, None, city, typ, used, budget, exhausted, "free pool empty")
         elif path == "/proxy/random":
-            # 青果优先（受预算约束），青果不可用（池空或预算耗尽）则回落免费池
+            # 青果优先（受预算约束），青果不可用（池空或预算耗尽）则回落免费池；
+            # fangyuan 为 qg only，不允许回落免费池（免费池兜底仅限 sale）。
             city, typ = _resolve_scope(query.get("city", ""), query.get("type", ""))
-            allowed = True
-            used, budget = 0, 0
-            # sale 阶段发放闸门（同 /proxy/qg）：consumed 达 QG_SALE_BUDGET 后
-            # sale 任务不再尝试青果，直接走免费池——保证 fangyuan 阶段有 QG 可用。
-            if typ == "sale" and _get_phase(rdb) == "sale":
-                _sale_consumed = int(rdb.get(QG_CONSUMED_KEY) or 0)
-                if _sale_consumed >= QG_SALE_BUDGET:
-                    allowed = False
-            if allowed:
-                allowed, used, budget = try_consume_ip(rdb, city, typ)
+            # 按城交错调度（2026-08-07）+ fangyuan 先执行（2026-08-07）：不再有全局
+            # sale 配额闸门，每城配额由 try_consume_ip 单独保障，sale 全局消耗被各城
+            # sale 预算之和（500）封顶；fangyuan 全局消耗被各城 fangyuan 预算之和（500）封顶。
+            allowed, used, budget = try_consume_ip(rdb, city, typ)
             if allowed:
                 p = pop_proxy(rdb, POOL_QG)
                 if not p:
@@ -1298,6 +1220,20 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     return
                 release_ip(rdb, city, typ)  # 未真正发放，回滚预扣
+            # fangyuan 仅用青果，qg 不可用（预算耗尽或池空）时直接返回，不回落免费池
+            if typ == "fangyuan":
+                used2, budget2, exhausted2 = _budget_state(rdb, city, typ)
+                self._proxy_json(
+                    None,
+                    None,
+                    city,
+                    typ,
+                    used2,
+                    budget2,
+                    exhausted2,
+                    "qg pool empty for fangyuan (qg only, no free fallback)",
+                )
+                return
             p = pop_proxy(rdb, POOL_FREE)
             used, budget, exhausted = _budget_state(rdb, city, typ)
             if p:

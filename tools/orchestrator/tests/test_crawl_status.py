@@ -82,7 +82,7 @@ def test_stale_state_before_bootstrap_is_not_done(master, rdb):
 def test_crawl_status_over_http(master, rdb):
     mark_run_ready(master, rdb)
     seed_tasks(master, rdb, finished=False)
-    rdb.set(f"{master.IP_USED_PREFIX}gz:sale", 91)
+    rdb.set(f"{master.IP_USED_PREFIX}gz:sale", 60)
     rdb.hset(
         master._task_key("gz", "sale"),
         mapping={"finished": "1", "finish_reason": "budget_exhausted", "new_count": 123},
@@ -96,8 +96,8 @@ def test_crawl_status_over_http(master, rdb):
     assert gz_sale == {
         "city": "gz",
         "type": "sale",
-        "budget": 91,
-        "used": 91,
+        "budget": 60,
+        "used": 60,
         "finished": True,
         "reason": "budget_exhausted",
         "rows": 123,
