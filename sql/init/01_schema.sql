@@ -46,6 +46,13 @@ CREATE TABLE IF NOT EXISTS collateral (
   commute_min               DOUBLE         NULL         COMMENT '通勤时长(分钟)',
   is_high_risk_zone         TINYINT        NULL         COMMENT '是否落入高危区 1/0',
   spatial_feat_missing_pct  DECIMAL(4, 2)  NULL         COMMENT '空间特征缺失率(0-1)',
+  hall                      TINYINT        NULL         COMMENT '客厅数量(AVM 推理特征)',
+  bath                      TINYINT        NULL         COMMENT '卫生间数量(AVM 推理特征)',
+  bedrooms                  TINYINT        NULL         COMMENT '卧室数量=rooms(AVM 推理特征)',
+  floor_level               SMALLINT       NULL         COMMENT '所在楼层(AVM 推理特征)',
+  floor_total               SMALLINT       NULL         COMMENT '总楼层(AVM 推理特征)',
+  direction                 VARCHAR(8)     NULL         COMMENT '朝向 南/北/东/西/...(AVM 推理特征)',
+  parking                   TINYINT        NULL         COMMENT '车位 0/1(AVM 推理特征)',
   PRIMARY KEY (collateral_id)
 ) ENGINE = InnoDB COMMENT = '抵押物(房产)主档 + 空间特征 · 合成数据';
 

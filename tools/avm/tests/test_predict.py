@@ -15,7 +15,16 @@ IDX = {
     "area": 0,
     "log_area": 1,
     "bed": 2,
+    "hall": 3,
+    "bath": 4,
+    "rooms": 5,
+    "area_per_bed": 6,
     "age": 7,
+    "floor_level": 8,
+    "floor_total": 9,
+    "floor_ratio": 10,
+    "direction": 11,
+    "parking": 12,
     "city_code": 13,
     "lat": 14,
     "lng": 15,
@@ -36,6 +45,19 @@ COMM_MED = 48000.0
 COMM_MEAN = 50000.0
 COMM_N = 20
 AREA = 89.5
+
+# 推理侧必须具备真实值的 9 维特征（hall/bath/floor_level/floor_total/parking 必填，
+# direction 文本编码为数值，rooms/area_per_bed/floor_ratio 由 bed/hall/bath/floor 派生）。
+# estimate_total_price 要求 hall/bath/floor_level/floor_total/parking 非空，否则报 ValueError。
+FEATURES = dict(
+    hall=1,
+    bath=1,
+    floor_level=1,
+    floor_total=18,
+    direction="南",
+    parking=1,
+    bedrooms=3,
+)
 
 
 def _row(model):
@@ -69,14 +91,18 @@ def test_estimate_returns_none_when_input_insufficient(model, city, area, why):
 
 def test_known_community_returns_smoothed_comm_median_times_area(model):
     """小区命中：总价 = EB 收缩后的小区中位 × 面积（smooth_k=10, n=20 → 46000）。"""
-    v = predict.estimate_total_price(model, city_code="gz", community="天河城", area_sqm=AREA)
+    v = predict.estimate_total_price(
+        model, city_code="gz", community="天河城", area_sqm=AREA, **FEATURES
+    )
     assert v == pytest.approx(46000.0 * AREA, abs=0.01)
 
 
 def test_known_community_without_smoothing_uses_raw_comm_median():
     """smooth_k=0（老模型/不收缩）时用原始小区中位。"""
     m = make_model(smooth_k=0.0)
-    v = predict.estimate_total_price(m, city_code="gz", community="天河城", area_sqm=AREA)
+    v = predict.estimate_total_price(
+        m, city_code="gz", community="天河城", area_sqm=AREA, **FEATURES
+    )
     assert v == pytest.approx(COMM_MED * AREA, abs=0.01)
     assert _row(m)[IDX["comm_median"]] == pytest.approx(COMM_MED)
 
@@ -84,14 +110,16 @@ def test_known_community_without_smoothing_uses_raw_comm_median():
 def test_eb_mode_uses_per_city_shrinkage_k():
     """smooth_mode=eb 时按城市读 encoders.eb_k（老产物无此键 → 视为 fixed）。"""
     m = make_model(smooth_k=10.0, smooth_mode="eb", eb_k={"gz": 5.0})
-    v = predict.estimate_total_price(m, city_code="gz", community="天河城", area_sqm=AREA)
+    v = predict.estimate_total_price(
+        m, city_code="gz", community="天河城", area_sqm=AREA, **FEATURES
+    )
     exp_med = (COMM_N * COMM_MED + 5.0 * GZ_CITY_MED) / (COMM_N + 5.0)
     assert v == pytest.approx(exp_med * AREA, abs=0.01)
 
 
 def test_unknown_community_falls_back_to_city_median(model):
     """小区未知：comm 特征置空，模型收到城市中位 → 总价 = 城市中位 × 面积。"""
-    v = predict.estimate_total_price(model, city_code="gz", area_sqm=AREA)
+    v = predict.estimate_total_price(model, city_code="gz", area_sqm=AREA, **FEATURES)
     assert v == pytest.approx(GZ_CITY_MED * AREA, abs=0.01)
     row = _row(model)
     assert np.isnan(row[IDX["comm_mean"]])
@@ -102,7 +130,9 @@ def test_unknown_community_falls_back_to_city_median(model):
 
 def test_unknown_city_falls_back_to_global_median(model):
     """城市未知：city 编码退化为 (g, g, 0)，模型收到全局中位 → 总价 = 全局中位 × 面积。"""
-    v = predict.estimate_total_price(model, city_code="zz", community="天河城", area_sqm=AREA)
+    v = predict.estimate_total_price(
+        model, city_code="zz", community="天河城", area_sqm=AREA, **FEATURES
+    )
     assert v == pytest.approx(GLOBAL_MED * AREA, abs=0.01)
     row = _row(model)
     assert row[IDX["city_code"]] == -1.0  # 未见类别码（HistGBR 容忍）
@@ -115,7 +145,9 @@ def test_legacy_artifact_without_smooth_k_still_works():
     """老产物无 smooth_k 键 → 视为不收缩（向后兼容），不抛异常。"""
     m = make_model()
     del m["smooth_k"]
-    v = predict.estimate_total_price(m, city_code="gz", community="天河城", area_sqm=AREA)
+    v = predict.estimate_total_price(
+        m, city_code="gz", community="天河城", area_sqm=AREA, **FEATURES
+    )
     assert v == pytest.approx(COMM_MED * AREA, abs=0.01)
 
 
@@ -129,9 +161,9 @@ def test_area_and_attributes_forwarded_into_row(model):
         community="天河城",
         area_sqm=AREA,
         building_age=8,
-        bedrooms=3,
         latitude=23.13,
         longitude=113.32,
+        **FEATURES,
     )
     row = _row(model)
     assert row[IDX["area"]] == pytest.approx(AREA)
@@ -140,17 +172,75 @@ def test_area_and_attributes_forwarded_into_row(model):
     assert row[IDX["age"]] == pytest.approx(8.0)
     assert row[IDX["lat"]] == pytest.approx(23.13)
     assert row[IDX["lng"]] == pytest.approx(113.32)
+    # 9 维特征（hall/bath/rooms/area_per_bed/floor_level/floor_total/floor_ratio/
+    # direction/parking）必须由调用方提供真实值，构造与 train.py 完全一致的特征向量。
+    assert row[IDX["hall"]] == pytest.approx(1.0)
+    assert row[IDX["bath"]] == pytest.approx(1.0)
+    assert row[IDX["rooms"]] == pytest.approx(5.0)  # bed(3)+hall(1)+bath(1)
+    assert row[IDX["area_per_bed"]] == pytest.approx(AREA / 3.0)
+    assert row[IDX["floor_level"]] == pytest.approx(1.0)
+    assert row[IDX["floor_total"]] == pytest.approx(18.0)
+    assert row[IDX["floor_ratio"]] == pytest.approx(1.0 / 18.0)
+    assert row[IDX["direction"]] == pytest.approx(0.0)  # DIR_IDX["南"]
+    assert row[IDX["parking"]] == pytest.approx(1.0)
+    for name in (
+        "hall",
+        "bath",
+        "rooms",
+        "area_per_bed",
+        "floor_level",
+        "floor_total",
+        "floor_ratio",
+        "direction",
+        "parking",
+    ):
+        assert not np.isnan(row[IDX[name]]), f"{name} 不应为 NaN"
     assert row.shape == (28,)
 
 
 def test_partial_coords_treated_as_no_coords(model):
     """只有单边坐标视为无坐标（训练侧同口径），lat/lng 置 NaN。"""
     predict.estimate_total_price(
-        model, city_code="gz", area_sqm=AREA, latitude=23.13, longitude=None
+        model, city_code="gz", area_sqm=AREA, latitude=23.13, longitude=None, **FEATURES
     )
     row = _row(model)
     assert np.isnan(row[IDX["lat"]])
     assert np.isnan(row[IDX["lng"]])
+
+
+# ================================================================ 特征错位修复回归
+
+
+def test_nine_features_are_non_nan_when_provided(model):
+    """回归钉子：推理侧必须与训练侧同特征向量，9 维不得静默置 NaN。"""
+    predict.estimate_total_price(
+        model, city_code="gz", community="天河城", area_sqm=AREA, **FEATURES
+    )
+    row = _row(model)
+    for name in (
+        "hall",
+        "bath",
+        "rooms",
+        "area_per_bed",
+        "floor_level",
+        "floor_total",
+        "floor_ratio",
+        "direction",
+        "parking",
+    ):
+        assert not np.isnan(row[IDX[name]]), f"{name} 不应为 NaN（特征错位已修复）"
+
+
+def test_missing_required_feature_raises_not_silent_nan():
+    """缺陷修复：hall/bath/floor_level/floor_total/parking 缺失时显式报错，
+    而不是静默把 9 维置 NaN 制造特征错位。调用方应捕获后回退下一级估值。"""
+    model = make_model()
+    base = dict(city_code="gz", community="天河城", area_sqm=AREA)
+    for miss in ("hall", "bath", "floor_level", "floor_total", "parking"):
+        kw = dict(FEATURES)
+        del kw[miss]  # 模拟调用方无此来源
+        with pytest.raises(ValueError):
+            predict.estimate_total_price(model, **base, **kw)
 
 
 # ================================================================ load_model

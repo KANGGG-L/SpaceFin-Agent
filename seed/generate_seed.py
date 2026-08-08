@@ -429,6 +429,20 @@ def gen_collaterals(n, seed=2):
         else:
             missing_pct = rng.uniform(0.75, 0.98)
 
+        # 户型/楼层/朝向/车位特征（AVM 推理所需，原未落库 → 现合成并持久化）。
+        # 用独立 Random 实例（与 i 绑定），不扰动主 rng 序列，保证 true_market_price
+        # / spatial_feat_missing_pct 等既有字段在重新生成 seed 时完全不变。
+        # floor 口径与 AVM 训练/推理一致（tools/avm/attribution.py）：floor_level=
+        # 层段（低/中/高 → 0/1/2），floor_total=总层数；爬虫「高层(共32层)」即此语义。
+        attr = random.Random(7 + i)
+        hall_n = attr.choice([1, 1, 2])
+        bath_n = attr.choice([1, 1, 2, 3])
+        bedrooms_n = max(1, min(5, round(area / 35) + attr.choice([-1, 0, 0, 1])))
+        floor_total_n = attr.randint(6, 33)
+        floor_level_n = attr.choice([0, 1, 2])  # 层段，对齐 AVM 训练特征空间
+        direction_n = attr.choice(["南", "北", "东", "西", "东南", "西南", "东北", "西北"])
+        parking_n = attr.choice([0, 1, 1])
+
         rows.append(
             {
                 "collateral_id": 20000 + i,
@@ -442,6 +456,13 @@ def gen_collaterals(n, seed=2):
                 "commute_min": rng.uniform(10, 90),
                 "is_high_risk_zone": 1 if rng.random() < 0.15 else 0,
                 "spatial_feat_missing_pct": round(missing_pct, 2),
+                "hall": hall_n,
+                "bath": bath_n,
+                "bedrooms": bedrooms_n,
+                "floor_level": floor_level_n,
+                "floor_total": floor_total_n,
+                "direction": direction_n,
+                "parking": parking_n,
             }
         )
     return rows
@@ -600,8 +621,9 @@ def to_sql(customers, collaterals, loans):
         (
             "({collateral_id}, {addr}, {lat:.6f}, {lng:.6f}, {area:.6f}, {age:.6f}, "
             "{true_market_price:.2f}, {poi_density:.6f}, {commute_min:.6f}, "
-            "{is_high_risk_zone}, {spatial_feat_missing_pct:.2f})"
-        ).format(addr=_sql_str(c["property_addr"]), **c)
+            "{is_high_risk_zone}, {spatial_feat_missing_pct:.2f}, {hall}, {bath}, "
+            "{bedrooms}, {floor_level}, {floor_total}, {direction_sql}, {parking})"
+        ).format(addr=_sql_str(c["property_addr"]), direction_sql=_sql_str(c["direction"]), **c)
         for c in collaterals
     ]
     parts.append(
@@ -619,6 +641,13 @@ def to_sql(customers, collaterals, loans):
                 "commute_min",
                 "is_high_risk_zone",
                 "spatial_feat_missing_pct",
+                "hall",
+                "bath",
+                "bedrooms",
+                "floor_level",
+                "floor_total",
+                "direction",
+                "parking",
             ],
             coll_vals,
         )
@@ -739,8 +768,10 @@ def _load_to_mysql(customers, collaterals, loans):
         )
         cur.executemany(
             "INSERT INTO collateral (collateral_id, property_addr, lat, lng, area, age, "
-            " true_market_price, poi_density, commute_min, is_high_risk_zone, spatial_feat_missing_pct) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            " true_market_price, poi_density, commute_min, is_high_risk_zone, "
+            " spatial_feat_missing_pct, hall, bath, bedrooms, floor_level, floor_total, "
+            " direction, parking) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             [
                 (
                     c["collateral_id"],
@@ -754,6 +785,13 @@ def _load_to_mysql(customers, collaterals, loans):
                     c["commute_min"],
                     c["is_high_risk_zone"],
                     c["spatial_feat_missing_pct"],
+                    c["hall"],
+                    c["bath"],
+                    c["bedrooms"],
+                    c["floor_level"],
+                    c["floor_total"],
+                    c["direction"],
+                    c["parking"],
                 )
                 for c in collaterals
             ],
