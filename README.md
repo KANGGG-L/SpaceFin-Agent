@@ -29,7 +29,7 @@
 | 2    | 技术上是否可行？             | 技术评估 + 效果基线                    | 数据底座 PoC 代码                         | ✅ 已完成                                    | [docs/product/02/](docs/product/02/README.md)                                        |
 | 3    | 具体做成什么样？             | PRD（含验收标准）                      | 核心功能原型实现                          | ✅ 已完成                                    | [docs/product/03/](docs/product/03/README.md)                                        |
 | 4    | 设计和技术方案对齐了吗？     | 评审纪要、待确认清单、设计规范         | 设计/研发评审材料（已组织评审回填）       | ✅ 材料+纪要已产出（结论待干系人确认）       | [docs/product/04/](docs/product/04/README.md)                                        |
-| 5    | 测试验收与开发是否在轨道上？ | 测试用例、验收清单、上线风险、开发计划 | 测试框架 + 全量执行（8/8 AC 绿、560 测试通过） | ✅ 已完成                                    | [docs/product/05/](docs/product/05/README.md) · [docs/开发计划.md](docs/开发计划.md) |
+| 5    | 测试验收与开发是否在轨道上？ | 测试用例、验收清单、上线风险、开发计划 | 测试框架 + 全量执行（8/8 AC 绿、645 passed / 1 skipped，共 646 收集） | ✅ 已完成                                    | [docs/product/05/](docs/product/05/README.md) · [docs/开发计划.md](docs/开发计划.md) |
 | 6    | 上线复盘                     | 复盘报告、交付缺口清单               | 阶段 6 复盘 + 最终版补齐（G2/G4/G5/G8 已交付） | ✅ 已完成                                    | [docs/product/06/](docs/product/06/README.md)                                        |
 
 ## 方法论：从构想走向落地
@@ -48,7 +48,7 @@
 ├── 阶段 2 ✅ 技术可行性 → 数据底座 PoC（已完成）
 ├── 阶段 3 ✅ PRD + 核心功能原型（已完成）
 ├── 阶段 4 ✅ 设计与研发评审（材料 + 评审纪要已产出）
-├── 阶段 5 ✅ 测试验收（8/8 AC 全绿、560 自动化测试通过）
+├── 阶段 5 ✅ 测试验收（8/8 AC 全绿、645 passed / 1 skipped，共 646 收集）
 └── 阶段 6 ✅ 上线复盘（交付缺口已清点，可行项已补齐）
 ```
 
@@ -65,7 +65,7 @@
 | Redis 任务队列                              | 采集中间件                       | ✅ 代码集成                                                                                                | 数据源探索  | [redis-task-queue.md](docs/tech/components/redis-task-queue.md)                                                                                  |
 | jhao104/proxy_pool 代理池                   | 采集反爬（IP 轮换）              | ✅ 客户端集成                                                                                              | 数据源探索  | [proxy-pool.md](docs/tech/components/proxy-pool.md)                                                                                              |
 | 容器编排采集系统                             | 分布式调度 + 宿主渲染            | ✅ 已接入                                                                                                  | 数据源探索  | [crawler-orchestrator.md](docs/tech/components/crawler-orchestrator.md)                                                                          |
-| Airflow 外层编排                             | 每日定时触发 + 收尾（DAG 00:30） | ✅ 已接入                                                                                                  | 数据源探索  | [airflow/README.md](airflow/README.md) · [airflow.md](docs/tech/components/airflow.md)                                                           |
+| Airflow 外层编排                             | 每日定时触发 + 收尾（DAG 00:30）+ 故障韧性（失败派发 / 采集闸门 / 严格排空 / 终态审计，默认关） | ✅ 已接入                                                                                                  | 数据源探索  | [airflow/README.md](airflow/README.md) · [airflow.md](docs/tech/components/airflow.md)                                                           |
 | ETL 数据管道                                 | 跨日去重 + DWD 入库 + ODS 湖     | ✅ 已接入                                                                                                  | Sprint 1    | [crawler-etl.md](docs/tech/components/crawler-etl.md)                                                                                            |
 | Kubernetes 横向扩展（可选）                  | 采集横向扩展（K8s 替代路径）     | ⏸ 清单已备（hostPath 待改），待 K8s 集群                                                  | 数据源探索  | [k8s-crawler-cluster.md](docs/tech/components/k8s-crawler-cluster.md)                                                                            |
 | MySQL binlog CDC（I-01）                     | L0 变更接入                      | ✅ 已接入                                                                                                  | Sprint 1    | [cdc-downstream.md](docs/tech/components/cdc-downstream.md)                                                                                      |
@@ -75,7 +75,7 @@
 | AVM（GBDT+空间特征）                         | L3                               | ✅ 已接入（精度@覆盖率：45% 覆盖 MAPE 9.88% ≤10% 达标；全量 14.59%；基线 20.6%）      | Sprint 2    | [avm.md](docs/tech/components/avm.md) · [tools/avm/README.md](tools/avm/README.md) · [cdc-downstream.md](docs/tech/components/cdc-downstream.md) |
 | 风险引擎（LTV 两档预警 / 五级分类 / 低置信） | L3                               | ✅ 已接入（LTV 警示线 0.75 / 强预警线 0.85，均可配置，等号边界严格大于不触发；低置信：空间特征缺失率 >75） | Sprint 2    | [risk-engine.md](docs/tech/components/risk-engine.md)                                                                                            |
 | L2 空间特征（高危区/POI/通勤）               | L2                               | ✅ 已接入（单机近似，降级 Sedona）                                                                         | Sprint 3    | [spatial-feature.md](docs/tech/components/spatial-feature.md)                                                                                    |
-| 预警推送（I-05 贷后保全）                    | L4 应用接口                      | ✅ 已接入（T+1 推送）                                                                                      | Sprint 4    | [alerting-iv05.md](docs/tech/components/alerting-iv05.md)                                                                                        |
+| 预警推送（I-05 贷后保全）                    | L4 应用接口                      | ✅ 已接入（T+1 推送：site_inbox + 文件 + 可选 postloan_http webhook；Airflow 已排程）                     | Sprint 4    | [alerting-iv05.md](docs/tech/components/alerting-iv05.md)                                                                                        |
 | 1104 报送（G11 三出口校验）                  | L5 合规                          | ✅ 已接入                                                                                                  | Sprint 4    | [reporting-1104.md](docs/tech/components/reporting-1104.md)                                                                                      |
 | 前端驾驶舱（S5）                             | L5 展示                          | ✅ 已接入（端口 8500，零依赖插件架构）                                                                     | Sprint 5    | [frontend.md](docs/tech/components/frontend.md) · [frontend README](tools/frontend/README.md)                                                    |
 | 运维（容器恢复 + 资源管家）                  | 运维                             | ✅ 已接入                                                                                                  | —           | [ops.md](docs/tech/components/ops.md)                                                                                                            |
@@ -84,21 +84,30 @@
 
 > 注：采集横向扩展当前由「容器编排采集系统」（master 主备 + 多 worker + Redis 任务队列）提供，已 ✅ 接入；上表「Kubernetes 横向扩展」为可选的更大规模 K8s 路径，本环境无 K8s 集群，且 worker 清单 `hostPath` 须改为节点真实路径后方可 `kubectl apply`。
 
-## 当前状况（采集系统）
+### 工作流加固（DAG 故障韧性）
 
-自研的容器编排采集系统（`tools/orchestrator/`）已完成开发与功能验证，能力层面满足要求：
+日终 DAG `guangdong_daily_crawl` 在「拉起 + 盯完成 + 收尾」之外，补充了四类故障韧性能力（内部代号 G1–G4），**默认关、仅告警不挡**，避免单点故障误杀整条日终链路：
+
+- **G1 失败派发**：任意任务失败触发 `on_failure_callback`，向 Slack incoming-webhook 推送告警，文案覆盖**产品 / 开发 / QA / 审核**四角色；仅配置 `SPACEFIN_ALERT_SLACK_WEBHOOK` 后生效。
+- **G2 采集质量闸门**（`crawl_quality_gate`）：统计当日新增爬取行数，低于软下限告警放行、低于硬下限默认告警放行（`SPACEFIN_CRAWL_GATE_STRICT=1` 才拦停 ETL）。
+- **G3 严格排空**（`drain_workers`）：排空遇非预期残工默认尽力告警，`SPACEFIN_DRAIN_STRICT=1` 才抛错。
+- **G4 终态失败审计**（`alerting_audit`）：推送后只读核查 `ads_alert_dispatch` 终态失败并告警——I-05 送达终态失败对 on-call 不可见，补一步审计。
+
+实现见 `tools/orchestrator/slack_notify.py`、`tools/orchestrator/crawl_quality_gate.py`、`tools/alerting/audit_final_failed.py`；配置项见 `.env.example`。
+
+## 采集系统现状与落地
+
+自研容器编排采集系统（`tools/orchestrator/`）已完成开发与功能验证，能力层面满足要求；主体（调度 / 每城 IP 预算 / 增量断点续爬 / ETL / Airflow 编排 / Linux 新机部署）已合入 dev，剩余为补充代理配额后的全量重跑验收。
 
 - **调度架构**：master 主备（Redis 抢锁选主，standby 自动接管）+ 5 个泛化 worker + 宿主渲染服务，无第三方调度框架依赖。
 - **代理体系**：双代理池（青果 qg 短效 1000 配额优先 + 免费池兜底），按缺口小批量补拉；全程强制走 IP 池，渲染服务对无代理请求返回 403，杜绝直连宿主 IP。
-- **外层编排**：已接入 Airflow（DAG `guangdong_daily_crawl`，每天 00:30 触发），只做「拉起 + 盯完成 + 收尾」，不替换 Redis 实时派单。
+- **外层编排**：已接入 Airflow（DAG `guangdong_daily_crawl`，每天 00:30 触发），只做「拉起 + 盯完成 + 收尾」，不替换 Redis 实时派单；其故障韧性见上「工作流加固」。
 - **ETL 管道**：已落地（DWD 入库 + ODS 数据湖 Parquet + geocode 异步最终一致补全，跨日去重与市场留存指标）。
-- **全量运行结果（青果配额充足时实测）**：sale（出售）21 城 186,635 行 / 出数页率 99.2%；fangyuan（出租）链路修复后出数页率提升 11.8 倍（2.82%→33.33%），页均产出 18.27 行。
+- **全量运行结果（青果配额充足时实测）**：sale 21 城 186,635 行 / 出数页率 99.2%；fangyuan 出数页率提升 11.8 倍（2.82%→33.33%），页均产出 18.27 行。
 - **空转根因修复（7 项全落地）**：fangyuan 分页越界、验证码误判空页、Chrome 空壳页识别（66 样本零错判）、探针自伤 pkill、fd 上限、补池重试、渲染槽并发。
-- **当前瓶颈（外部资源依赖）**：采集能力已就绪并通过验证，但持续全量爬取依赖代理配额——青果 qg 短效 1000 配额已耗尽，免费池出口 IP 被反爬验证码墙标记（通过率实测 0%）。待补充代理配额后全量重跑（Linux 新机迁移部署已实现，可作为获取未被标记出口 IP 的备选路径）。
+- **当前瓶颈（外部资源依赖）**：采集能力就绪并通过验证，但持续全量爬取依赖代理配额——青果 qg 短效 1000 配额已耗尽，免费池出口 IP 被反爬验证码墙标记（通过率实测 0%）。待补充代理配额后全量重跑（Linux 新机迁移部署已实现，可作为获取未被标记出口 IP 的备选路径）。
 
-## 落地与迁移（采集系统）
-
-采集系统主体（调度 / 每城 IP 预算 / 增量断点续爬 / ETL / Airflow 编排 / Linux 新机部署）已实现并合入 dev；剩余为补充代理配额后的全量重跑验收：
+落地验收清单：
 
 | 项                                                            | 状态                    |
 | ------------------------------------------------------------- | ----------------------- |
@@ -108,6 +117,7 @@
 | 每城 IP 预算（sale 600 / fangyuan 400+免费池，广深 15%）      | ✅ 已实现               |
 | 增量断点续爬 + 回扫头部 2-3 页                                | ✅ 已实现               |
 | Linux 新机部署（launchd → systemd、Airflow 同机、环境装依赖） | ✅ 已实现               |
+| 工作流加固（失败派发 / 采集闸门 / 严格排空 / 终态审计，默认关）| ✅ 已实现               |
 
 > ✅ **渲染链路已验证**：fangyuan 渲染依赖宿主 Chrome。容器 Chrome（Linux/headless）曾被反爬按指纹软拦截（返回空心壳页，无 `zu-itemmod`），但空壳页识别已落地（66 样本零错判），且 `tools/orchestrator/render_smoke_test.sh`（`/render` 拿 zu-itemmod）已通过（sale 21 城 186,635 行 / fangyuan 出数页率 2.82%→33.33%）。新机部署仍建议先跑一次渲染冒烟测试，但此项已非「未实测」风险。
 
@@ -200,6 +210,7 @@ nohup tools/orchestrator/.venv/bin/python tools/frontend/app.py \
 - PII 脱敏通道（脚本级脱敏 + `ads_export_audit` 审计，AC-06 实测 0 泄漏）
 - 生产健康端点 `/api/metrics` + `manage.sh health`（G8）
 - 分布式空间架构演示（G5）
+- 工作流加固：DAG 失败派发（四角色 Slack）/ 采集质量闸门 / 严格排空 / 终态审计（内部代号 G1–G4，默认关、warn-only；与上方「数据分类 G2」编号不同源，仅作代码 / 提交追溯用）
 
 **亮点 / 已实证**：
 

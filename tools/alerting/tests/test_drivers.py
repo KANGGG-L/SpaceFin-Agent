@@ -36,7 +36,13 @@ def test_make_driver_builds_builtin_drivers_by_name(tmp_path):
 
     assert isinstance(drivers.make_driver("site_inbox", conn=FakeConn()), drivers.SiteInboxDriver)
     assert isinstance(drivers.make_driver("file", out_dir=str(tmp_path)), drivers.FileDriver)
-    assert isinstance(drivers.make_driver("postloan_http"), drivers.PostloanHttpDriver)
+    # postloan_http 需配置 webhook 才能构造（否则显式报错，绝不静默退化）。
+    assert isinstance(
+        drivers.make_driver(
+            "postloan_http", env={"SPACEFIN_POSTLOAN_WEBHOOK_URL": "https://postloan.test/hook"}
+        ),
+        drivers.PostloanHttpDriver,
+    )
 
 
 def test_unknown_driver_name_raises_instead_of_silently_skipping():
@@ -163,19 +169,122 @@ def test_file_driver_appends_duplicate_line_on_repush(tmp_path):
 
     assert len(open(d.path, encoding="utf-8").read().strip().splitlines()) == 2
 
-
-# ================================================================ 预留通道
-
-
-def test_postloan_http_driver_raises_not_implemented():
-    """预留点必须抛 NotImplementedError，不能假装成功——否则预警会静默消失。"""
-    with pytest.raises(NotImplementedError, match="未接入"):
-        drivers.PostloanHttpDriver().send(alert(1))
-
-
-def test_reserved_driver_not_in_default_list():
-    """默认 site_inbox,file；未实现的通道被默认启用会让整批推送全失败。"""
+    # ================================================================ 通道开关
+    """默认 site_inbox,file；真实通道绝不静默默认启用（未配置 webhook 时启用会整批失败）。"""
     from alertmods import alerting
 
-    assert drivers.PostloanHttpDriver.name not in "site_inbox,file"
+    assert drivers.PostloanHttpDriver.name not in alerting.DEFAULT_DRIVERS
     assert alerting.DEFAULT_MAX_RETRIES == 3
+
+
+# ================================================================ 真实贷后 HTTP 驱动
+
+
+class _FakeResp:
+    def __init__(self, code):
+        self._code = code
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def getcode(self):
+        return self._code
+
+
+class _RecordingTransport:
+    """拦截 urlopen 调用，记录请求并返回指定状态码（无需真实网络）。"""
+
+    def __init__(self, code=200):
+        self.code = code
+        self.requests = []
+
+    def __call__(self, req, timeout=None):
+        self.requests.append((req, timeout))
+        return _FakeResp(self.code)
+
+
+def test_postloan_http_driver_requires_configured_webhook():
+    """未配置 SPACEFIN_POSTLOAN_WEBHOOK_URL 时，make_driver 必须显式报错，
+    不能偷偷退化成「假装成功」——否则预警会静默消失。"""
+    with pytest.raises(ValueError, match="SPACEFIN_POSTLOAN_WEBHOOK_URL"):
+        drivers.make_driver("postloan_http", env={})
+
+
+def test_postloan_http_driver_posts_json_with_idempotency_and_auth():
+    d = drivers.PostloanHttpDriver(
+        "https://postloan.test/hook", token="sec", transport=_RecordingTransport(200)
+    )
+    d.send(alert(1, alert_level="strong"))
+
+    assert len(d._transport.requests) == 1
+    req, timeout = d._transport.requests[0]
+    assert req.get_method() == "POST"
+    assert req.get_full_url() == "https://postloan.test/hook"
+    body = json.loads(req.data.decode("utf-8"))
+    assert body["loan_id"] == 1
+    assert body["alert_level"] == "strong"
+    assert body["alert_date"] == "2026-08-05"
+    # urllib 对多词头做 capitalize（Content-type），用 header_items 小写归一化核对。
+    headers = {k.lower(): v for k, v in req.header_items()}
+    assert headers["content-type"] == "application/json"
+    assert headers["authorization"] == "Bearer sec"
+    # 幂等键 (loan_id, alert_date)，接收方据此去重，重试不产生重复工单。
+    assert headers["idempotency-key"] == "1:2026-08-05"
+
+
+def test_postloan_http_driver_serializes_decimal_fields():
+    d = drivers.PostloanHttpDriver("https://postloan.test/hook", transport=_RecordingTransport(200))
+    d.send(alert(1, ltv=decimal.Decimal("0.9231"), loan_balance=decimal.Decimal("1000000.00")))
+
+    body = json.loads(d._transport.requests[0][0].data.decode("utf-8"))
+    assert body["ltv"] == 0.9231
+    assert body["loan_balance"] == 1000000.0
+
+
+def test_postloan_http_driver_raises_on_non_2xx():
+    """非 2xx 视为送达失败，交给状态机重试。"""
+    d = drivers.PostloanHttpDriver("https://postloan.test/hook", transport=_RecordingTransport(500))
+    with pytest.raises(drivers.PostloanPushError, match="非 2xx"):
+        d.send(alert(1))
+
+
+def test_postloan_http_driver_raises_on_network_error():
+    """网络错误 / 超时一律交给状态机重试，不能吞掉。"""
+
+    def _boom(req, timeout=None):
+        raise OSError("connection refused")
+
+    d = drivers.PostloanHttpDriver("https://postloan.test/hook", transport=_boom)
+    with pytest.raises(drivers.PostloanPushError, match="推送贷后系统失败"):
+        d.send(alert(1))
+
+
+def test_resolve_drivers_auto_appends_postloan_when_configured():
+    """配置 webhook 后无需改命令，resolve_drivers 自动接通 I-05 真实闭环。"""
+    from alertmods import FakeConn, alerting
+
+    drivers_list = alerting.resolve_drivers(
+        "site_inbox,file",
+        conn=FakeConn(),
+        out_dir="/tmp",
+        date="2026-08-05",
+        env={"SPACEFIN_POSTLOAN_WEBHOOK_URL": "https://postloan.test/hook"},
+    )
+    assert "postloan_http" in [d.name for d in drivers_list]
+
+
+def test_resolve_drivers_does_not_append_when_no_webhook():
+    """未配置 webhook 时不自动启用真实通道，避免整批推送因缺配而全失败。"""
+    from alertmods import FakeConn, alerting
+
+    drivers_list = alerting.resolve_drivers(
+        "site_inbox,file",
+        conn=FakeConn(),
+        out_dir="/tmp",
+        date="2026-08-05",
+        env={},
+    )
+    assert [d.name for d in drivers_list] == ["site_inbox", "file"]

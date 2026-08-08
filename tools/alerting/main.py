@@ -19,6 +19,16 @@
                  ├─ attempt_count < max_retries ──▶ 下一轮自动重试
                  └─ attempt_count >= max_retries ──▶ 留 failed（终态，待人工）
 
+推送出口（driver，可组合）：
+- site_inbox：写站内告警表 ads_alert_inbox（默认）
+- file：追加 JSONL 到 output/alerting（默认，本地联调）
+- postloan_http：真实贷后系统 HTTP 推送（I-05 闭环出口）。配置
+  SPACEFIN_POSTLOAN_WEBHOOK_URL 后由 resolve_drivers 自动追加启用，无需改命令；
+  未配置时仅落库 + 文件，预警仍在台账（ads_alert_dispatch）留有送达记录。
+
+T+1 调度：Airflow DAG guangdong_daily_crawl 在风险引擎重算之后调用本 CLI
+（--date {{ ds }}），使当日预警最迟 T+1 送达（含真实贷后系统，若已配置 webhook）。
+
 用法：
     tools/orchestrator/.venv/bin/python tools/alerting/main.py --date 2026-08-05
     tools/orchestrator/.venv/bin/python tools/alerting/main.py --date 2026-08-05 --dry-run
@@ -47,6 +57,8 @@ STATE_FAILED = "failed"
 
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_OUT_DIR = "output/alerting"
+# 默认推送驱动（真实贷后系统 webhook 由 resolve_drivers 按 env 自动追加）。
+DEFAULT_DRIVERS = "site_inbox,file"
 
 DISPATCH_DDL = """
 CREATE TABLE IF NOT EXISTS ads_alert_dispatch (
@@ -286,6 +298,27 @@ def write_outputs(conn, out_dir, date, summary):
     return {"csv": csv_path, "json": json_path}
 
 
+def resolve_drivers(
+    drivers_arg: str, *, conn, out_dir: str, date: str, env: dict | None = None
+) -> list:
+    """按 --drivers 构造驱动列表。
+
+    当 SPACEFIN_POSTLOAN_WEBHOOK_URL 已配置时，自动追加 postloan_http 真实贷后
+    系统推送驱动——I-05 闭环在配置后即生效，无需改命令。env 缺省读仓库 .env。
+    """
+    env = env if env is not None else config.load_env()
+    names = [n.strip() for n in drivers_arg.split(",") if n.strip()]
+    endpoint = env.get("SPACEFIN_POSTLOAN_WEBHOOK_URL")
+    if endpoint and "postloan_http" not in names:
+        names.append("postloan_http")
+        print(
+            "[alerting] 检测到 SPACEFIN_POSTLOAN_WEBHOOK_URL，自动启用 postloan_http "
+            "真实贷后系统推送（I-05 闭环已接通）",
+            flush=True,
+        )
+    return [make_driver(n, conn=conn, out_dir=out_dir, alert_date=date, env=env) for n in names]
+
+
 def main():
     ap = argparse.ArgumentParser(description="LTV 预警推送（I-05）：清单生成 + T+1 去重 + 失败重试")
     ap.add_argument(
@@ -297,8 +330,9 @@ def main():
     )
     ap.add_argument(
         "--drivers",
-        default="site_inbox,file",
-        help="推送驱动（逗号分隔）: site_inbox/file；新增通道在 drivers.make_driver 注册",
+        default=DEFAULT_DRIVERS,
+        help="推送驱动（逗号分隔）: site_inbox/file/postloan_http；"
+        "配置 SPACEFIN_POSTLOAN_WEBHOOK_URL 后 postloan_http 自动启用",
     )
     ap.add_argument("--dry-run", action="store_true", help="只打印清单，不写库不推送")
     ap.add_argument("--force-fail", action="store_true", help="演练：注入推送失败，验证重试状态机")
@@ -323,11 +357,9 @@ def main():
                 )
             return 0
 
-        drivers = [
-            make_driver(n.strip(), conn=conn, out_dir=args.out_dir, alert_date=args.date)
-            for n in args.drivers.split(",")
-            if n.strip()
-        ]
+        drivers = resolve_drivers(
+            args.drivers, conn=conn, out_dir=args.out_dir, date=args.date, env=env
+        )
         summary = run_dispatch(conn, drivers, args.date, args.max_retries, args.force_fail)
         paths = write_outputs(conn, args.out_dir, args.date, summary)
         print(
