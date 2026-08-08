@@ -81,6 +81,7 @@ NO_PROXY_MAX_CYCLES = int(os.getenv("NO_PROXY_MAX_CYCLES", 5))
 # 42 个 finished，Airflow Sensor 会烧完 6h 超时、ETL 永不执行。计数存在 task Hash、
 # 不随队列 JSON 传递（队列元素仍只含 {city,type,pages,target,round}）。
 MAX_REQUEUE = int(os.getenv("MAX_REQUEUE", 3))
+PROXY_REPORT_ENABLED = os.getenv("PROXY_REPORT_ENABLED", "1") == "1"
 # 青果短效代理认证（可选，经 .env 注入；代理池中青果代理需带认证使用）
 QG_USER = os.getenv("QG_USER", "")
 QG_PWD = os.getenv("QG_PWD", "")
@@ -120,6 +121,35 @@ MY_ID = os.getenv("WORKER_ID") or os.getenv("HOSTNAME") or "worker-unknown"
 
 def log(city, msg):
     print(f"[worker:{MY_ID} {time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def report_proxy_failure(master_url, city, typ, proxy_src, page, proxy_str):
+    """上报青果代理抓取失败，退还青果 IP 预算配额。"""
+    if not PROXY_REPORT_ENABLED:
+        return False
+    if proxy_src != "qg" or not proxy_str:
+        return False
+    attempt = f"{MY_ID}-{page}-{int(time.time() * 1000)}-{os.urandom(2).hex()}"
+    params = {
+        "city": city,
+        "type": typ,
+        "src": "qg",
+        "page": page,
+        "proxy": proxy_str,
+        "attempt": attempt,
+    }
+    url = f"{master_url.rstrip('/')}/proxy/report?{urlencode(params)}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "SpaceFin-Worker"})
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode())
+            refunded = bool(data.get("refunded"))
+            if refunded:
+                log(city, f"refunded proxy {proxy_str} for p{page} ({typ})")
+            return refunded
+    except Exception as e:
+        log(city, f"report_proxy_failure error: {e}")
+        return False
 
 
 # ---------------- 注册与心跳 ----------------
@@ -560,6 +590,8 @@ def crawl(rdb, city, typ, pages, target, round_n, out_dir):
 
         html = fetch_page(city, typ, page, proxy_str, proxy_src)
         if html is None:
+            if proxy_src == "qg":
+                report_proxy_failure(MASTER_URL, city, typ, proxy_src, page, proxy_str)
             consecutive_fail += 1
             blocked_total += 1
             # 失败页也写 stats：否则被反爬吃掉的请求在统计里完全不可见，

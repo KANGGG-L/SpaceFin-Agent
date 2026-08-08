@@ -141,5 +141,5 @@ DAG 只会把空转自动化。此时须先决策降级方案（换 UA/指纹、
 | 4 | `etl_finalize` | MySQL `spacefin_crawler` 当日行数增长；`data_lake/housing` 出现 `dt=<ds>` 分区 |
 | 5 | `geocode_backfill_finalize` | DWD `geocode_status='hit'` 行数增长；无 `--date`，扫全表属正常 |
 | 6 | 幂等 | 同一 `ds` 再 trigger：不重置进度（`crawl_run:current` 未变）、DWD 不重复 |
-| 7 | 预算生效 | `crawl_status.cities` 里 gz/sz 的 `budget=91/67`，其余城 `22/14`，耗尽者 `reason=budget_exhausted` 且 `finished=true` |
+| 7 | 预算生效 | `crawl_status.cities` 里 gz/sz 的 `budget=60/60`，其余城 `20/20`，耗尽者 `reason=budget_exhausted` 且 `finished=true` |
 | 8 | 调度 | UI 见 `guangdong_daily_crawl`，schedule `30 0 * * *`，`max_active_runs=1`，次日 00:30 自动跑 |

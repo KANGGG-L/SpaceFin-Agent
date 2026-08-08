@@ -37,6 +37,7 @@ def master(load_master):
 def mark_run_ready(master, rdb):
     """让 crawl_status 认可本 run（否则 all_done 恒为 False）。"""
     rdb.set(master.RUN_CURRENT_KEY, RUN)
+    rdb.set(master.WAVE_KEY, "done")
 
 
 def put_task(master, rdb, city, typ, **fields):
@@ -182,12 +183,21 @@ def test_requeue_leaves_alive_running_untouched(master, rdb):
 
 # ================= 第 2 组：按城交错调度（替代原 phase 切换） =================
 def test_init_tasks_enqueues_all_42_city_interleaved(master, rdb):
-    """bootstrap 起点（空 redis）：init_tasks 必须把全 42 任务一次性入队，
-    且顺序为 fangyuan 先执行 [gz_fangyuan, sz_fangyuan, ..., yf_fangyuan, gz_sale, sz_sale, ..., yf_sale]。"""
+    """bootstrap 起点（空 redis）：init_tasks LPUSH 入队，worker RPOP 领取为 FIFO 顺序，
+    即先全 21 城 fangyuan、再全 21 城 sale。"""
     master.init_tasks(rdb)
     order = queue_order(master, rdb)
-    assert order == [(t["city"], t["type"]) for t in master.DEFAULT_TASKS]
+    expected_pop_order = [(t["city"], t["type"]) for t in master.DEFAULT_TASKS]
+    assert order == list(reversed(expected_pop_order))
     assert len(order) == 42
+    popped = []
+    while True:
+        raw = rdb.rpop(master.TASK_QUEUE)
+        if not raw:
+            break
+        d = json.loads(raw)
+        popped.append((d["city"], d.get("type", "sale")))
+    assert popped == expected_pop_order
 
 
 def test_termination_all_tasks_done_sets_stop(master, rdb):
@@ -380,6 +390,7 @@ def worker(load_worker):
         env.setdefault("FAIL_BUDGET", "2")
         env.setdefault("FAIL_BACKOFF", "0")
         env.setdefault("MAX_REQUEUE", "2")
+        env.setdefault("MASTER_URL", "http://127.0.0.1:9")
         return load_worker(**env)
 
     return _loader

@@ -7,8 +7,8 @@
 #   worker-1 .. worker-5             泛化 worker：不绑定城市/类型，从任务队列领任务
 #       {city, type, pages, target, round}，从 master/Redis 拿 https proxy 抓取。
 # 任务模型：42 任务 = 21 城 × sale(出售)/fangyuan(出租)，每 run 每城一轮，
-#           按城交错（city-interleave）全量入队，fangyuan 波次先执行、sale 波次后执行；
-#           sale 用 500 青果 + 免费池兜底、fangyuan 用 500 青果（qg only，不回落免费池）；
+#           按城交错（city-interleave）全量入队，波次状态机（floor->rescue->depth->done）；
+#           sale 用 500 青果 + 免费池兜底、fangyuan 用 500 青果（rescue 波次允许回落免费池）；
 #           免费池本轮发放上限 FREE_BUDGET(1000)，到限后本轮不再用免费池；
 #           停止条件=全部任务 finished=1。关键参数：LEADER_TTL=60、POOL_SIZE_MIN=60、
 #           PAGES_SALE=100、PAGES_RENT=53（fangyuan 每城页数上限）。
@@ -51,6 +51,8 @@ x-worker-env: &worker-env
   NO_PROXY_MAX_CYCLES: "5"
   # 单任务单 run 内允许被重新入队的次数上限（收敛保证，防 requeue 乒乓使 all_done 永不成立）
   MAX_REQUEUE: "3"
+  # 失败退款开关
+  PROXY_REPORT_ENABLED: "1"
 
 x-worker: &worker
   build:
@@ -104,13 +106,18 @@ services:
       PAGES_SALE: "100"
       PAGES_RENT: "53"
       TARGET: "999999"
-      # 每城 IP 预算：广深各 ~15%（sale 500 ≈ 60×2 + 20×19；fangyuan 500 ≈ 60×2 + 20×19）
+      # 每城 IP 预算：广深各 60，其余 19 城各 20（总额 500/500）
       IP_BUDGET_ENABLED: "1"
       BUDGET_TOP_CITIES: "gz,sz"
       IP_BUDGET_SALE_TOP: "60"
       IP_BUDGET_SALE_OTHER: "20"
       IP_BUDGET_FY_TOP: "60"
       IP_BUDGET_FY_OTHER: "20"
+      # 波次状态机调度配置
+      WAVE_ENABLED: "1"
+      WAVE_FLOOR_PAGES: "5"
+      WAVE_DEPTH_ENABLED: "1"
+      FANGYUAN_FREE_RESCUE: "1"
       # 本次 run 标识：Airflow 注入 {{ ds }}，手动启动时为 manual
       CRAWL_RUN_ID: "${CRAWL_RUN_ID:-manual}"
       # 单任务单 run 内允许被重新入队的次数上限（收敛保证，防 requeue 乒乓使 all_done 永不成立）
@@ -155,6 +162,10 @@ services:
       IP_BUDGET_SALE_OTHER: "20"
       IP_BUDGET_FY_TOP: "60"
       IP_BUDGET_FY_OTHER: "20"
+      WAVE_ENABLED: "1"
+      WAVE_FLOOR_PAGES: "5"
+      WAVE_DEPTH_ENABLED: "1"
+      FANGYUAN_FREE_RESCUE: "1"
       CRAWL_RUN_ID: "${CRAWL_RUN_ID:-manual}"
       # 单任务单 run 内允许被重新入队的次数上限（收敛保证，防 requeue 乒乓使 all_done 永不成立）
       MAX_REQUEUE: "3"

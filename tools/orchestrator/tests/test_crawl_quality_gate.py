@@ -28,8 +28,9 @@ def test_decide_branches():
 
 
 class _FakeCursor:
-    def __init__(self, rows):
+    def __init__(self, rows, zero_cities=None):
         self._rows = rows
+        self._zero_cities = set(zero_cities or [])
 
     def execute(self, sql, params=None):
         self.sql = sql
@@ -37,17 +38,23 @@ class _FakeCursor:
     def fetchone(self):
         return (self._rows,)
 
+    def fetchall(self):
+        if self._rows > 0:
+            return [(c, self._rows) for c in cg.CITIES if c not in self._zero_cities]
+        return []
+
     def close(self):
         pass
 
 
 class _FakeConn:
-    def __init__(self, rows):
+    def __init__(self, rows, zero_cities=None):
         self._rows = rows
+        self._zero_cities = zero_cities
         self.closed = False
 
     def cursor(self):
-        return _FakeCursor(self._rows)
+        return _FakeCursor(self._rows, self._zero_cities)
 
     def close(self):
         self.closed = True
@@ -62,22 +69,32 @@ class _RecordingPost:
         return True
 
 
-def _run(monkeypatch, new_rows, strict, *, hard=50, soft=200, webhook="https://x", mentions=""):
+def _run(
+    monkeypatch,
+    new_rows,
+    strict,
+    *,
+    hard=50,
+    soft=200,
+    webhook="https://x",
+    mentions="",
+    zero_cities=None,
+):
     post = _RecordingPost()
     monkeypatch.setattr(
-        cg, "pymysql", type("M", (), {"connect": staticmethod(lambda **k: _FakeConn(new_rows))})()
+        cg,
+        "pymysql",
+        type("M", (), {"connect": lambda *a, **k: _FakeConn(new_rows, zero_cities)})(),
     )
     monkeypatch.setattr(cg, "post_slack", post)
-    monkeypatch.setattr(cg.config, "load_env", staticmethod(lambda: {}))
+    monkeypatch.setattr(cg.config, "load_env", lambda: {})
     monkeypatch.setattr(
         os,
         "getenv",
-        staticmethod(
-            lambda k, d="": (
-                webhook
-                if k == "SPACEFIN_ALERT_SLACK_WEBHOOK"
-                else (mentions if k == "SPACEFIN_ALERT_MENTIONS" else d)
-            )
+        lambda k, d="": (
+            webhook
+            if k == "SPACEFIN_ALERT_SLACK_WEBHOOK"
+            else (mentions if k == "SPACEFIN_ALERT_MENTIONS" else d)
         ),
     )
     argv = ["gate", "--date", "2026-08-05", f"--hard-floor={hard}", f"--soft-floor={soft}"]
@@ -101,15 +118,23 @@ def test_main_soft_floor_warns_but_passes(monkeypatch):
     assert "偏低" in calls[0]
 
 
-def test_main_hard_floor_default_passes_with_alert(monkeypatch):
+def test_main_hard_floor_lenient_warns_and_passes(monkeypatch):
     code, calls = _run(monkeypatch, 10, strict=False)
     assert code == 0
     assert len(calls) == 1
-    assert "缺失" in calls[0]
+    assert "≤ 硬下限" in calls[0]
 
 
-def test_main_hard_floor_strict_blocks(monkeypatch):
+def test_main_hard_floor_strict_blocks_exit_2(monkeypatch):
     code, calls = _run(monkeypatch, 10, strict=True)
     assert code == 2
     assert len(calls) == 1
-    assert "缺失" in calls[0]  # Slack 详情文案，而非 stdout 的「拦停」
+    assert "≤ 硬下限" in calls[0]
+
+
+def test_main_ok_with_zero_row_cities_warns(monkeypatch):
+    code, calls = _run(monkeypatch, 300, strict=False, zero_cities=["yf", "sw"])
+    assert code == 0
+    assert len(calls) == 1
+    assert "2 个城市新增为 0" in calls[0]
+    assert "yf" in calls[0] and "sw" in calls[0]

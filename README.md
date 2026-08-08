@@ -114,7 +114,7 @@
 | 定时触发（Airflow DAG `guangdong_daily_crawl`，00:30）        | ✅ 已实现并合入 dev |
 | ETL 跨日去重 / 入库 / 数据湖落盘（DAG 收尾自动执行）          | ✅ 已实现               |
 | 轮次策略（取消 MAX_ROUNDS=3，读完/预算耗尽即终态）            | ✅ 已实现               |
-| 每城 IP 预算（sale 600 / fangyuan 400+免费池，广深 15%）      | ✅ 已实现               |
+| 每城 IP 预算（波次状态机 floor 5页 / rescue / depth；sale 500 / fangyuan 500，广深各 60 其余 19 城各 20） | ✅ 已实现               |
 | 增量断点续爬 + 回扫头部 2-3 页                                | ✅ 已实现               |
 | Linux 新机部署（launchd → systemd、Airflow 同机、环境装依赖） | ✅ 已实现               |
 | 工作流加固（失败派发 / 采集闸门 / 严格排空 / 终态审计，默认关）| ✅ 已实现               |
