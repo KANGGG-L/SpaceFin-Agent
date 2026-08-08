@@ -29,7 +29,7 @@
 | 2    | 技术上是否可行？             | 技术评估 + 效果基线                    | 数据底座 PoC 代码                         | ✅ 已完成                                    | [docs/product/02/](docs/product/02/README.md)                                        |
 | 3    | 具体做成什么样？             | PRD（含验收标准）                      | 核心功能原型实现                          | ✅ 已完成                                    | [docs/product/03/](docs/product/03/README.md)                                        |
 | 4    | 设计和技术方案对齐了吗？     | 评审纪要、待确认清单、设计规范         | 设计/研发评审材料（已组织评审回填）       | ✅ 材料+纪要已产出（结论待干系人确认）       | [docs/product/04/](docs/product/04/README.md)                                        |
-| 5    | 测试验收与开发是否在轨道上？ | 测试用例、验收清单、上线风险、开发计划 | 测试框架 + 全量执行（8/8 AC 绿、560 测试通过） | ✅ 已完成                                    | [docs/product/05/](docs/product/05/README.md) · [docs/开发计划.md](docs/开发计划.md) |
+| 5    | 测试验收与开发是否在轨道上？ | 测试用例、验收清单、上线风险、开发计划 | 测试框架 + 全量执行（8/8 AC 绿、645 passed / 1 skipped，共 646 收集） | ✅ 已完成                                    | [docs/product/05/](docs/product/05/README.md) · [docs/开发计划.md](docs/开发计划.md) |
 | 6    | 上线复盘                     | 复盘报告、交付缺口清单               | 阶段 6 复盘 + 最终版补齐（G2/G4/G5/G8 已交付） | ✅ 已完成                                    | [docs/product/06/](docs/product/06/README.md)                                        |
 
 ## 方法论：从构想走向落地
@@ -48,7 +48,7 @@
 ├── 阶段 2 ✅ 技术可行性 → 数据底座 PoC（已完成）
 ├── 阶段 3 ✅ PRD + 核心功能原型（已完成）
 ├── 阶段 4 ✅ 设计与研发评审（材料 + 评审纪要已产出）
-├── 阶段 5 ✅ 测试验收（8/8 AC 全绿、560 自动化测试通过）
+├── 阶段 5 ✅ 测试验收（8/8 AC 全绿、645 passed / 1 skipped，共 646 收集）
 └── 阶段 6 ✅ 上线复盘（交付缺口已清点，可行项已补齐）
 ```
 
@@ -75,7 +75,7 @@
 | AVM（GBDT+空间特征）                         | L3                               | ✅ 已接入（精度@覆盖率：45% 覆盖 MAPE 9.88% ≤10% 达标；全量 14.59%；基线 20.6%）      | Sprint 2    | [avm.md](docs/tech/components/avm.md) · [tools/avm/README.md](tools/avm/README.md) · [cdc-downstream.md](docs/tech/components/cdc-downstream.md) |
 | 风险引擎（LTV 两档预警 / 五级分类 / 低置信） | L3                               | ✅ 已接入（LTV 警示线 0.75 / 强预警线 0.85，均可配置，等号边界严格大于不触发；低置信：空间特征缺失率 >75） | Sprint 2    | [risk-engine.md](docs/tech/components/risk-engine.md)                                                                                            |
 | L2 空间特征（高危区/POI/通勤）               | L2                               | ✅ 已接入（单机近似，降级 Sedona）                                                                         | Sprint 3    | [spatial-feature.md](docs/tech/components/spatial-feature.md)                                                                                    |
-| 预警推送（I-05 贷后保全）                    | L4 应用接口                      | ✅ 已接入（T+1 推送）                                                                                      | Sprint 4    | [alerting-iv05.md](docs/tech/components/alerting-iv05.md)                                                                                        |
+| 预警推送（I-05 贷后保全）                    | L4 应用接口                      | ✅ 已接入（T+1 推送：site_inbox + 文件 + 可选 postloan_http webhook；Airflow 已排程）                     | Sprint 4    | [alerting-iv05.md](docs/tech/components/alerting-iv05.md)                                                                                        |
 | 1104 报送（G11 三出口校验）                  | L5 合规                          | ✅ 已接入                                                                                                  | Sprint 4    | [reporting-1104.md](docs/tech/components/reporting-1104.md)                                                                                      |
 | 前端驾驶舱（S5）                             | L5 展示                          | ✅ 已接入（端口 8500，零依赖插件架构）                                                                     | Sprint 5    | [frontend.md](docs/tech/components/frontend.md) · [frontend README](tools/frontend/README.md)                                                    |
 | 运维（容器恢复 + 资源管家）                  | 运维                             | ✅ 已接入                                                                                                  | —           | [ops.md](docs/tech/components/ops.md)                                                                                                            |

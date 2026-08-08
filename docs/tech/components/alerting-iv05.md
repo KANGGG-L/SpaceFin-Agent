@@ -16,7 +16,8 @@
 1. **清单生成**：`--date` 取当日预警（`ads_ltv_alerts WHERE alert_date = --date`）；
 2. **T+1 去重**：同一 `(loan_id, alert_date)` 已推送成功的不重推；
 3. **失败重试状态机**：单条推送失败自动重试，超限留终态待人工；
-4. **driver 可替换**：当前推站内告警表 + 文件，真实贷后系统接口是预留替换点。
+4. **driver 可替换**：默认推站内告警表 + 文件；配置 `SPACEFIN_POSTLOAN_WEBHOOK_URL`
+   后 `postloan_http` 真实贷后系统 HTTP 推送自动启用（I-05 闭环）。
 
 ## 2. 推送语义与状态机
 
@@ -44,10 +45,23 @@ pending ──▶ 尝试 ──┤
 |---|---|---|
 | `site_inbox` | 站内告警表 `ads_alert_inbox`（UNIQUE(loan_id, alert_date) 幂等） | 默认推送通道 |
 | `file` | `output/alerting/alert_push_<date>.jsonl`（JSONL 追加） | 本地联调 / 验收 |
-| `postloan_http` | **预留**：真实贷后系统 HTTP 接口 | 替换点，接入后注册到 `make_driver` |
+| `postloan_http` | **真实贷后系统 HTTP 接口**（I-05 闭环出口） | 配置 `SPACEFIN_POSTLOAN_WEBHOOK_URL` 后由 `main.resolve_drivers` 自动启用 |
 
-接入真实贷后系统：实现 `AlertDriver.send`（把预警组装成目标接口报文并调用，失败抛异常），
-在 `make_driver` 注册，`--drivers postloan_http` 即可切换，调度层无需改动。
+`postloan_http` 已是**真实可用实现**（非预留）：把预警以 POST JSON 推到配置的 webhook，
+带 `Idempotency-Key: {loan_id}:{alert_date}` 与可选 `Authorization: Bearer <token>` 头；
+非 2xx / 网络错误抛 `PostloanPushError`，由状态机重试。未配置 webhook 时 `make_driver`
+显式报错——绝不「假装成功」。
+
+接入真实贷后系统：**无需改代码**，只需在运行环境（`.env` 或 Airflow Variable）配置
+`SPACEFIN_POSTLOAN_WEBHOOK_URL`（与可选 `SPACEFIN_POSTLOAN_WEBHOOK_TOKEN`、
+`SPACEFIN_POSTLOAN_TIMEOUT`）。`main.resolve_drivers` 检测到该变量即自动把 `postloan_http`
+追加进驱动列表；也可显式 `--drivers site_inbox,file,postloan_http` 强制启用。
+
+### T+1 调度（闭环接通）
+
+Airflow DAG `guangdong_daily_crawl` 在 `risk_recalc` 之后新增 `alerting_push` 任务，调用
+`tools/alerting/main.py --date {{ ds }}`。当日预警由风险引擎写入 `ads_ltv_alerts` 后再推送，
+最迟 T+1 送达贷后系统（含真实 webhook，若已配置）。配合去重键，补跑 / 重跑不会重复推送。
 
 ## 4. 表结构
 
