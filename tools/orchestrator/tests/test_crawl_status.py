@@ -16,6 +16,7 @@ def master(load_master):
 
 def mark_run_ready(master, rdb):
     rdb.set(master.RUN_CURRENT_KEY, RUN)
+    rdb.set(master.WAVE_KEY, "done")
 
 
 def test_not_all_finished_is_false(master, rdb):
@@ -73,6 +74,7 @@ def test_stale_state_before_bootstrap_is_not_done(master, rdb):
     seed_tasks(master, rdb, finished=True)
     rdb.set(master.STOP_KEY, "prev-run-stop")
     rdb.set(master.RUN_CURRENT_KEY, "2026-08-03")  # 尚未被本 run 引导
+    rdb.delete(master.WAVE_KEY)
 
     st = master.crawl_status(rdb)
     assert st["all_done"] is False
@@ -101,4 +103,5 @@ def test_crawl_status_over_http(master, rdb):
         "finished": True,
         "reason": "budget_exhausted",
         "rows": 123,
+        "wave": "done",
     }

@@ -25,6 +25,30 @@ import config  # noqa: E402
 import pymysql  # noqa: E402
 from slack_notify import build_alert_message, post_slack  # noqa: E402
 
+CITIES = [
+    "gz",
+    "sz",
+    "zh",
+    "st",
+    "fs",
+    "sg",
+    "zj",
+    "zq",
+    "jm",
+    "mm",
+    "hui",
+    "mz",
+    "sw",
+    "hy",
+    "yj",
+    "qy",
+    "dg",
+    "zs",
+    "cz",
+    "jy",
+    "yf",
+]
+
 
 def decide(new_rows: int, hard: int, soft: int, strict: bool) -> tuple[int, str]:
     """纯决策函数（便于单测）：返回 (exit_code, level)。
@@ -48,6 +72,23 @@ def count_new_rows(conn, date: str) -> int:
     return total
 
 
+def check_zero_row_cities(conn, date: str) -> list[str]:
+    """检查 21 个城市在当日是否有 0 新增行数的城市，返回 0 行城市列表。"""
+    cur = conn.cursor()
+    city_counts = {c: 0 for c in CITIES}
+    for tbl in ("crawl_housing_sale", "crawl_housing_rent"):
+        cur.execute(
+            f"SELECT district, COUNT(*) FROM {tbl} WHERE first_seen_date=%s GROUP BY district",
+            (date,),
+        )
+        for row in cur.fetchall():
+            district, cnt = row[0], row[1]
+            if district in city_counts:
+                city_counts[district] += cnt
+    cur.close()
+    return [c for c in CITIES if city_counts[c] == 0]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="采集后数据质量闸门（G2）")
     ap.add_argument("--date", required=True, help="业务日 YYYY-MM-DD")
@@ -69,6 +110,7 @@ def main() -> int:
     conn = pymysql.connect(**config.crawl_params(env), charset="utf-8")
     try:
         new_rows = count_new_rows(conn, args.date)
+        zero_cities = check_zero_row_cities(conn, args.date)
     finally:
         conn.close()
 
@@ -77,21 +119,35 @@ def main() -> int:
         f"hard={args.hard_floor} soft={args.soft_floor} strict={args.strict}",
         flush=True,
     )
+    if zero_cities:
+        print(
+            f"[gate] warning: 0-row cities ({len(zero_cities)}): {', '.join(zero_cities)}",
+            flush=True,
+        )
 
     code, level = decide(new_rows, args.hard_floor, args.soft_floor, args.strict)
+    webhook = os.getenv("SPACEFIN_ALERT_SLACK_WEBHOOK", "")
+    mentions = os.getenv("SPACEFIN_ALERT_MENTIONS", "")
+    owner = "开发"
+
     if level == "ok":
+        if zero_cities:
+            detail = f"总新增行数 {new_rows} 达标，但有 {len(zero_cities)} 个城市新增为 0: {', '.join(zero_cities)}"
+            msg = build_alert_message("crawl_quality_gate", args.date, owner, detail, mentions)
+            post_slack(webhook, msg)
         print("[gate] OK", flush=True)
         return 0
 
-    owner = "开发"
     if level == "hard":
         detail = (
             f"当日新增爬取行数 {new_rows} ≤ 硬下限 {args.hard_floor}，数据可能缺失，下游结果不可信"
         )
     else:
         detail = f"当日新增爬取行数 {new_rows} 偏低（软下限 {args.soft_floor}），结果可能失真"
-    webhook = os.getenv("SPACEFIN_ALERT_SLACK_WEBHOOK", "")
-    mentions = os.getenv("SPACEFIN_ALERT_MENTIONS", "")
+
+    if zero_cities:
+        detail += f"；且有 {len(zero_cities)} 个城市新增为 0: {', '.join(zero_cities)}"
+
     msg = build_alert_message("crawl_quality_gate", args.date, owner, detail, mentions)
     post_slack(webhook, msg)
 

@@ -95,11 +95,11 @@ DOC_MD = """
 任务链：
 1. `render_smoke_test` — 探活宿主渲染服务，失败即中止（Linux 宿主 Chrome 未实测，这是已知最大风险点）。
 2. `start_stack` — 幂等启动采集栈（`start_all.sh`），传入 `CRAWL_RUN_ID={{ ds }}`，不阻塞等采集跑完。
-3. `wait_crawl_done` — 轮询 master `GET /crawl_status`，等 `all_done=true`（42 个任务全 finished 或 stop 置位）。
+3. `wait_crawl_done` — 轮询 master `GET /crawl_status`，等 `all_done=true`（波次状态机 floor->rescue->depth->done 完成，42 个任务全 finished 或 stop 置位）。
 4. `drain_workers` — 等在跑的 worker 收尾（`GET /tasks` 无 `status=running`），避免 ETL 读到写了一半的 raw 行。
    默认 best-effort（超时仅告警放行）；Variable `spacefin_drain_strict=1` 时超时即失败（G3）。
 4.5 `crawl_quality_gate` — 采集后数据质量闸门（G2）：统计当日新增爬取行数
-   （`first_seen_date={{ ds }}`）。默认低于软/硬下限只发 Slack 告警、放行；
+   （`first_seen_date={{ ds }}`）及 21 城 0-row 告警。默认低于软/硬下限只发 Slack 告警、放行；
    `spacefin_crawl_gate_strict=1` 时低于硬下限才拦停 ETL，避免空/失真数据流入全链路。
 5. `etl_finalize` — 跑 `etl.py --date {{ ds }}`（跨日去重、入库、数据湖落盘）。
 5.5 `geocode_fill` — 跑 `geocode_fill.py --daily-limit 6000` 填 community_coords 词典
