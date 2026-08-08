@@ -15,7 +15,7 @@ import urllib.parse
 import app as frontend_app
 import db
 import pytest
-from conftest import FakeConn
+from fakeconn import FakeConn
 
 # ---------------------------------------------------------------- 假库构造
 

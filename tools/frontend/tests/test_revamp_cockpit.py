@@ -15,7 +15,7 @@ import urllib.parse
 import app as frontend_app
 import db
 import pytest
-from conftest import FakeConn
+from fakeconn import FakeConn
 
 # ---------------- _confirm_row_from（纯函数） ----------------
 
@@ -290,7 +290,7 @@ def _parse(path):
 
 def test_handle_detail_success(monkeypatch):
     payload = {
-        "alert": {"loan_id": 101, "ltv": 0.9, "src": "offline"},
+        "alert": {"loan_id": 101, "ltv": 0.9, "src": "offline", "customer_id": "C123456789"},
         "property_addr": "广州市",
         "risk_factors": {"valuation_deviation_pct": 0.12, "low_confidence": False},
         "confirm": None,
@@ -305,6 +305,9 @@ def test_handle_detail_success(monkeypatch):
     out = json.loads(h.sent["body"])
     assert out["alert"]["loan_id"] == 101
     assert out["risk_factors"]["valuation_deviation_pct"] == 0.12
+    # AC-06 口径：read 接口对 PII 列脱敏，明文 customer_id 不得回传（仅留后 4 位）。
+    assert out["alert"]["customer_id"] == "c****6789"
+    assert "C123456789" not in h.sent["body"].decode("utf-8")
 
 
 def test_handle_detail_missing_params_400(monkeypatch):

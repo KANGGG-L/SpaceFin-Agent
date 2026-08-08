@@ -44,6 +44,7 @@ REDIS_HOST = os.getenv("REDIS_HOST", "spacefin-redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 WORKERS_KEY = "spacefin:workers"
 TASK_QUEUE = "spacefin:tasks"
+TASK_PROCESSING_QUEUE = "spacefin:tasks:processing"  # 可靠队列：认领中暂存，崩溃可回收
 TASK_PREFIX = "spacefin:task:"
 LOCK_PREFIX = "spacefin:task_lock:"
 PROGRESS_PREFIX = "spacefin:crawl_progress:"
@@ -327,24 +328,72 @@ def _task_key(city, typ):
 
 
 def claim_task(rdb):
-    """LPOP 队列任务；抢任务锁成功才返回（防同城双跑）。"""
+    """从队列可靠领取任务（C 类健壮性修复）。
+
+    原实现先 `LPOP` 出队再 `SET NX` 抢锁：若崩溃于二者之间，任务已从队列移除但锁未握住
+    → 永久丢失。改为 `RPOPLPUSH` 把任务**原子**移动到 processing 列表（认领中暂存），再抢锁；
+    无论抢锁成败，任务都仍在 processing 列表里（或放回主队列），绝不会无声消失。崩溃遗留的
+    processing 任务由 `recover_processing_tasks` 在 worker 启动时回收重派。
+
+    领取成功后才把任务从 processing 列表移除；抢锁失败则放回主队列等待重派。
+    """
     while True:
-        raw = rdb.lpop(TASK_QUEUE)
+        raw = rdb.rpoplpush(TASK_QUEUE, TASK_PROCESSING_QUEUE)
         if raw is None:
             return None
         task = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode())
         city, typ = task["city"], task.get("type", "sale")
         key = _task_key(city, typ)
         if not rdb.exists(key):
+            _drop_processing(rdb, raw)  # 任务状态已不存在（master 已清理），丢弃
             continue
         # 抢任务锁：SET NX EX，成功才认领
         lock_key = LOCK_PREFIX + f"{city}:{typ}"
         if not rdb.set(lock_key, MY_ID, nx=True, ex=LOCK_TTL):
-            continue  # 已被其他 worker 持有
+            # 锁被其他 worker 持有：放回主队列，不占 processing（避免重复占用/饿死）
+            # 先 rpush 回主队列；若 rpush 抛错则任务仍留在 processing 列表（可被
+            # recover_processing_tasks 回收），绝不先 drop 再 rpush 导致任务丢失。
+            try:
+                rdb.rpush(TASK_QUEUE, raw)
+            except Exception:
+                continue
+            _drop_processing(rdb, raw)
+            continue
         # 标记 running（保留原 round）
         rdb.hset(key, mapping={"status": "running", "worker": MY_ID, "worker_hb": time.time()})
         task["round"] = int(rdb.hget(key, "round") or 0)
+        # 领取成功：从 processing 列表移除（后续崩溃只丢「已认领成功」的任务，可重入幂等）
+        _drop_processing(rdb, raw)
         return task
+
+
+def _drop_processing(rdb, raw):
+    """从 processing 列表移除指定任务（领取成功或需重派时调用）。"""
+    try:
+        rdb.lrem(TASK_PROCESSING_QUEUE, 1, raw)
+    except Exception:
+        pass
+
+
+def recover_processing_tasks(rdb):
+    """worker 启动时回收 processing 列表里残留的任务（崩溃遗留）回到主队列。
+
+    仅搬运、不认领：回到主队列后由正常 claim_task 流程重新加锁领取，避免重复跑或丢任务。
+    返回回收条数。
+    """
+    try:
+        items = rdb.lrange(TASK_PROCESSING_QUEUE, 0, -1)
+    except Exception:
+        return 0
+    moved = 0
+    for raw in items:
+        try:
+            rdb.lrem(TASK_PROCESSING_QUEUE, 1, raw)
+            rdb.rpush(TASK_QUEUE, raw)
+            moved += 1
+        except Exception:
+            pass
+    return moved
 
 
 def release_lock(rdb, city, typ):
@@ -719,6 +768,13 @@ def main():
         sys.exit(1)
 
     threading.Thread(target=_hb_loop, args=(rdb,), daemon=True).start()
+    # 启动回收：上轮崩溃遗留的「认领中」任务回到主队列，避免静默丢任务
+    try:
+        recovered = recover_processing_tasks(rdb)
+        if recovered:
+            log("-", f"recovered {recovered} in-flight task(s) from processing queue")
+    except Exception as e:  # noqa: BLE001
+        log("-", f"processing queue recovery skipped: {e}")
     log("-", f"generic worker up, master={MASTER_URL}")
 
     while True:
