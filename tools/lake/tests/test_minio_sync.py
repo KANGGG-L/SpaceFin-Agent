@@ -281,7 +281,7 @@ def test_upload_missing_snapshot_dir_raises(transport, tmp_path):
         minio_sync.upload_lake_snapshot(str(tmp_path), "2026-08-05")
 
 
-def test_upload_only_parquet_files_are_uploaded(transport, tmp_path):
+def test_upload_only_parquet_files_are_uploaded(transport, tmp_path, monkeypatch):
     _make_snapshot(
         tmp_path,
         {
@@ -292,10 +292,25 @@ def test_upload_only_parquet_files_are_uploaded(transport, tmp_path):
         },
     )
 
+    # 让 list_objects 在 staging 前缀下返回已上传的分片，使 copy 阶段能产出正式前缀 PUT
+    def _staging_keys(bucket, prefix):
+        if prefix.startswith("pending/"):
+            t = prefix.split("/")[2]
+            files = {"sale": ["a.parquet", "b.parquet"], "rent": ["c.parquet"]}[t]
+            return [f"pending/2026-08-05/{t}/{f}" for f in files]
+        return []
+
+    monkeypatch.setattr(minio_sync, "list_objects", _staging_keys)
+
     result = minio_sync.upload_lake_snapshot(str(tmp_path), "2026-08-05")
 
     assert result["sale"][0] == 2 and result["rent"][0] == 1
-    puts = [c[2] for c in transport.calls if c[1] == "PUT" and "/housing/" in c[2]]
+    # 只看正式前缀的最终 PUT（copy 阶段），排除 staging 阶段的中间 PUT
+    puts = [
+        c[2]
+        for c in transport.calls
+        if c[1] == "PUT" and "/housing/" in c[2] and "/pending/" not in c[2]
+    ]
     assert puts == [
         f"{_ENDPOINT}/{_BUCKET}/sale/a.parquet",
         f"{_ENDPOINT}/{_BUCKET}/sale/b.parquet",
@@ -319,3 +334,91 @@ def test_upload_reports_file_count_and_size_mb(transport, tmp_path):
 
     assert result["sale"] == (2, 2.0)
     assert result["rent"] == (1, 1.0)
+
+
+# ================================================================ 事务式上传（C 类健壮性）
+
+
+def test_upload_fails_before_clearing_old_prefix(monkeypatch, tmp_path):
+    """任一分片上传失败 → 上抛且不调用 clear_prefix（旧快照原样保留，绝不残缺）。"""
+    _make_snapshot(tmp_path, {"sale/beijing/a.parquet": 16, "sale/beijing/b.parquet": 16})
+
+    cleared = []
+    monkeypatch.setattr(minio_sync, "clear_prefix", lambda bucket, prefix: cleared.append(prefix))
+    monkeypatch.setattr(
+        minio_sync,
+        "put_object_file",
+        lambda bucket, key, path: (_ for _ in ()).throw(RuntimeError("staging failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="staging failed"):
+        minio_sync.upload_lake_snapshot(str(tmp_path), "2026-08-05")
+
+    assert cleared == [], "上传失败仍清了旧前缀 → 会留下残缺快照"
+
+
+def test_upload_stages_then_clears_then_moves_in_order(monkeypatch, tmp_path):
+    """阶段顺序：全部 staging PUT → 清旧前缀 → copy 到正式前缀 → 删 staging。"""
+    _make_snapshot(
+        tmp_path,
+        {"sale/beijing/a.parquet": 16, "rent/guangzhou/c.parquet": 16},
+    )
+
+    order = []
+    monkeypatch.setattr(
+        minio_sync,
+        "put_object_file",
+        lambda bucket, key, path: order.append(("put_staging", key)),
+    )
+    monkeypatch.setattr(
+        minio_sync, "clear_prefix", lambda bucket, prefix: order.append(("clear", prefix))
+    )
+    monkeypatch.setattr(
+        minio_sync,
+        "list_objects",
+        lambda bucket, prefix: (
+            [f"pending/2026-08-05/{prefix.split('/')[2]}/a.parquet"]
+            if prefix.startswith("pending/")
+            else []
+        ),
+    )
+    monkeypatch.setattr(
+        minio_sync,
+        "copy_object",
+        lambda bucket, src, dst: order.append(("copy", src, dst)),
+    )
+    monkeypatch.setattr(
+        minio_sync, "delete_object", lambda bucket, key: order.append(("del_staging", key))
+    )
+
+    minio_sync.upload_lake_snapshot(str(tmp_path), "2026-08-05")
+
+    # 先全是 staging 上传
+    assert all(k == "put_staging" for k, *_ in order if k == "put_staging")
+    # clear 出现在所有 staging 之后
+    first_clear = next(i for i, (k, *_) in enumerate(order) if k == "clear")
+    assert all(k == "put_staging" for k, *_ in order[:first_clear])
+    # copy 出现在 clear 之后，且拷贝到正式前缀 sale/ rent/
+    copies = [entry[1:] for entry in order if entry[0] == "copy"]
+    assert copies and all(d.startswith(("sale/", "rent/")) for _, d in copies)
+    # staging 全部删除
+    assert any(k == "del_staging" for k, *_ in order)
+
+
+def test_upload_streams_from_file_not_bytes(monkeypatch, tmp_path):
+    """staging 上传应走 put_object_file（文件流），而非整文件读内存的 put_object。"""
+    _make_snapshot(tmp_path, {"sale/beijing/a.parquet": 16})
+    seen = []
+    monkeypatch.setattr(minio_sync, "put_object_file", lambda bucket, key, path: seen.append(path))
+    monkeypatch.setattr(minio_sync, "clear_prefix", lambda bucket, prefix: None)
+    monkeypatch.setattr(
+        minio_sync,
+        "list_objects",
+        lambda bucket, prefix: [] if prefix.startswith("pending/") else [],
+    )
+    monkeypatch.setattr(minio_sync, "copy_object", lambda b, s, d: None)
+    monkeypatch.setattr(minio_sync, "delete_object", lambda b, k: None)
+
+    minio_sync.upload_lake_snapshot(str(tmp_path), "2026-08-05")
+
+    assert seen and all(isinstance(p, str) and p.endswith(".parquet") for p in seen)

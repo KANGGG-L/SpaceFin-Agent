@@ -32,7 +32,7 @@
    - 曾有 product-b 误称「10.49% 需要 91 特征实验」——**这是错的**（那是默认配置的结果）。**不要做特征移植**，28 特征 canonical 配置即达 9.88%。
    - 全量 MAPE 14.59%，oracle 下界 12.65%，baseline 20.64%。
 3. **C-02 特征归因**：用 `sklearn.inspection.permutation_importance`（**不是 SHAP**）。原因：shap 未安装，且 HistGBR quantile 没有 `feature_importances_`。所有文档/前端文案已统一为 "permutation importance"，**不要再写 SHAP**。Top-5：`comm_mean 11.31 / comm_median 10.31 / city_code 7.12 / floor_total 2.43 / area 1.04`。
-4. **测试**：15 个模块，当前全仓实测 **645 passed + 1 skipped**（2026-08-07；含 I-04 倒排索引 3 项真机测试）。跑法见 §4。
+4. **测试**：15 个模块，当前全仓实测 **682 passed / 1 skipped**（历史基线 645 → Fix-1 后 665，后续分支新增模块后 682；含 I-04 倒排索引 3 项真机测试）。跑法见 §4。
 5. **前端**：零依赖方案，`tools/frontend`，端口 **8500**，RBAC **四角色**（admin/risk/da/postloan）。页面自动发现：`tools/frontend/pages/__init__.py` 的 `_discover()` 扫描 `pN_*.py`。P9（合规审计，角色 admin/risk）读 `ads_export_audit`/`ads_report_alert`/`attribution_report.json`；P10（沙盒，角色 admin/risk/da）读 `persona_report.json`，对 naive KS 0.257 显示「未校准」横幅。
 6. **已推远端**：各 feature 分支已推 origin；`feat/inverted-index-superset` 已推 origin，合并入 `dev` 后 `dev` 推 origin。
 7. **I-04 倒排索引审计检索 + Superset BI 看板（`feat/inverted-index-superset` 接入，`feat/superset-prod-hardening` 投产加固）**：Doris 中文倒排索引毫秒级敏感词检索（pytest 3 passed，检索 4–7ms）；Superset 4.1.2 已起（`/health` 200）、连 Doris ADS、经 API 落库 3 图表+1 仪表盘。投产加固（2026-08-07）已落地：元数据库改 PostgreSQL、固定 `SUPERSET_SECRET_KEY`、管理员强密码；仅注册 Doris 脱敏视图（`v_*`，PII 同 `mask_value` 口径）；四角色 RBAC（Admin/Risk/DA/Postloan，经 `setup_roles.py` 落地，关闭 Alpha SQL Lab 写）；查询/导出经 `superset_config.py` 钩子写 `spacefin.ads_export_audit`（与驾驶舱同一张审计表）。两者均已真机验证。
@@ -78,7 +78,7 @@ git status                      # 应干净；当前分支应 = dev（主线分�
 # Python 环境（conda，env 名 spark）
 source ~/miniforge/bin/activate spark
 
-# 跑测试（15 模块，期望 645 passed + 1 skipped）
+# 跑测试（15 模块，期望 682 passed / 1 skipped）
 python -m pytest -q
 # I-04 倒排索引真机验证（需 Doris FE 9030 在线）：
 python -m pytest tools/compliance/test_inverted_search.py -v   # 期望 3 passed
@@ -142,7 +142,7 @@ systemctl --user restart spacefin-frontend.service
 
 ## 7. 一句话给接手者
 
-「这是按最终交付版本标准验收的校招作品集：8/8 AC 绿、当前全仓 645 测试过、文档已收口。别把真实外部资源依赖（delivery-gap）当 bug；别动 AC-07 的 28 特征 canonical 配置；G2/G4/G5/G8/G9/G10 已交付（G10 含投产加固的 RBAC/PII/审计），G1/G3/H4 为外部依赖声明。先 `git status` + 跑测试复现基线，再决定干什么。」
+「这是按最终交付版本标准验收的校招作品集：8/8 AC 绿（仅限合成种子/一致环境）、当前全仓 682 passed / 1 skipped（历史基线 645 → Fix-1 后 665 → 后续分支新增模块后 682）、文档已收口。别把真实外部资源依赖（delivery-gap）当 bug；别动 AC-07 的 28 特征 canonical 配置；G2/G4/G5/G8/G9/G10 已交付（G10 含投产加固的 RBAC/PII/审计），G1/G3/H4 为外部依赖声明。先 `git status` + 跑测试复现基线，再决定干什么。」
 
 ---
 

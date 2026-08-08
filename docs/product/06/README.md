@@ -11,7 +11,7 @@ SpaceFin-Agent 是**最终交付版本（final deliverable）**，不是 MVP 原
 
 - **验收标准 = 技术 AC + 可复现性 + 测试 + 文档自洽**；凡能凭代码/合成数据交付的能力，均应按最终版补齐，不降级为「作品集范围外」。
 - **真实外部资源依赖项**（真实数据源授权、监管算法备案、真实机构试点意向）无法凭代码达成，诚实声明为「未达成（external-dependency）」，**不视为 bug，但列为最终版待办**。
-- 本阶段是在 8/8 AC 已全绿、603 测试已通过的前提下，对文档做的一次收口（D1–D3 + C 类漂移修正 + 最终版口径重定）。
+- 本阶段是在 8/8 AC 全绿（**仅限合成种子/一致环境**：验收结论均来自 2026-08-05 广东 DWD 对齐版 200 笔合成种子 + 独立端到端实测；真实数据接入后的回归属 G1 外部依赖，非 bug）、当前全仓 **682 passed / 1 skipped** 的前提下，对文档做的一次收口（D1–D3 + C 类漂移修正 + 最终版口径重定）。
 
 ---
 
@@ -32,7 +32,7 @@ SpaceFin-Agent 是**最终交付版本（final deliverable）**，不是 MVP 原
 
 ## 2. 测试结论
 
-- **自动化测试**：15 模块（新增 `tools/compliance` 倒排索引 I-04 真机测试 3 项），共 **646 项**，其中 **645 passed + 1 skipped**（skipped = 活体 Chrome 冒烟测试，`ANJUKE_TEST_LIVE=1` 显式启用，非缺陷）。2026-08-07 全仓实测 **645 passed + 1 skipped**，较 2026-08-05 基线（560 passed）的新增主要来自分支 `feat/inverted-index-superset` 的 I-04 倒排索引检索与既有模块回归补全，**无失败、无回归**。投产加固分支 `feat/superset-prod-hardening` 新增 `deploy/superset/test_superset_compliance.py`（3 项真机断言：视图脱敏形态 / 视图存在 / 审计钩子落库），服务在线时计入、离线时自动 skip。
+- **自动化测试**：15 模块（新增 `tools/compliance` 倒排索引 I-04 真机测试 3 项），全仓实测 **682 passed / 1 skipped**（skipped = 活体 Chrome 冒烟测试，`ANJUKE_TEST_LIVE=1` 显式启用，非缺陷）。其中 2026-08-07 基线为 **665**（Fix-1 新增回归测试：`tools/avm/tests/test_predict.py` 2 项、`tools/risk/tests/test_ac02_consistency.py` 2 项）；后续分支新增模块后升至 **682 passed / 1 skipped**，**无失败、无回归**。投产加固分支 `feat/superset-prod-hardening` 新增 `deploy/superset/test_superset_compliance.py`（3 项真机断言：视图脱敏形态 / 视图存在 / 审计钩子落库），服务在线时计入、离线时自动 skip。
 - **缺陷分布**：0 P0 / 0 P1 / 5 P2（均已修复并合入 develop）/ 0 P3；本轮（I-04 + Superset）新增 P2-1~P2-3（superset.md §5/§6 合规声明矛盾 / README 虚构「先清后建 TODO」/ `setup_superset.py` 重入 bug）与 P3-1~P3-5，均已在 `feat/inverted-index-superset` 收口（含修复 `ensure_dataset` 422 幂等、真正 `import tools.lake.config` 为单一真相源等）。
 - **用例覆盖**：功能 8/8（TC-01～08）+ 边界 6 项（B-01～06）+ 异常 6 项（E-01～06）+ 回归 R-01～06 范围定义齐备；I-04 倒排索引检索新增 3 项真机断言（表/索引存在、敏感词命中、无关词零误报，检索 4–7ms）。
 
@@ -42,7 +42,7 @@ SpaceFin-Agent 是**最终交付版本（final deliverable）**，不是 MVP 原
 
 > ☑ **Go（技术验收口径）**
 
-理由：功能验收 AC-01～08 全绿、自动化测试 603 passed / 1 skipped、设计/研发/合规护栏清单回填完成、无遗留 P0/P1。G6 渲染已验证、G7 为 PRD Non-goals 已排除；G2/G4/G5/G8 已于 feature/final-buildout（f3c9fde）凭代码补齐并交付；G1/G3/H4 为真实外部资源依赖、诚实声明未达成（非 bug）。技术交付已达标，外部依赖项待真实资源到位后推进。
+理由：功能验收 AC-01～08 全绿、自动化测试 682 passed / 1 skipped、设计/研发/合规护栏清单回填完成、无遗留 P0/P1。G6 渲染已验证、G7 为 PRD Non-goals 已排除；G2/G4/G5/G8 已于 feature/final-buildout（f3c9fde）凭代码补齐并交付；G1/G3/H4 为真实外部资源依赖、诚实声明未达成（非 bug）。技术交付已达标，外部依赖项待真实资源到位后推进。
 
 ---
 
@@ -70,7 +70,7 @@ SpaceFin-Agent 是**最终交付版本（final deliverable）**，不是 MVP 原
 ## 5. 文档收口（本轮）
 
 - **D1**：创建 `docs/product/06/README.md`（本文件，阶段 6 上线复盘）。
-- **D2**：阶段 5 `docs/product/05/README.md` 顶部 status marker 与 §8 待办项已更新为「已完成」口径（8/8 AC 绿、603/604 测试、Go 建议 2026-08-05）。
+- **D2**：阶段 5 `docs/product/05/README.md` 顶部 status marker 与 §8 待办项已更新为「已完成」口径（8/8 AC 绿（仅限种子/一致环境）、682 passed / 1 skipped、Go 建议 2026-08-05）。
 - **D3**：阶段 3 `docs/product/03/README.md` 的 Q1/Q2/Q3 保持「未确认」并标注依赖方——未编造结论；Q3 仅阻塞 P1 沙盒，不阻塞本期 MVP。
 - **C 类文档漂移（4 处，代码已实现、旧报告写错）已修正**：
   1. `docs/tech/components/risk-engine.md` §3.1 / §9：LTV 两档预警**已实现**——`LTV_WARN_LINE=0.75`（warn）+ `LTV_RED_LINE=0.85`（strong）均在 `tools/risk/config.py`，`risk_engine.py` 含两分支逻辑，并非只有单档。
@@ -82,4 +82,4 @@ SpaceFin-Agent 是**最终交付版本（final deliverable）**，不是 MVP 原
 
 ## 6. 一句话总结
 
-「已验收最终交付版本：8/8 AC 绿、603 测试过、文档收口完毕。G1/G3/H4 为真实外部资源依赖、诚实声明未达成（非 bug）；G2/G4/G5/G8 已于 feature/final-buildout（f3c9fde）凭代码补齐并标记为已交付；G6 已验证、G7 为 Non-goals。别动 AC-07 的 28 特征 canonical 配置；C 类漂移与 D1–D3 仅在文档层收口。」
+「已验收最终交付版本：8/8 AC 绿（仅限合成种子/一致环境）、682 passed / 1 skipped、文档收口完毕。G1/G3/H4 为真实外部资源依赖、诚实声明未达成（非 bug）；G2/G4/G5/G8 已于 feature/final-buildout（f3c9fde）凭代码补齐并标记为已交付；G6 已验证、G7 为 Non-goals。别动 AC-07 的 28 特征 canonical 配置；C 类漂移与 D1–D3 仅在文档层收口。」

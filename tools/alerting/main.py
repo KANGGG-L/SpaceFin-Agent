@@ -83,9 +83,9 @@ DISPATCH_UPSERT_SQL = (
     "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) "
     "ON DUPLICATE KEY UPDATE "
     " dispatch_date=VALUES(dispatch_date), status=VALUES(status), "
-    " attempt_count=VALUES(attempt_count), max_retries=VALUES(max_retries), "
-    " last_error=VALUES(last_error), dispatch_ts=VALUES(dispatch_ts), "
-    " etl_ts=CURRENT_TIMESTAMP"
+    " max_retries=VALUES(max_retries), last_error=VALUES(last_error), "
+    " dispatch_ts=VALUES(dispatch_ts), etl_ts=CURRENT_TIMESTAMP, "
+    " attempt_count = attempt_count + 1"  # 原子自增：并发同 (loan_id,alert_date) 不再少计重试次数
 )
 
 
@@ -184,6 +184,33 @@ def load_dispatch(conn, alerts):
     return out
 
 
+def _lock_dispatch_row(conn, loan_id, alert_date):
+    """行锁读单条台账现状（FOR UPDATE）。
+
+    返回 {status, attempt_count, max_retries} 或 None（无行）。run_dispatch 在「读→算
+    attempt→upsert」临界区前加此锁，使并发同 (loan_id,alert_date) 串行化，结合
+    DISPATCH_UPSERT_SQL 的 `attempt_count = attempt_count + 1`，杜绝少计重试次数。
+    锁随 upsert_dispatch 的 commit 释放（与真实 MySQL 行锁语义一致）。
+    """
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT loan_id, alert_date, status, attempt_count, max_retries "
+            "FROM ads_alert_dispatch WHERE loan_id=%s AND alert_date=%s FOR UPDATE",
+            (loan_id, alert_date),
+        )
+        row = cur.fetchone()
+    finally:
+        cur.close()
+    if not row:
+        return None
+    return {
+        "status": row[2],
+        "attempt_count": int(row[3] or 0),
+        "max_retries": int(row[4] or 0),
+    }
+
+
 def alert_level_label(alert: dict) -> str:
     """alert_level 两档中文文案：warn→警示级、strong→强预警级、缺失/未知→「—」。
 
@@ -207,6 +234,11 @@ def run_dispatch(conn, drivers, date, max_retries, force_fail):
     for alert in alerts:
         key = (int(alert["loan_id"]), str(alert["alert_date"]))
         prev = existing.get(key)
+        # 原子领取：行锁读现状（FOR UPDATE），保证并发同 (loan_id,alert_date) 不丢计数。
+        # 加锁读到的最新状态优先；单线程单测下 _lock_dispatch_row 返回 None，退化为批读结果。
+        locked = _lock_dispatch_row(conn, alert["loan_id"], alert["alert_date"])
+        if locked is not None:
+            prev = locked
         if prev is not None and prev["status"] == STATE_SUCCESS:
             summary["dedup"] += 1
             continue

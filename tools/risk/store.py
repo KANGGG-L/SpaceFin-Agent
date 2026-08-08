@@ -77,7 +77,8 @@ def load_collaterals(conn, collateral_ids: list | None = None) -> dict:
     """读抵押物主档，返回 {collateral_id: row}。"""
     sql = (
         "SELECT collateral_id, property_addr, lat, lng, area, age, true_market_price, "
-        "poi_density, commute_min, is_high_risk_zone, spatial_feat_missing_pct FROM collateral"
+        "poi_density, commute_min, is_high_risk_zone, spatial_feat_missing_pct, "
+        "hall, bath, bedrooms, floor_level, floor_total, direction, parking FROM collateral"
     )
     params: list = []
     if collateral_ids is not None:
@@ -98,6 +99,10 @@ def load_collaterals(conn, collateral_ids: list | None = None) -> dict:
         if r.get("spatial_feat_missing_pct") is not None:
             v = float(r["spatial_feat_missing_pct"])
             r["spatial_feat_missing_pct"] = v * 100.0 if v <= 1.0 else v
+        # AVM 推理所需的户型/楼层/朝向/车位特征（collateral 主档持久化）。
+        for _k in ("hall", "bath", "bedrooms", "floor_level", "floor_total", "parking"):
+            if r.get(_k) is not None:
+                r[_k] = int(r[_k])
     return {r["collateral_id"]: r for r in rows}
 
 

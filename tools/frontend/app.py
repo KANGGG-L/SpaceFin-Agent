@@ -737,6 +737,16 @@ class SpaceFinApp(BaseHTTPRequestHandler):
         if result is None:
             self._send_error(404, "未找到该预警")
             return
+        # AC-06 口径：read 接口同样对 PII 列脱敏，与导出 CSV 一致，禁止明文回传客户标识。
+        # 仅 customer_id / customer_name 属 PII 级（与 data_classification.PII_COLUMNS 一致），
+        # 其余字段（loan_id / collateral_id / 地址等）保持明文以便业务核对。
+        # customer_id 位于 result["alert"] 子字典内（与 db.alert_detail 返回结构一致）。
+        alert = result.get("alert")
+        if isinstance(alert, dict):
+            for pii_col in ("customer_id", "customer_name"):
+                if alert.get(pii_col) is not None:
+                    lvl = level_of("customer", pii_col)
+                    alert[pii_col] = mask_value(lvl, alert[pii_col])
         self._send_json(200, result)
 
     # ---------------- G8 健康度 ----------------

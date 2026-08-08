@@ -97,7 +97,16 @@ def valuation_from_avm(model, collateral: dict, city_map: dict) -> float | None:
             community=_community_from_addr(addr),
             area_sqm=float(area),
             building_age=collateral.get("age"),
-            bedrooms=None,
+            # 户型/楼层/朝向/车位特征：若抵押物 collateral 携带则透传真实值，
+            # 否则传 None。estimate_total_price 在缺失这些特征时会显式抛错，
+            # 由本层 except 捕获后回退 DWD / true_market_price（而非容忍错位估值）。
+            bedrooms=collateral.get("bedrooms"),
+            hall=collateral.get("hall"),
+            bath=collateral.get("bath"),
+            floor_level=collateral.get("floor_level"),
+            floor_total=collateral.get("floor_total"),
+            direction=collateral.get("direction"),
+            parking=collateral.get("parking"),
             latitude=collateral.get("lat"),
             longitude=collateral.get("lng"),
         )
