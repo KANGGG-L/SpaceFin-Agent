@@ -107,7 +107,7 @@ def main() -> int:
     args = ap.parse_args()
 
     env = config.load_env()
-    conn = pymysql.connect(**config.crawl_params(env), charset="utf-8")
+    conn = pymysql.connect(**config.crawl_params(env), charset="utf8mb4")
     try:
         new_rows = count_new_rows(conn, args.date)
         zero_cities = check_zero_row_cities(conn, args.date)
