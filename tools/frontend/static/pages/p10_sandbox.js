@@ -1,4 +1,4 @@
-/* global window, document */
+/* global window, document, fetch */
 /* P10 · 策略沙盒推演（设计评审 P10 / R-OPT-01-02，本期仅出框架）。
  *
  * 不做闭环交互，只呈现三件事：
@@ -14,7 +14,19 @@
 
   const HTML = `
     <h1 class="page-title">策略沙盒推演 <span style="font-size:13px;color:#6b7280;font-weight:400">（框架预览）</span></h1>
-    <div class="check-line" style="font-size:13px;color:#6b7280;margin-bottom:12px">本页为设计框架展示，闭环交互不进入本期开发排期。</div>
+    <div class="check-line" style="font-size:13px;color:#6b7280;margin-bottom:12px">本页为设计框架展示，并新增 LangChain 假设推演交互（精简版）。</div>
+
+    <!-- 假设推演（LangChain 实时交互，精简版新增） -->
+    <div class="card" style="margin-top:8px;border-left:4px solid var(--primary)">
+      <h2 class="card-title">假设推演（LangChain · 实时交互）</h2>
+      <div class="check-line" style="color:var(--muted)">输入一条策略假设，LLM 生成合成借款人叙事与推演结论。输出为<strong>合成 / 未校准</strong>演示数据，仅用于策略推演，不得用于个体授信决策。</div>
+      <textarea id="p10-hyp-input" rows="2" style="width:100%;margin-top:8px;padding:8px;border:1px solid var(--border);border-radius:6px;font:inherit" placeholder="例如：某社区消费贷利率下调 1%"></textarea>
+      <div style="margin-top:8px">
+        <button id="p10-run" class="btn primary">运行推演</button>
+        <span id="p10-run-status" style="margin-left:10px;color:var(--muted)"></span>
+      </div>
+      <div id="p10-result" style="margin-top:12px"></div>
+    </div>
 
     <div id="p10-uncalib-banner"></div>
     <div id="p10-attr-notice"></div>
@@ -200,6 +212,30 @@
       `</div>`;
   }
 
+  function renderHypothesisResult(d) {
+    const synthBadge = d.synthetic ? `<span class="badge warn">合成数据</span>` : "";
+    const calibBadge =
+      d.calibration_status === "未校准"
+        ? `<span class="badge bad">未校准</span>`
+        : `<span class="badge ok">校准</span>`;
+    const critic = d.critic_flag || {};
+    const mode = d.mode === "langchain-llm" ? `真实 LLM（${esc(d.model || "")}）` : "确定性兜底";
+    return `
+      <div class="card" style="border-left:4px solid var(--warn)">
+        <h3 class="card-title">推演结果 · ${mode}</h3>
+        <div class="check-line"><b>假设：</b>${esc(d.hypothesis || "")}</div>
+        <div class="check-line"><b>合成借款人叙事：</b>${esc(d.narrative || "")}</div>
+        <div class="check-line"><b>推演结论：</b>${esc(d.inference || "")}</div>
+        <div class="check-line" style="margin-top:6px">
+          ${synthBadge} ${calibBadge}
+          Critic：${esc(critic.flag || "-")}
+          （乐观词 ${critic.optimistic_hits || 0} / 风险词 ${critic.risk_hits || 0}）
+        </div>
+        ${d.note ? `<div class="check-line" style="color:var(--muted)">${esc(d.note)}</div>` : ""}
+        ${d.llm_error ? `<div class="check-line" style="color:var(--muted)">LLM 错误：${esc(d.llm_error)}</div>` : ""}
+      </div>`;
+  }
+
   async function render(_root) {
     const data = await api("/api/sandbox");
 
@@ -237,6 +273,37 @@
     renderStatus(data.naive, data.calibrated);
     renderEvidence(data);
     renderHonest(data.honest_declaration);
+
+    // 精简版：假设推演（LangChain）按钮
+    const btn = document.getElementById("p10-run");
+    if (btn) {
+      btn.onclick = async () => {
+        const input = document.getElementById("p10-hyp-input");
+        const status = document.getElementById("p10-run-status");
+        const result = document.getElementById("p10-result");
+        const hyp = (input.value || "").trim();
+        if (!hyp) {
+          status.textContent = "请先输入假设";
+          return;
+        }
+        btn.disabled = true;
+        status.textContent = "推演中…";
+        try {
+          const r = await fetch("/api/sandbox/hypothesis", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ hypothesis: hyp }),
+          });
+          const d = await r.json();
+          result.innerHTML = renderHypothesisResult(d);
+        } catch (e) {
+          result.innerHTML = `<div class="card" style="border-left:4px solid var(--danger)">推演失败：${esc(String(e))}</div>`;
+        } finally {
+          btn.disabled = false;
+          status.textContent = "";
+        }
+      };
+    }
   }
 
   window.registerPage("sandbox", { html: HTML, render });

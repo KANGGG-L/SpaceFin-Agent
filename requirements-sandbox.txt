@@ -1,0 +1,10 @@
+# 策略沙盒 LangChain 依赖（精简版新增 AI 能力，可选）
+#
+# 安装（前端 venv）：
+#   tools/orchestrator/.venv/bin/pip install -r requirements-sandbox.txt
+#
+# 说明：
+# - sandbox_agent.py 用 try/except 包裹 langchain import，依赖缺失时自动走
+#   确定性兜底生成器，页面永不 500。因此本依赖是"可选增强"，不是运行必需。
+# - 真实 LLM 需配置 .env 的 SPACEFIN_LLM_API_KEY（硅基流动 SiliconFlow）。
+langchain-openai

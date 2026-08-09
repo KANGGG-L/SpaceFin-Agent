@@ -50,7 +50,7 @@ worker，Docker 化，见 [crawler-orchestrator.md](crawler-orchestrator.md)）�
 | `airflow-webserver` | Airflow Web UI（:8080） | 同上 | — |
 | `spacefin-host-render` | 宿主 fangyuan 渲染（Chrome + DrissionPage，:8899） | `~/.config/spacefin/render.env`（`RENDER_PORT=8899` / `RENDER_SLOTS=5`） | `LimitNOFILE=8192`：多路 Chrome + CDP 会打满默认 fd 上限（踩过 OSError(24)） |
 | `spacefin-frontend` | 前端驾驶舱（S5，:8500） | ExecStart 硬编码仓库路径（无 env 文件） | 换机部署须同步改路径 |
-| `spacefin-stream-producer` | 读 ods_cdc_log → Kafka（实时链路） | ExecStart 硬编码仓库路径 | 前置 Kafka 容器就绪 |
+| `spacefin-stream-producer` | （精简版已移除）读 ods_cdc_log → Kafka 实时链路 | — | 实时层 Kafka/Flink 已于精简版分支删除 |
 
 > `deploy/systemd/` 仓库内收录 5 个单元（cdc / cdc-consumer / host-render / frontend /
 > stream-producer），airflow 两个单元实际运行在 `~/.config/systemd/user/`（仓库外，未随 repo

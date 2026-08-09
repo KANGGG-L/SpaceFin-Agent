@@ -35,6 +35,9 @@ _REPO_ROOT = os.path.dirname(
 # 策略画像推演报告：tools/persona 的产物。
 _PERSONA_FILE = os.path.join(_REPO_ROOT, "output", "persona", "persona_report.json")
 
+# 精简版新增：LangChain 假设推演 agent（与 db.py 同目录，已加入 sys.path）。
+import sandbox_agent  # noqa: E402
+
 
 def _load_json(path):
     """读一个 JSON 产物；文件缺失/损坏返回 None（页面降级展示，不 500）。"""
@@ -107,6 +110,15 @@ def get_sandbox(ctx):
     }
 
 
+def run_hypothesis(ctx):
+    """POST /api/sandbox/hypothesis：假设推演（LangChain）。
+
+    ctx.body 形如 {"hypothesis": "..."}；空假设由 sandbox_agent 抛 ValueError → 400。
+    """
+    body = ctx.body or {}
+    return sandbox_agent.run_hypothesis(body.get("hypothesis"))
+
+
 PAGE = {
     "id": "sandbox",
     "label": "假设推演",
@@ -116,5 +128,6 @@ PAGE = {
     "js": "p10_sandbox.js",
     "routes": {
         ("GET", "/api/sandbox"): get_sandbox,
+        ("POST", "/api/sandbox/hypothesis"): run_hypothesis,
     },
 }

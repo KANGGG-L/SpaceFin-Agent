@@ -32,6 +32,8 @@ SpaceFin-Agent 是**最终交付版本（final deliverable）**，不是 MVP 原
 
 ## 2. 测试结论
 
+> **精简版分支说明**：分支 `feat/lite-remove-streaming` 已移除 Kafka/Flink 实时层（`tools/stream/` 及 `deploy/kafka-flink/`），其测试随之移除；当前 `pytest --co` 收集 **694 项**（1 skipped = 活体 Chrome 冒烟测试）。下方 682 passed 为完整交付版（dev）的历史实测口径。
+
 - **自动化测试**：15 模块（新增 `tools/compliance` 倒排索引 I-04 真机测试 3 项），全仓实测 **682 passed / 1 skipped**（skipped = 活体 Chrome 冒烟测试，`ANJUKE_TEST_LIVE=1` 显式启用，非缺陷）。其中 2026-08-07 基线为 **665**（Fix-1 新增回归测试：`tools/avm/tests/test_predict.py` 2 项、`tools/risk/tests/test_ac02_consistency.py` 2 项）；后续分支新增模块后升至 **682 passed / 1 skipped**，**无失败、无回归**。投产加固分支 `feat/superset-prod-hardening` 新增 `deploy/superset/test_superset_compliance.py`（3 项真机断言：视图脱敏形态 / 视图存在 / 审计钩子落库），服务在线时计入、离线时自动 skip。
 - **缺陷分布**：0 P0 / 0 P1 / 5 P2（均已修复并合入 develop）/ 0 P3；本轮（I-04 + Superset）新增 P2-1~P2-3（superset.md §5/§6 合规声明矛盾 / README 虚构「先清后建 TODO」/ `setup_superset.py` 重入 bug）与 P3-1~P3-5，均已在 `feat/inverted-index-superset` 收口（含修复 `ensure_dataset` 422 幂等、真正 `import tools.lake.config` 为单一真相源等）。
 - **用例覆盖**：功能 8/8（TC-01～08）+ 边界 6 项（B-01～06）+ 异常 6 项（E-01～06）+ 回归 R-01～06 范围定义齐备；I-04 倒排索引检索新增 3 项真机断言（表/索引存在、敏感词命中、无关词零误报，检索 4–7ms）。

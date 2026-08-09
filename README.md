@@ -40,6 +40,18 @@
 2. **技术选型是阶段 2 的产物，不是阶段 0 的预设**。在确认机会和需求之前，不锁定任何具体技术路径。当前文档只讨论"需要什么能力"，不预设"用什么工具实现"。
 3. **每个阶段产出都是下一阶段的输入**。不做"一锤子"方案，而是逐步收敛不确定性——从模糊想法 → 可验证假设 → 用户需求 → 方案设计 → 代码实现 → 交付上线。
 
+> ### 🪶 精简版（lite）范围说明（分支 `feat/lite-remove-streaming`）
+>
+> 本分支是面向「求职作品集 / 快速讲清」的精简版：
+> - **已移除实时层**：Kafka + Flink 实时预警链路（`tools/stream/`、`deploy/kafka-flink/`）已删除。预警改为 **T+1 批处理推送**（I-05，Airflow 排程），核心闭环不受影响。
+> - **保留核心**：AVM 自动估值 → LTV 两档预警 → 1104 报送 → 前端驾驶舱，全部可跑。
+> - **保留湖仓**：Doris + MinIO 仍保留，但只是 BI 副本（见下方「数据架构一句话」），**核心不依赖它**。
+> - **新增 AI 能力**：策略沙盒接入 LangChain（硅基流动），支持「输入假设 → 推演」交互（详见 [前端 README](tools/frontend/README.md)）。
+> - **数据全合成**：演示数据均为脚本合成 / 演示回填，非真实业务数据。
+>
+> #### 数据架构一句话（面试讲述用）
+> 「核心闭环（估值 → 风控 → 报送 → 前端）全部读写**业务 MySQL**；Doris + MinIO 只是给 Superset BI 看板用的**分析副本**，可独立于核心存在。面试时先讲 MySQL 这一条主链，Doris 作为『可选分析层』一句话带过即可——它坏了核心照跑。」
+
 ### 当前状态：
 
 ```
@@ -48,7 +60,7 @@
 ├── 阶段 2 ✅ 技术可行性 → 数据底座 PoC（已完成）
 ├── 阶段 3 ✅ PRD + 核心功能原型（已完成）
 ├── 阶段 4 ✅ 设计与研发评审（材料 + 评审纪要已产出）
-├── 阶段 5 ✅ 测试验收（8/8 AC 全绿、645 passed / 1 skipped，共 646 收集）
+├── 阶段 5 ✅ 测试验收（8/8 AC 全绿；精简版移除 Kafka/Flink 实时层测试，pytest 收集 694 项）
 └── 阶段 6 ✅ 上线复盘（交付缺口已清点，可行项已补齐）
 ```
 
@@ -70,8 +82,8 @@
 | Kubernetes 横向扩展（可选）                  | 采集横向扩展（K8s 替代路径）     | ⏸ 清单已备（hostPath 待改），待 K8s 集群                                                  | 数据源探索  | [k8s-crawler-cluster.md](docs/tech/components/k8s-crawler-cluster.md)                                                                            |
 | MySQL binlog CDC（I-01）                     | L0 变更接入                      | ✅ 已接入                                                                                                  | Sprint 1    | [cdc-downstream.md](docs/tech/components/cdc-downstream.md)                                                                                      |
 | CDC 下游消费链                               | L0 增量同步                      | ✅ 已接入（改一笔 loan 秒级同步：≤10s 验收线，实测 3s）                                                    | Sprint 1    | [cdc-downstream.md](docs/tech/components/cdc-downstream.md)                                                                                      |
-| Doris + MinIO 湖仓                           | L0 分层                          | ✅ 已接入（ODS/DWD/DWS/ADS 四层 24 表，与 MySQL 对账一致）                                                 | Sprint 1    | [doris-lake.md](docs/tech/components/doris-lake.md)                                                                                              |
-| Kafka + Flink 实时                           | L1                               | ✅ 已接入（CDC→Kafka→Flink 实时预警，3s 端到端；含 rebuild.sh 一键重建）                                   | Sprint 2    | [kafka-flink-realtime.md](docs/tech/components/kafka-flink-realtime.md)                                                                          |
+| Doris + MinIO 湖仓                           | L0 分层（BI 副本）              | ✅ 已接入（ODS/DWD/DWS/ADS 四层 24 表；**BI 分析副本，核心链不依赖 Doris，全走 MySQL**）                  | Sprint 1    | [doris-lake.md](docs/tech/components/doris-lake.md)                                                                                              |
+| Kafka + Flink 实时                           | L1                               | ❌ 已移除（精简版：实时预警改为 T+1 批处理推送 I-05）                                                      | —           | —                                                                                                                                                |
 | AVM（GBDT+空间特征）                         | L3                               | ✅ 已接入（精度@覆盖率：45% 覆盖 MAPE 9.88% ≤10% 达标；全量 14.59%；基线 20.6%）      | Sprint 2    | [avm.md](docs/tech/components/avm.md) · [tools/avm/README.md](tools/avm/README.md) · [cdc-downstream.md](docs/tech/components/cdc-downstream.md) |
 | 风险引擎（LTV 两档预警 / 五级分类 / 低置信） | L3                               | ✅ 已接入（LTV 警示线 0.75 / 强预警线 0.85，均可配置，等号边界严格大于不触发；低置信：空间特征缺失率 >75） | Sprint 2    | [risk-engine.md](docs/tech/components/risk-engine.md)                                                                                            |
 | L2 空间特征（高危区/POI/通勤）               | L2                               | ✅ 已接入（单机近似，降级 Sedona）                                                                         | Sprint 3    | [spatial-feature.md](docs/tech/components/spatial-feature.md)                                                                                    |
@@ -199,11 +211,11 @@ nohup tools/orchestrator/.venv/bin/python tools/frontend/app.py \
 **工程简化（已声明的近似，非能力缺失）**：
 
 - Sedona → cKDTree 单机近似（架构等价性由 `tools/spatial/sedona_demo.py` 演示）
-- Hive → MinIO + S3 TVF
+- Hive → MinIO + S3 TVF（Hive 仅为早期备选，未实际引入；湖仓用 Doris 实现）
 - POI 以挂牌密度代理
 - 通勤以直线距离近似（低估）
 - Doris 单副本 + TRUNCATE 重灌
-- Flink 无 checkpoint（实时仅预警联动，不闭环，PRD Non-goals）
+- Flink 无 checkpoint（实时层 Kafka/Flink 已于精简版移除；预警改为 T+1 批处理推送 I-05，不闭环，PRD Non-goals 仍成立）
 
 **已交付能力（最终版补齐）**：
 - 数据分类分级落列级元数据 + 导出按级强控（G2，`tools/frontend/data_classification.py`）
@@ -216,7 +228,7 @@ nohup tools/orchestrator/.venv/bin/python tools/frontend/app.py \
 
 - AC-07 精度@覆盖率达标：45% 覆盖下 MAPE 9.88% ≤ 10%（全量 14.59%，基线 20.6%）
 - 38% 异常估值经三分量归因查明为「基准自指」——`true_market_price` 由早期版本模型自己生成，真实模型误差仅 1/200 笔，故不做校正层
-- Kafka + Flink 3s 端到端实时预警
+- LTV 两档预警（警示线 0.75 / 强预警线 0.85）经 T+1 批处理推送至贷后保全（I-05；实时层 Kafka/Flink 已于精简版移除）
 
 **未验证假设**：H1/H5 已在数据侧实证；H3 已由最小 Critic 原型验证达成（美化偏见 KS 可检测：0.257 → 校准后 0.028 ≤ 0.05，机制演示口径见 [tools/persona/README.md](tools/persona/README.md)，真实基准属商用前置）。
 

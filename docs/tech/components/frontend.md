@@ -85,8 +85,8 @@ handler 签名统一为 `handler(ctx) -> dict | (int, dict)`；`ctx` 只暴露 `
 
 | 页面 | 数据表（`spacefin_crawler`） | 指标 / 图表形态 |
 |------|------------------------------|-----------------|
-| 资产质量驾驶舱 | `dws_risk_class`、`ads_risk_class`、`ads_ltv_alerts`、`ads_stream_ltv_alerts`、`spacefin.collateral` | KPI 卡片（笔数/总敞口/预警/低置信/高危区）；五级分类分布柱状图（余额/笔数/占比，口径=ads_risk_class T+1 汇总）；LTV 直方图（0.85 红线染色，桶宽按红线加密）；城市贷款分布 + 高危区笔数（地址解析城市，CITY_MAP 前缀匹配）；离线/实时预警概览 |
-| LTV 预警列表 | `ads_ltv_alerts` ∪ `ads_stream_ltv_alerts` + `spacefin.collateral` + `ads_alert_confirm` | 合并分页列表（LTV/估值/余额/抵押物地址/高危区标记/来源/确认状态）；风险类/LTV 区间/日期/来源筛选；风控「确认」；导出 CSV（客户号脱敏只留后 4 位） |
+| 资产质量驾驶舱 | `dws_risk_class`、`ads_risk_class`、`ads_ltv_alerts`、`spacefin.collateral` | KPI 卡片（笔数/总敞口/预警/低置信/高危区）；五级分类分布柱状图（余额/笔数/占比，口径=ads_risk_class T+1 汇总）；LTV 直方图（0.85 红线染色，桶宽按红线加密）；城市贷款分布 + 高危区笔数（地址解析城市，CITY_MAP 前缀匹配）；T+1 预警概览（精简版已移除实时链路，`ads_stream_ltv_alerts` 不再产生） |
+| LTV 预警列表 | `ads_ltv_alerts` + `spacefin.collateral` + `ads_alert_confirm` | 分页列表（LTV/估值/余额/抵押物地址/高危区标记/确认状态；精简版已移除实时 `ads_stream_ltv_alerts`）；风险类/LTV 区间/日期筛选；风控「确认」；导出 CSV（客户号脱敏只留后 4 位） |
 | 1104 报送 | `ads_1104_g11`、`dws_risk_class`、`ads_report_alert` | G11 五级 + 合计表；口径一致性实时校验（以 dws 明细聚合为裁判，逻辑同 `tools/reporting/main.py`）；阻断告警历史 |
 
 ### 插件页面（P1/P3/P5/P6/P7/P9/P10）

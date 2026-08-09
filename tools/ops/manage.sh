@@ -2,21 +2,21 @@
 # manage.sh —— SpaceFin 资源管家：容器 + systemd 服务 + 内存水位监控
 #
 # 为什么做这个脚本：
-#   主机只有 15G/4 核，但 Doris/Kafka/Flink/前端/CDC 全常驻会吃紧；
+#   主机只有 15G/4 核，但 Doris/前端/CDC 全常驻会吃紧；
 #   之前服务用 nohup 裸跑，会话退出即丢，已发生前端掉线。
 #   本脚本把「容器 + 用户级 systemd 服务 + 内存」收口到一个命令，
 #   内存吃紧时可以一键停掉可降级层（t1，约释放 4.7G），避免 OOM。
 #
 # 三级运行策略：
 #   T0 恒驻   —— 链路命脉，停机=业务中断：MySQL/Redis/CDC/Consumer/Airflow/前端
-#   T1 可降级 —— 计算/队列，可整层停：Doris/Minio/Kafka/Flink/stream-producer（约 4.7G）
+#   T1 可降级 —— 分析/存储层，可整层停：Doris/Minio（精简版已移除 Kafka/Flink 实时层与 stream-producer）
 #   T2 按需   —— 任务型组件（爬虫/离线渲染），用完即弃，脚本不管理
 #
 # 组件清单：
 #   t0: 容器 spacefin-mysql spacefin-redis
 #       服务 spacefin-cdc spacefin-cdc-consumer airflow-scheduler airflow-webserver spacefin-frontend
-#   t1: 容器 spacefin-doris-fe spacefin-doris-be spacefin-minio spacefin-kafka flink-jobmanager flink-taskmanager
-#       服务 spacefin-stream-producer
+#   t1: 容器 spacefin-doris-fe spacefin-doris-be spacefin-minio
+#       （精简版已移除 spacefin-kafka / flink-* / spacefin-stream-producer 实时层）
 #
 # 依赖约定：所有容器 restart policy 已统一为 unless-stopped（宿主重启自动拉起）；
 #           服务均托管为用户级 systemd unit（enable + linger 常驻）。
@@ -33,7 +33,7 @@ WARN_AVAIL_MB=2560
 tier_containers() {
     case "$1" in
         t0) echo "spacefin-mysql spacefin-redis" ;;
-        t1) echo "spacefin-doris-fe spacefin-doris-be spacefin-minio spacefin-kafka flink-jobmanager flink-taskmanager" ;;
+        t1) echo "spacefin-doris-fe spacefin-doris-be spacefin-minio" ;;
         *) return 1 ;;
     esac
 }
@@ -195,8 +195,8 @@ SpaceFin 资源管家 manage.sh 用法:
 Tier 组件清单:
   t0 恒驻  : 容器 spacefin-mysql spacefin-redis
              服务 spacefin-cdc spacefin-cdc-consumer airflow-scheduler airflow-webserver spacefin-frontend
-  t1 可降级: 容器 spacefin-doris-fe spacefin-doris-be spacefin-minio spacefin-kafka flink-jobmanager flink-taskmanager
-             服务 spacefin-stream-producer
+  t1 可降级: 容器 spacefin-doris-fe spacefin-doris-be spacefin-minio
+             （精简版已移除 spacefin-kafka / flink-* / spacefin-stream-producer 实时层）
   t2 按需  : 爬虫/离线渲染等任务型组件，用完即弃，本脚本不管理
 
 示例:
