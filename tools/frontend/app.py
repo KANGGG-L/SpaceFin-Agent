@@ -43,10 +43,10 @@ from data_classification import level_of, mask_value  # noqa: E402  # G2 导出�
 # 随机生成强口令（持久化到 output/frontend/credentials.json，重启保持稳定，
 # 避免公网暴露固定弱凭据，也避免每次重启口令漂移）。
 
+# RBAC（精简版）：原 admin/risk/da 三角色权限完全一致，已融合为单一内部管理角色 `admin`；
+# 仅保留 `postloan`（贷后资产保全）作为受限角色——按 PRD §7.3 不可见 1104 报送页。
 _ROLE_LABELS = {
-    "admin": "系统管理员",
-    "risk": "风控策略经理",
-    "da": "数据分析师",
+    "admin": "内部管理(风控/分析/管理员)",
     "postloan": "贷后资产保全",
 }
 
@@ -74,8 +74,6 @@ def _resolve_passwords() -> dict:
         return {
             r: {
                 "admin": "admin20020309",
-                "risk": "risk20020309",
-                "da": "da20020309",
                 "postloan": "postloan20020309",
             }[r]
             for r in _ROLE_LABELS
@@ -120,19 +118,9 @@ if os.environ.get("SF_DEV_MODE") != "1" and not _ENV_PWDS:
         "设置 SF_PWD_<ROLE> 环境变量可固定口令。\n"
     )
 
-# 页面可见性：role -> pages。
+# 页面可见性：role -> pages。admin 已融合原 risk/da，三者权限一致。
 PAGE_VISIBILITY = {
     "admin": [
-        {"id": "dashboard", "label": "资产质量驾驶舱"},
-        {"id": "alerts", "label": "LTV 预警列表"},
-        {"id": "report", "label": "1104 报送"},
-    ],
-    "risk": [
-        {"id": "dashboard", "label": "资产质量驾驶舱"},
-        {"id": "alerts", "label": "LTV 预警列表"},
-        {"id": "report", "label": "1104 报送"},
-    ],
-    "da": [
         {"id": "dashboard", "label": "资产质量驾驶舱"},
         {"id": "alerts", "label": "LTV 预警列表"},
         {"id": "report", "label": "1104 报送"},
@@ -143,9 +131,9 @@ PAGE_VISIBILITY = {
     ],
 }
 
-# 操作级权限：仅这些角色可用。
-CAN_CONFIRM = {"admin", "risk"}
-CAN_EXPORT = {"admin", "risk", "da"}
+# 操作级权限：仅内部管理角色 admin 可用（已融合原 risk/da）。
+CAN_CONFIRM = {"admin"}
+CAN_EXPORT = {"admin"}
 # 页面级可见性（PRD §7.3：贷后不可见报送页）。与 PAGE_VISIBILITY 联动，
 # 服务端必须再次校验，不能只依赖前端隐藏导航。
 CAN_VIEW_REPORT = {

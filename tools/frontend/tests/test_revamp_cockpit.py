@@ -332,7 +332,7 @@ def test_handle_dispose_success(monkeypatch):
     monkeypatch.setattr(db, "dispose_alert", lambda *a, **k: calls["dispose"].append(a))
     monkeypatch.setattr(db, "write_audit", lambda *a, **k: calls["audit"].append(a))
 
-    user = {"user": "risk", "role": "risk", "label": "风控策略经理"}
+    user = {"user": "admin", "role": "admin", "label": "内部管理(风控/分析/管理员)"}
     h = _Handler(
         {"loan_id": 101, "alert_date": "2026-08-05", "source": "offline", "status": "disposed"}
     )
@@ -343,9 +343,9 @@ def test_handle_dispose_success(monkeypatch):
     assert out["ok"] is True and out["status"] == "disposed"
     # dispose_alert 收到的参数：loan_id / alert_date / source / status / user
     assert calls["dispose"][0][:4] == (101, "2026-08-05", "offline", "disposed")
-    # 审计：action=dispose / result=success / who=risk / ip 来自 client_address
+    # 审计：action=dispose / result=success / who=admin / ip 来自 client_address
     action, username, role, detail, result, ip = calls["audit"][0]
-    assert action == "dispose" and username == "risk" and result == "success"
+    assert action == "dispose" and username == "admin" and result == "success"
     assert ip == "203.0.113.7"
     assert json.loads(detail)["status"] == "disposed"
 
@@ -355,7 +355,7 @@ def test_handle_dispose_invalid_status_400(monkeypatch):
     monkeypatch.setattr(db, "dispose_alert", lambda *a, **k: pytest.fail("不应调用"))
     monkeypatch.setattr(db, "write_audit", lambda *a, **k: calls["audit"].append(a))
 
-    user = {"user": "risk", "role": "risk", "label": "风控策略经理"}
+    user = {"user": "admin", "role": "admin", "label": "内部管理(风控/分析/管理员)"}
     h = _Handler(
         {"loan_id": 101, "alert_date": "2026-08-05", "source": "offline", "status": "junk"}
     )

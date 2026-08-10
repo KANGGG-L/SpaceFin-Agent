@@ -1056,7 +1056,7 @@ def attribution(ctx):
 PAGE = {
     "id": "avm",
     "label": "估值精度看板",
-    "roles": {"admin", "risk", "da"},
+    "roles": {"admin"},
     "order": 70,
     "js": "p7_avm.js",
     "routes": {

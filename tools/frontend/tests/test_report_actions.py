@@ -4,7 +4,7 @@
 1. POST /api/report/recheck：实时复算口径一致性，一致/不一致两条路径，返回含 checked_at；
 2. POST /api/report/rebuild：从 dws_risk_class 聚合重建 ads_1104_g11 快照（单事务
    DELETE+INSERT），返回 rebuilt_rows/consistent，且必须落 report_rebuild 审计；
-   admin/risk 才可，da 等角色 403；表结构缺列/非五级档位 → 明确错误而非 500；
+   admin 才可，postloan 等角色 403；表结构缺列/非五级档位 → 明确错误而非 500；
 3. GET /api/alerts 新增 q 搜索：keyword 参数透传 db.alerts()，且 WHERE 走参数化 LIKE。
 """
 
@@ -211,8 +211,8 @@ class _RoutedHandler(frontend_app.SpaceFinApp):
         self._send_json(code, {"error": msg})
 
 
-def test_handle_recheck_route_allows_da(monkeypatch):
-    """recheck 只读重算：admin/risk/da 均可访问（与 report 同权限）。"""
+def test_handle_recheck_route_allows_admin(monkeypatch):
+    """recheck 只读重算：融合后仅 admin 可访问（与 report 同权限）。"""
     monkeypatch.setattr(
         db,
         "report_recheck",
@@ -223,7 +223,7 @@ def test_handle_recheck_route_allows_da(monkeypatch):
             "checked_at": "2026-08-06 04:00:00",
         },
     )
-    user = {"user": "da", "role": "da", "label": "数据分析师"}
+    user = {"user": "admin", "role": "admin", "label": "内部管理(风控/分析/管理员)"}
     h = _RoutedHandler(user, body={"date": "2026-08-06"}, path="/api/report/recheck")
     h.do_POST()
 
@@ -248,27 +248,27 @@ def test_handle_rebuild_success_writes_audit(monkeypatch):
     )
     monkeypatch.setattr(db, "write_audit", lambda *a, **k: calls.append(a))
 
-    user = {"user": "risk", "role": "risk", "label": "风控策略经理"}
+    user = {"user": "admin", "role": "admin", "label": "内部管理(风控/分析/管理员)"}
     h = _RoutedHandler(user, body={"date": "2026-08-06"}, path="/api/report/rebuild")
     h.do_POST()
 
     assert h.sent["code"] == 200
     out = json.loads(h.sent["body"])
     assert out["rebuilt_rows"] == 6 and out["consistent"] is True
-    # 审计：action=report_rebuild / result=success / who=risk / ip 来自请求来源。
+    # 审计：action=report_rebuild / result=success / who=admin / ip 来自请求来源。
     assert len(calls) == 1
     action, username, role, detail, result, ip = calls[0]
     assert action == "report_rebuild"
-    assert username == "risk" and role == "risk"
+    assert username == "admin" and role == "admin"
     assert result == "success"
     assert ip == "203.0.113.7"
     assert detail == "重建 G11 快照 2026-08-06 6 行"
 
 
-def test_handle_rebuild_denied_for_da_403(monkeypatch):
-    """rebuild 写操作：非 admin/risk（如 da）→ 403，不触库。"""
+def test_handle_rebuild_denied_for_postloan_403(monkeypatch):
+    """rebuild 写操作：非 admin（如 postloan）→ 403，不触库。"""
     monkeypatch.setattr(db, "report_rebuild", lambda *a, **k: pytest.fail("不应调用写库"))
-    user = {"user": "da", "role": "da", "label": "数据分析师"}
+    user = {"user": "postloan", "role": "postloan", "label": "贷后资产保全"}
     h = _RoutedHandler(user, body={"date": "2026-08-06"}, path="/api/report/rebuild")
     h.do_POST()
 
@@ -282,7 +282,7 @@ def test_handle_rebuild_invalid_date_400_with_failure_audit(monkeypatch):
     monkeypatch.setattr(db, "report_rebuild", lambda *a, **k: pytest.fail("不应调用"))
     monkeypatch.setattr(db, "write_audit", lambda *a, **k: calls.append(a))
 
-    user = {"user": "risk", "role": "risk", "label": "风控策略经理"}
+    user = {"user": "admin", "role": "admin", "label": "内部管理(风控/分析/管理员)"}
     h = _RoutedHandler(user, body={"date": "garbage"}, path="/api/report/rebuild")
     h.do_POST()
 
@@ -301,7 +301,7 @@ def test_handle_alerts_passes_keyword(monkeypatch):
         "alerts",
         lambda **kw: captured.update(kw) or {"total": 0, "page": 1, "page_size": 20, "rows": []},
     )
-    user = {"user": "da", "role": "da", "label": "数据分析师"}
+    user = {"user": "admin", "role": "admin", "label": "内部管理(风控/分析/管理员)"}
     h = _RoutedHandler(user, path="/api/alerts?q=loan123")
     h._handle_alerts(urllib.parse.urlparse("/api/alerts?q=loan123"))
 
@@ -316,7 +316,7 @@ def test_handle_alerts_without_q_keyword_none(monkeypatch):
         "alerts",
         lambda **kw: captured.update(kw) or {"total": 0, "page": 1, "page_size": 20, "rows": []},
     )
-    user = {"user": "da", "role": "da", "label": "数据分析师"}
+    user = {"user": "admin", "role": "admin", "label": "内部管理(风控/分析/管理员)"}
     h = _RoutedHandler(user, path="/api/alerts")
     h._handle_alerts(urllib.parse.urlparse("/api/alerts"))
 

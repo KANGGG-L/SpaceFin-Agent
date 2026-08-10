@@ -148,7 +148,7 @@ PAGE = {
     "id": "compliance_audit",
     "label": "模型可解释性报告",
     # 合规审计明细属风控与管理员职责：贷后与 DA 不接触（PRD §7.3 语义）。
-    "roles": {"admin", "risk"},
+    "roles": {"admin"},
     "order": 90,
     "js": "p9_compliance_audit.js",
     "routes": {

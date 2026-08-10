@@ -139,9 +139,9 @@ _REAL_ATTR_PAYLOAD = {
 
 
 # ---------------------------------------------------------------- PAGE 契约
-def test_page_contract_admin_risk_and_route():
+def test_page_contract_admin_and_route():
     assert mod.PAGE["id"] == "compliance_audit"
-    assert mod.PAGE["roles"] == {"admin", "risk"}
+    assert mod.PAGE["roles"] == {"admin"}
     assert ("GET", "/api/compliance_audit") in mod.PAGE["routes"]
     assert mod.PAGE["js"] == "p9_compliance_audit.js"
 

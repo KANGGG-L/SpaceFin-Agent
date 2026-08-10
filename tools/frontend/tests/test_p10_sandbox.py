@@ -66,7 +66,7 @@ def report(tmp_path):
 # ---------------------------------------------------------------- PAGE 契约
 def test_page_contract_roles_and_route():
     assert mod.PAGE["id"] == "sandbox"
-    assert mod.PAGE["roles"] == {"admin", "risk", "da"}
+    assert mod.PAGE["roles"] == {"admin"}
     assert ("GET", "/api/sandbox") in mod.PAGE["routes"]
     assert mod.PAGE["js"] == "p10_sandbox.js"
 

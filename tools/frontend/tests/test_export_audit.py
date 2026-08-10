@@ -84,7 +84,7 @@ def test_export_writes_audit_row(monkeypatch):
 
     handler = _StubHandler()
     parsed = urllib.parse.urlparse("/api/alerts/export?risk_class=可疑")
-    user = {"user": "risk", "role": "risk", "label": "风控策略经理"}
+    user = {"user": "admin", "role": "admin", "label": "内部管理(风控/分析/管理员)"}
 
     frontend_app.SpaceFinApp._handle_export(handler, parsed, user)
 
@@ -92,8 +92,8 @@ def test_export_writes_audit_row(monkeypatch):
     assert len(calls) == 1
     action, username, role, detail, result, ip = calls[0]
     assert action == "export"
-    assert username == "risk"
-    assert role == "risk"
+    assert username == "admin"
+    assert role == "admin"
     assert result == "success"
     assert ip == "203.0.113.7"
 
