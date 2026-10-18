@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS customer (
   credit_score   DOUBLE         NULL                    COMMENT '征信评分(合成, 均值680/标准差60)',
   income_monthly DECIMAL(12, 2) NULL                    COMMENT '月收入(合成, 元)',
   debt_ratio     DECIMAL(4, 2)  NULL                    COMMENT '负债收入比(合成, 0-1)',
+  industry       VARCHAR(32)    NULL                    COMMENT '借款人行业(合成, GB/T 4754 门类风格, 取值见 tools/risk/config.INDUSTRY_CATEGORIES)',
   created_at     TIMESTAMP      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录创建时间',
   PRIMARY KEY (customer_id)
 ) ENGINE = InnoDB COMMENT = '客户(借款人)主档 · 合成数据';
@@ -46,6 +47,13 @@ CREATE TABLE IF NOT EXISTS collateral (
   commute_min               DOUBLE         NULL         COMMENT '通勤时长(分钟)',
   is_high_risk_zone         TINYINT        NULL         COMMENT '是否落入高危区 1/0',
   spatial_feat_missing_pct  DECIMAL(4, 2)  NULL         COMMENT '空间特征缺失率(0-1)',
+  hall                      TINYINT        NULL         COMMENT '客厅数量(AVM 推理特征)',
+  bath                      TINYINT        NULL         COMMENT '卫生间数量(AVM 推理特征)',
+  bedrooms                  TINYINT        NULL         COMMENT '卧室数量=rooms(AVM 推理特征)',
+  floor_level               SMALLINT       NULL         COMMENT '所在楼层(AVM 推理特征)',
+  floor_total               SMALLINT       NULL         COMMENT '总楼层(AVM 推理特征)',
+  direction                 VARCHAR(8)     NULL         COMMENT '朝向 南/北/东/西/...(AVM 推理特征)',
+  parking                   TINYINT        NULL         COMMENT '车位 0/1(AVM 推理特征)',
   PRIMARY KEY (collateral_id)
 ) ENGINE = InnoDB COMMENT = '抵押物(房产)主档 + 空间特征 · 合成数据';
 

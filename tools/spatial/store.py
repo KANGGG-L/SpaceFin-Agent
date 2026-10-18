@@ -25,6 +25,7 @@ ZONE_COLS = [
     "sample_count",
     "median_unit_price",
     "median_ltv",
+    "ltv_sample_count",
     "price_dev_vs_city",
     "is_high_risk_zone",
     "high_risk_rule",
@@ -55,6 +56,7 @@ CREATE TABLE IF NOT EXISTS ads_spatial_zone (
     sample_count INT,
     median_unit_price DECIMAL(12,2),
     median_ltv DECIMAL(8,4),
+    ltv_sample_count INT,
     price_dev_vs_city DECIMAL(10,4),
     is_high_risk_zone TINYINT,
     high_risk_rule VARCHAR(16),
@@ -82,7 +84,8 @@ CREATE TABLE IF NOT EXISTS dws_spatial_feature (
     etl_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (entity_type, entity_id, build_date),
     KEY idx_feat_zone (zone_id),
-    KEY idx_feat_missing (spatial_feat_missing_pct)
+    KEY idx_feat_missing (spatial_feat_missing_pct),
+    KEY idx_feat_district (entity_type, district)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 """
 
@@ -92,8 +95,42 @@ def ensure_tables(conn) -> None:
     cur = conn.cursor()
     cur.execute(ZONE_DDL)
     cur.execute(FEATURE_DDL)
+    _ensure_zone_columns(cur)
+    _ensure_feature_indexes(cur)
     conn.commit()
     cur.close()
+
+
+# 同 _ensure_feature_indexes 的理由：CREATE TABLE IF NOT EXISTS 不会给已存在的表补新列，
+# 旧库上不补则 upsert_zones 会因未知列直接失败。1060 = Duplicate column name，幂等忽略。
+_ZONE_EXTRA_COLUMNS = [
+    ("ltv_sample_count", "INT AFTER median_ltv"),
+]
+
+
+def _ensure_zone_columns(cur) -> None:
+    for name, spec in _ZONE_EXTRA_COLUMNS:
+        try:
+            cur.execute(f"ALTER TABLE ads_spatial_zone ADD COLUMN {name} {spec}")
+        except pymysql.err.OperationalError as e:
+            if e.args[0] != 1060:  # 1060 = Duplicate column name（列已存在），忽略
+                raise
+
+
+# CREATE TABLE IF NOT EXISTS 不会给「已存在但缺索引」的表补索引，故单独补齐。
+# 单机展示首次 ensure 后即生效；旧库重复执行会因重复索引名报错，按 1061 幂等忽略。
+_FEATURE_EXTRA_INDEXES = [
+    ("idx_feat_district", "(entity_type, district)"),
+]
+
+
+def _ensure_feature_indexes(cur) -> None:
+    for name, cols in _FEATURE_EXTRA_INDEXES:
+        try:
+            cur.execute(f"ALTER TABLE dws_spatial_feature ADD INDEX {name} {cols}")
+        except pymysql.err.OperationalError as e:
+            if e.args[0] != 1061:  # 1061 = Duplicate key name（索引已存在），忽略
+                raise
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +225,8 @@ def _zone_tuple(z: dict, date: str) -> tuple:
             z["sample_count"],
             z["median_unit_price"],
             z["median_ltv"],
+            # LTV 型片区不产出该列（其 sample_count 本身就是 LTV 观测数），用 get 兜住
+            z.get("ltv_sample_count"),
             z["price_dev_vs_city"],
             z["is_high_risk_zone"],
             z["high_risk_rule"],
@@ -224,6 +263,7 @@ def upsert_zones(conn, zones: list[dict], date: str) -> int:
         " zone_type=VALUES(zone_type), city=VALUES(city), center_lng=VALUES(center_lng), "
         " center_lat=VALUES(center_lat), sample_count=VALUES(sample_count), "
         " median_unit_price=VALUES(median_unit_price), median_ltv=VALUES(median_ltv), "
+        " ltv_sample_count=VALUES(ltv_sample_count), "
         " price_dev_vs_city=VALUES(price_dev_vs_city), "
         " is_high_risk_zone=VALUES(is_high_risk_zone), "
         " high_risk_rule=VALUES(high_risk_rule), etl_ts=CURRENT_TIMESTAMP"

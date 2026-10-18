@@ -42,6 +42,11 @@ from etl import CITY_NAMES, _mysql_params, load_env
 TENCENT_GEOCODE_URL = "https://apis.map.qq.com/ws/geocoder/v1"
 GEOCODE_PATH = "/ws/geocoder/v1"
 
+# 腾讯鉴权类错误码（110 来源未授权 / 111 签名失败 / 112 无权限）：key 级故障，
+# 连续 AUTH_FAIL_LIMIT 次即熔断本轮，避免 6000 条配额逐条空转（2026-08-11 事故教训）。
+AUTH_ERROR_CODES = frozenset({110, 111, 112})
+AUTH_FAIL_LIMIT = 10
+
 # GCJ-02 → WGS-84（标准算法，误差 <1m）
 _A = 6378245.0
 _EE = 0.00669342162296594323
@@ -166,9 +171,10 @@ def query_tencent(key: str, address: str, region: str, sk: str = ""):
         "output": "json",
     }
     if sk:
-        # 注意：签名必须与最终 URL 的编码一致——值须经 quote 编码后再参与 MD5，
-        # 否则 '+' 等特殊字符会让签名与服务端不一致 → status=111 签名验证失败
-        sorted_qs = "&".join(f"{k}={quote(str(params[k]))}" for k in sorted(params))
+        # 腾讯 SN 签名：参数按名升序，值用【原始值】（不 quote 编码）拼接后 MD5。
+        # 实测经 quote 编码会得到 status=111 签名失败；原始值口径才通过校验。
+        # 最终请求 URL 仍用 quote 编码（下行 qs），仅签名串用原始值。
+        sorted_qs = "&".join(f"{k}={params[k]}" for k in sorted(params))
         params["sig"] = hashlib.md5(
             (GEOCODE_PATH + "?" + sorted_qs + sk).encode("utf-8")
         ).hexdigest()
@@ -245,7 +251,7 @@ def main():
         conn.close()
         return
 
-    hit = miss = err = 0
+    hit = miss = err = auth_fail_streak = 0
     t0 = time.time()
     # 每日配额保护：统计今日已消耗（last_queried_at 今日的 hit+miss），跑满 daily-limit 即停
     with conn.cursor() as cur:
@@ -307,6 +313,20 @@ def main():
             # 其它系统类错误（鉴权 110/111、限频 120、配额耗尽等）：
             # 不记 miss、不更新 last_queried_at，保留 pending 次日重跑，避免临时故障误判
             err += 1
+            # 鉴权类错误是 key 级故障（非瞬时）：连续 AUTH_FAIL_LIMIT 次即停止本轮，
+            # 不跑满 6000 条配额空转；退出码 0 放行 DAG（geocode 本轮跳过，主链不受阻）。
+            if status_code in AUTH_ERROR_CODES:
+                auth_fail_streak += 1
+                if auth_fail_streak >= AUTH_FAIL_LIMIT:
+                    print(
+                        f"[geocode_fill] 连续 {auth_fail_streak} 次腾讯鉴权失败 "
+                        f"(status=110/111/112)，判定 TENCENT_MAP_KEY/SK 失效，停止空转本轮跳过；"
+                        "请检查 .env 的 TENCENT_MAP_KEY/SK 后重跑",
+                        flush=True,
+                    )
+                    break
+            else:
+                auth_fail_streak = 0
             if err <= 5 or err % 50 == 0:
                 print(f"[geocode_fill] 腾讯系统错误 status={status_code} ({city},{community})")
             time.sleep(1)

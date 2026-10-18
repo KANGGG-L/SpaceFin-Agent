@@ -1,0 +1,8 @@
+# 缩小 crawler 镜像构建上下文（Dockerfile 仅 COPY tools/ 下少量文件）
+**/.venv
+**/node_modules
+**/__pycache__
+**/*.pyc
+output
+.git
+*.log

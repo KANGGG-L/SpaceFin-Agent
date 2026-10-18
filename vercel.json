@@ -6,7 +6,7 @@
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "https://20.70.128.18.nip.io/api/$1"
+      "destination": "https://<VPS_IP>.nip.io/api/$1"
     }
   ]
 }

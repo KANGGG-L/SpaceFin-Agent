@@ -72,6 +72,7 @@ ODS_TABLES = {
             ("credit_score", "DOUBLE", ""),
             ("income_monthly", "DECIMAL(12,2)", ""),
             ("debt_ratio", "DECIMAL(4,2)", ""),
+            ("industry", "VARCHAR(32)", ""),
             ("created_at", "DATETIME", "NOT NULL"),
         ],
         "key": ["customer_id"],
@@ -79,7 +80,7 @@ ODS_TABLES = {
     "ods_housing_sale": {
         "columns": [
             ("url_key", "VARCHAR(64)", "NOT NULL"),
-            ("url", "VARCHAR(1024)", "NOT NULL"),
+            ("url", "VARCHAR(4096)", "NOT NULL"),
             ("title", "VARCHAR(255)", ""),
             ("community", "VARCHAR(255)", ""),
             ("district", "VARCHAR(32)", ""),
@@ -109,7 +110,7 @@ ODS_TABLES = {
     "ods_housing_rent": {
         "columns": [
             ("url_key", "VARCHAR(64)", "NOT NULL"),
-            ("url", "VARCHAR(1024)", "NOT NULL"),
+            ("url", "VARCHAR(4096)", "NOT NULL"),
             ("title", "VARCHAR(255)", ""),
             ("community", "VARCHAR(255)", ""),
             ("district", "VARCHAR(32)", ""),
@@ -355,7 +356,7 @@ DWD_TABLES = {
             ("url_key", "VARCHAR(64)", "NOT NULL"),
             ("title", "VARCHAR(255)", ""),
             ("community", "VARCHAR(255)", ""),
-            ("city_code", "VARCHAR(8)", ""),
+            ("city_code", "VARCHAR(32)", ""),
             ("district", "VARCHAR(32)", ""),
             ("bedrooms", "INT", ""),
             ("halls", "INT", ""),
@@ -393,6 +394,7 @@ DWD_TABLES = {
             ("credit_score", "DOUBLE", ""),
             ("income_monthly", "DECIMAL(12,2)", ""),
             ("debt_ratio", "DECIMAL(4,2)", ""),
+            ("industry", "VARCHAR(32)", ""),
             ("property_addr", "VARCHAR(128)", ""),
             ("lat", "DOUBLE", ""),
             ("lng", "DOUBLE", ""),
@@ -410,6 +412,9 @@ DWD_TABLES = {
 
 # DWD 加工 SQL：清洗语义写死为「同一 url_key 保留 last_seen_date 最新一条」+
 # 「剔除无效报价/面积」+「楼龄缺失时由建造年份推算」；全部幂等（重跑先清空目标表）
+# 注意 `district AS city_code`：方案 A 后 district 存的不只是 21 城码，也可能是省外子域
+# 全拼（最长实测 shuangyashan=12）或 'unknown'，故下游 city_code 一律 VARCHAR(32)。
+# 列宽变更要 `sync.py --recreate` 才生效（CREATE TABLE IF NOT EXISTS 不改存量表）。
 DWD_FILL_SQL = {
     "dwd_housing_sale": (
         "INSERT INTO dwd.dwd_housing_sale "
@@ -429,7 +434,7 @@ DWD_FILL_SQL = {
         "INSERT INTO dwd.dwd_loan_detail "
         "SELECT l.loan_id, l.customer_id, l.collateral_id, l.loan_amount, l.balance, "
         "l.interest_rate, l.risk_class, l.origination_date, "
-        "c.credit_score, c.income_monthly, c.debt_ratio, "
+        "c.credit_score, c.income_monthly, c.debt_ratio, c.industry, "
         "co.property_addr, co.lat, co.lng, co.area, co.age, co.true_market_price, "
         "co.poi_density, co.commute_min, co.is_high_risk_zone, co.spatial_feat_missing_pct "
         "FROM ods.ods_loan l "
@@ -445,7 +450,7 @@ DWS_TABLES = {
     "dws_city_price_stats": {
         "columns": [
             ("stat_date", "DATE", "NOT NULL"),
-            ("city_code", "VARCHAR(8)", "NOT NULL"),
+            ("city_code", "VARCHAR(32)", "NOT NULL"),
             ("listing_count", "INT", ""),
             ("avg_unit_price_yuan", "DECIMAL(12,2)", ""),
             ("median_unit_price_yuan", "DECIMAL(12,2)", ""),
@@ -512,7 +517,7 @@ ADS_TABLES = {
     "ads_city_avg_price": {
         "columns": [
             ("stat_date", "DATE", "NOT NULL"),
-            ("city_code", "VARCHAR(8)", "NOT NULL"),
+            ("city_code", "VARCHAR(32)", "NOT NULL"),
             ("listing_count", "INT", ""),
             ("avg_unit_price_yuan", "DECIMAL(12,2)", ""),
             ("median_unit_price_yuan", "DECIMAL(12,2)", ""),

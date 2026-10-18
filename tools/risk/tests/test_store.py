@@ -62,6 +62,20 @@ def test_load_specific_loans_filters_by_in_clause():
     assert params == [11, 22]
 
 
+CUSTOMER_COLS = ["customer_id", "credit_score", "income_monthly", "debt_ratio", "industry"]
+
+
+def test_load_customers_selects_industry_for_policy_rules():
+    """行业作用域规则（P6 US-01）要求客户主档必须带出 industry 列。"""
+    conn = FakeConn().queue_result([(10000, 757, 12000.0, 0.4, "education")], CUSTOMER_COLS)
+
+    got = store.load_customers(conn)
+
+    sql, _ = conn.executed[0]
+    assert "industry" in sql
+    assert got[10000]["industry"] == "education"
+
+
 def test_empty_id_list_short_circuits_without_querying():
     """CDC 增量拿到空变更集时，绝不能退化成全表扫描。"""
     conn = FakeConn()
@@ -165,9 +179,9 @@ def test_loans_looked_up_by_collateral():
 def test_spatial_features_load_latest_build_date_only():
     conn = FakeConn()
     conn.queue_result([(501, 30.0, 25.0, "z1", 5.0)])
-    conn.queue_result([("z1", 1), ("z2", 0)])
+    conn.queue_result([("z1", 1, 23.0, 113.0), ("z2", 0, 23.5, 113.5)])
 
-    spatial, zone_risk = store.load_spatial(conn)
+    spatial, zone_risk, _ = store.load_spatial(conn)
 
     assert "MAX(build_date)" in conn.executed[0][0]
     assert spatial[501]["zone_id"] == "z1"
@@ -180,7 +194,7 @@ def test_null_missing_pct_treated_as_fully_missing():
     conn.queue_result([(501, None, None, None, None)])
     conn.queue_result([])
 
-    spatial, _ = store.load_spatial(conn)
+    spatial, _, _ = store.load_spatial(conn)
 
     assert spatial[501]["spatial_feat_missing_pct"] == 100.0
     assert spatial[501]["poi_density"] is None
@@ -188,7 +202,53 @@ def test_null_missing_pct_treated_as_fully_missing():
 
 def test_missing_spatial_tables_degrade_to_empty_maps():
     """S3 没跑过时空间表不存在，风险引擎应继续用 collateral 占位字段而不是崩掉。"""
-    assert store.load_spatial(RaisingConn()) == ({}, {})
+    assert store.load_spatial(RaisingConn()) == ({}, {}, {})
+
+
+# ================================================================ P6 空间惩罚项（A1：城市粒度）
+
+
+def test_load_spatial_loads_enabled_policies_into_map():
+    """ads_spatial_policy 中 enabled=1 的规则载入为新结构 (action/ltv_cap/center)。"""
+    conn = FakeConn()
+    conn.queue_result([(501, 30.0, 25.0, "z1", 5.0)])  # spatial
+    conn.queue_result([("z1", 1, 23.0, 113.0)])  # zone_risk + center
+    # policy: scope_type, scope_value, action, ltv_cap（无 cap 落 None；city 规则 center=None）
+    conn.queue_result([("city", "gz", "strict", None), ("city", "sh", "notice", None)])
+
+    _s, _z, policy = store.load_spatial(conn)
+
+    assert policy == {
+        ("city", "gz"): {"action": "strict", "ltv_cap": None, "center": None},
+        ("city", "sh"): {"action": "notice", "ltv_cap": None, "center": None},
+    }
+
+
+def test_load_spatial_ignores_disabled_policies():
+    """SQL 已是 WHERE enabled = 1，被禁用的规则不会进入 policy_map。
+
+    假 DB 不做行级过滤，故这里模拟 WHERE enabled=1 的返回结果——禁用行不出现在结果集里。
+    """
+    conn = FakeConn()
+    conn.queue_result([])
+    conn.queue_result([])
+    conn.queue_result([])  # WHERE enabled=1 已把禁用规则过滤掉，结果集为空
+
+    _s, _z, policy = store.load_spatial(conn)
+
+    assert policy == {}
+
+
+def test_compute_rows_applies_city_policy(loan, collateral):
+    """compute_rows 透传 policy_map：该城市 strict 规则把正常贷款抬一档到关注。"""
+    rows = store.compute_rows(
+        [loan],
+        {501: collateral},
+        {},
+        {},
+        spatial=({}, {}, {("city", "gz"): {"action": "strict"}}),
+    )
+    assert rows[0]["risk_class"] == "关注"
 
 
 def test_zone_hit_overrides_missing_pct_and_high_risk_flag(collateral):
@@ -333,6 +393,31 @@ def test_dws_tuple_normalizes_bools_and_missing_model_version():
     assert t[14] == "unknown"  # 血缘不能落 NULL，缺失即 unknown
 
 
+def test_dws_tuple_includes_is_rejected():
+    """A2：dws_risk_class 末尾第 16 列 is_rejected，rejected=True -> 1。"""
+    t = store._dws_tuple(_dws_row(is_rejected=True))
+
+    assert t[-1] == 1
+    assert len(t) == 16
+
+
+def test_ensure_ads_tables_adds_is_rejected_column(conn):
+    """A2 schema 变更：dws_risk_class 幂等补列 is_rejected TINYINT DEFAULT 0。"""
+    store.ensure_ads_tables(conn)
+
+    sql, _ = conn.find_sql("ALTER TABLE dws_risk_class ADD COLUMN is_rejected")
+    assert sql is not None
+
+
+def test_compute_rows_applies_zone_and_ltv_cap(loan, collateral):
+    """A2：city strict 带 ltv_cap，LTV 超 cap 才命中提级；is_rejected 默认为 False。"""
+    pm = {("city", "gz"): {"action": "strict", "ltv_cap": 0.4, "center": None}}
+    rows = store.compute_rows([loan], {501: collateral}, {}, {}, spatial=({}, {}, pm))
+
+    assert rows[0]["risk_class"] == "关注"
+    assert rows[0]["is_rejected"] is False
+
+
 def test_dws_upsert_is_idempotent_per_loan_id():
     conn = FakeConn()
     rows = [dict(_dws_row(), loan_id=1), dict(_dws_row(), loan_id=2)]
@@ -374,6 +459,7 @@ def _dws_row(**kw):
         "valuation_deviation_pct": None,
         "abnormal_valuation": False,
         "model_version": "s2-r4",
+        "is_rejected": False,
     }
     base.update(kw)
     return base

@@ -28,7 +28,7 @@
 kubectl apply redis-deployment.yaml   →  redis-service (任务队列 + 结果聚合)
 kubectl apply worker-deployment.yaml  →  k8s-crawler-worker ×3
                                             │ python -m anjuke_crawler.distributed.worker
-                                            │ asyncio 协程池 lpop 任务 → curl_cffi 抓取 → 解析 → hset
+                                            │ asyncio 串行消费 lpop 任务 → curl_cffi 抓取 → 解析 → hset
 producer (城市×页 任务 rpush)  ──────────▶  anjuke_task_queue
 exporter (hgetall 汇总去重)    ◀──────────  anjuke_results
 ```

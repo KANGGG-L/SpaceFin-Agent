@@ -13,6 +13,8 @@
 口径摘要（详见 docs/tech/components/spatial-feature.md）：
     - 价格面：DWD 有坐标挂牌行建 cKDTree，半径 5km 邻域中位单价为「局部价格基准」；
       每行/每小区价格偏差 = (单价-邻域中位)/邻域中位。
+    - 价格面片区的中位 LTV：同 (城市, 网格) 内抵押物 LTV 中位，样本 >= 3 才回填，
+      仅作展示（前端 tooltip/明细），不参与高危判定。
     - 高危区 A（价格洼地）：区块中位单价 <= 城市中位 * (1-0.25) 且样本 >= 20。
     - 高危区 B（LTV 集中）：抵押物网格内 LTV 中位 > 红线且样本 >= 3。
     - POI 密度：半径 2km 内挂牌数/面积（挂牌密度代理，非真实 POI）。
@@ -62,7 +64,9 @@ def main() -> None:
 
     # --- 价格面 + 高危区 ---
     tree, coords, prices = features.build_price_surface(sale_rows)
-    zones, zone_index = features.build_price_zones(sale_rows)
+    # 抵押 LTV 按价格面网格聚合，回填价格面片区的 median_ltv（展示用，不参与高危判定）
+    ltv_index = features.ltv_by_price_grid(collaterals)
+    zones, zone_index = features.build_price_zones(sale_rows, ltv_index=ltv_index)
     ltv_zones, ltv_zone_index = features.build_ltv_zones(collaterals)
 
     # --- DWS 特征 ---
@@ -88,10 +92,17 @@ def main() -> None:
         "n_ltv_zones": len(ltv_zones),
         "n_high_risk_ltv_zones": len(high_risk_ltv),
         "collateral_missing_ge75": len(missing_ge75),
+        # LTV 回填门禁三件套：可落位抵押物（有坐标+有 LTV+可定城市）、命中的价格面网格数、
+        # 最终被回填的价格面片区数。三者层层收窄，落库前就能看出回填是不是「一笔都没填上」。
+        "n_collateral_ltv_placeable": sum(len(v) for v in ltv_index.values()),
+        "n_ltv_backfill_grids": len(ltv_index),
+        "n_price_zones_ltv_backfilled": len([z for z in zones if z["median_ltv"] is not None]),
         "high_risk_rule_a": f"zone_median_price <= city_median*(1-{config.PRICE_LOW_RATIO}) "
         f"and samples>={config.MIN_ZONE_SAMPLES}",
         "high_risk_rule_b": f"zone_median_ltv > {config.LTV_RED_LINE} "
         f"and samples>={config.MIN_LTV_ZONE_SAMPLES}",
+        "ltv_backfill_rule": "price zone median_ltv = median(collateral ltv in same "
+        f"(city, grid)) when samples>={config.MIN_LTV_BACKFILL_SAMPLES}",
     }
 
     os.makedirs(args.out_dir, exist_ok=True)

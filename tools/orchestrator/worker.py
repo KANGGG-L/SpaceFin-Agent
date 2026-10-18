@@ -10,7 +10,8 @@ worker 容器（泛化版）：不绑定城市/类型，由 master 分配任务�
 3. 抓取：每页从 master /proxy/qg 或 /proxy/free 取代理（弹出式分配），
    curl_cffi 伪装抓取；代理复用（一个代理连抓多页直到被拦才换）。
 4. 轻量解析（跳过 geocode，ETL 后置）：sale→numeric schema，fangyuan→rent schema；
-   按 URL set 去重（跨轮权威），每页写入 raw JSONL（含重复）+ stats JSONL（每页一行）。
+   按 URL set 去重（跨轮权威），每页写入 raw JSONL（含重复，路径 `raw/ds=<观测日>/`，
+   行内带 `_page/_wave/_crawled_at` 观测证据）+ stats JSONL（每页一行）。
 5. 完成判定：空页早停（连续 EMPTY_LIMIT 页无卡片）、达 pages 上限、达 target、站点 404、
    该城 qg 预算耗尽、长期取不到代理，先到先完成；终态统一经 finish_task 写
    finished=1 + finish_reason（Airflow 依据 master /crawl_status 判断本 run 是否跑完）。
@@ -25,6 +26,7 @@ worker 容器（泛化版）：不绑定城市/类型，由 master 分配任务�
     MASTER_URL   master 地址，默认 http://master:5100
     REDIS_HOST   默认 spacefin-redis
     WORKER_ID    稳定 ID（compose 注入 worker-N），否则用 HOSTNAME
+    CRAWL_RUN_ID 本 run 的观测日（DAG 传 {{ ds }}），决定 raw/ds=<观测日>/ 目录名
 """
 
 import argparse
@@ -33,6 +35,7 @@ import os
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from urllib.parse import quote, urlencode
 
@@ -42,8 +45,13 @@ from curl_cffi import requests as creq
 MASTER_URL = os.getenv("MASTER_URL", "http://master:5100")
 REDIS_HOST = os.getenv("REDIS_HOST", "spacefin-redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+WAVE_KEY = "spacefin:crawl_wave"  # 当前波次名（master 维护），落盘时随行带上
+# 本 run 的**观测日**（DAG 传 {{ ds }}）。raw 目录以它命名，所以必须来自 DAG：
+# 用 wall clock 的话，跨零点重试或补跑会把同一批抓取拆成两个观测日。
+RUN_DS = os.getenv("CRAWL_RUN_ID", "").strip() or "manual"
 WORKERS_KEY = "spacefin:workers"
 TASK_QUEUE = "spacefin:tasks"
+TASK_PROCESSING_QUEUE = "spacefin:tasks:processing"  # 可靠队列：认领中暂存，崩溃可回收
 TASK_PREFIX = "spacefin:task:"
 LOCK_PREFIX = "spacefin:task_lock:"
 PROGRESS_PREFIX = "spacefin:crawl_progress:"
@@ -80,6 +88,7 @@ NO_PROXY_MAX_CYCLES = int(os.getenv("NO_PROXY_MAX_CYCLES", 5))
 # 42 个 finished，Airflow Sensor 会烧完 6h 超时、ETL 永不执行。计数存在 task Hash、
 # 不随队列 JSON 传递（队列元素仍只含 {city,type,pages,target,round}）。
 MAX_REQUEUE = int(os.getenv("MAX_REQUEUE", 3))
+PROXY_REPORT_ENABLED = os.getenv("PROXY_REPORT_ENABLED", "1") == "1"
 # 青果短效代理认证（可选，经 .env 注入；代理池中青果代理需带认证使用）
 QG_USER = os.getenv("QG_USER", "")
 QG_PWD = os.getenv("QG_PWD", "")
@@ -119,6 +128,35 @@ MY_ID = os.getenv("WORKER_ID") or os.getenv("HOSTNAME") or "worker-unknown"
 
 def log(city, msg):
     print(f"[worker:{MY_ID} {time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def report_proxy_failure(master_url, city, typ, proxy_src, page, proxy_str):
+    """上报青果代理抓取失败，退还青果 IP 预算配额。"""
+    if not PROXY_REPORT_ENABLED:
+        return False
+    if proxy_src != "qg" or not proxy_str:
+        return False
+    attempt = f"{MY_ID}-{page}-{int(time.time() * 1000)}-{os.urandom(2).hex()}"
+    params = {
+        "city": city,
+        "type": typ,
+        "src": "qg",
+        "page": page,
+        "proxy": proxy_str,
+        "attempt": attempt,
+    }
+    url = f"{master_url.rstrip('/')}/proxy/report?{urlencode(params)}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "SpaceFin-Worker"})
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode())
+            refunded = bool(data.get("refunded"))
+            if refunded:
+                log(city, f"refunded proxy {proxy_str} for p{page} ({typ})")
+            return refunded
+    except Exception as e:
+        log(city, f"report_proxy_failure error: {e}")
+        return False
 
 
 # ---------------- 注册与心跳 ----------------
@@ -200,6 +238,10 @@ def get_proxy_with_source(rdb, city=None, typ=None):
 # 容器内 Chrome 151 会被站点反爬按指纹软拦截、只回空心壳）
 _RENDER_TIMEOUT = int(os.getenv("RENDER_TIMEOUT", 90))
 HOST_RENDER_URL = os.getenv("HOST_RENDER_URL", "http://host.docker.internal:8899/render")
+# 宿主渲染服务「基础设施不可用」哨兵：宿主 Chrome 没起 / 连接被拒(ECONNREFUSED) /
+# DNS 失败 / 超时等。与「反爬软封」(渲染服务正常响应但回了验证码/错误页→返回 None)
+# 严格区分，避免被误判成软封去无限换 IP 重试、静默烧代理配额。
+RENDER_UNREACHABLE = object()
 
 
 def _render_with_timeout(city, page, proxy=None, auth=0, timeout=_RENDER_TIMEOUT):
@@ -207,7 +249,9 @@ def _render_with_timeout(city, page, proxy=None, auth=0, timeout=_RENDER_TIMEOUT
 
     proxy 提供时渲染服务经本地转发代理走青果/免费池（真实消耗青果配额）；
     auth=1 表示青果代理（转发时注入 Basic 认证），auth=0 为免费代理。
-    超时/异常返回 None，调用方走 html is None 分支（记 failed/blocked 后 continue），不会崩。
+    连接级错误(ECONNREFUSED/超时/DNS 失败)返回 RENDER_UNREACHABLE 哨兵——属基础设施
+    问题，调用方据此走终态失败而非软封重试；其它异常与渲染服务正常响应的拦截页返回
+    None，调用方走 html is None 分支(记 failed/blocked 后换 IP 重试)，不会崩。
     """
     url = f"{HOST_RENDER_URL}?city={city}&page={page}"
     if proxy:
@@ -215,6 +259,10 @@ def _render_with_timeout(city, page, proxy=None, auth=0, timeout=_RENDER_TIMEOUT
     try:
         with urllib.request.urlopen(url, timeout=timeout) as r:
             return r.read().decode("utf-8", "ignore")
+    except urllib.error.URLError as e:
+        # 连接被拒 / 超时 / DNS 失败：宿主渲染服务不可达（基础设施不可用）
+        log(city, f"p{page} fangyuan render service UNREACHABLE: {repr(e)[:200]}")
+        return RENDER_UNREACHABLE
     except Exception as e:  # noqa: BLE001
         log(city, f"p{page} fangyuan render error: {repr(e)[:200]}")
         return None
@@ -253,6 +301,10 @@ def fetch_page(city, typ, page, proxy_str, proxy_src=""):
         # 渲染路径：宿主 Chrome 渲染列表页，经本地转发代理真实走青果/免费代理；
         # 子进程超时包裹，防 Chrome 异常时静默挂死
         html = _render_with_timeout(city, page, proxy_str, auth=1 if proxy_src == "qg" else 0)
+        if html is RENDER_UNREACHABLE:
+            # 渲染服务基础设施不可达（宿主 Chrome 没起等），原样上抛哨兵，
+            # 让 crawl 主循环走终态失败而非当软封换 IP 重试。
+            return RENDER_UNREACHABLE
         if _is_blocked_html(html):
             return None
         return html
@@ -321,30 +373,100 @@ def _append_jsonl(path, obj):
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 
+def _page_stat(city, typ, page, status, wave, *, new_count=0, dup_count=0, proxy="", proxy_src=""):
+    """逐页观测记录（crawl_census 的取数单位），统一在此构造以防字段漂移。
+
+    `wave`/`worker` 是 census 主键 (ds,city,typ,wave,worker) 的两维：缺任一维，
+    「这一页今天没扫到」就归因不到具体波次/容器，也就无法判定该城当日观测是否完备。
+    观测日本身在目录名里（stats/ds=<RUN_DS>/），与 raw 同一套约定，不重复写进行。
+    """
+    return {
+        "city": city,
+        "type": typ,
+        "page": page,
+        "status": status,
+        "wave": wave,
+        "worker": MY_ID,
+        "proxy": proxy,
+        "proxy_src": proxy_src,
+        "new_count": new_count,
+        "dup_count": dup_count,
+        "ts": time.time(),
+    }
+
+
 # ---------------- 任务认领 ----------------
 def _task_key(city, typ):
     return f"{TASK_PREFIX}{city}:{typ}"
 
 
 def claim_task(rdb):
-    """LPOP 队列任务；抢任务锁成功才返回（防同城双跑）。"""
+    """从队列可靠领取任务（C 类健壮性修复）。
+
+    原实现先 `LPOP` 出队再 `SET NX` 抢锁：若崩溃于二者之间，任务已从队列移除但锁未握住
+    → 永久丢失。改为 `RPOPLPUSH` 把任务**原子**移动到 processing 列表（认领中暂存），再抢锁；
+    无论抢锁成败，任务都仍在 processing 列表里（或放回主队列），绝不会无声消失。崩溃遗留的
+    processing 任务由 `recover_processing_tasks` 在 worker 启动时回收重派。
+
+    领取成功后才把任务从 processing 列表移除；抢锁失败则放回主队列等待重派。
+    """
     while True:
-        raw = rdb.lpop(TASK_QUEUE)
+        raw = rdb.rpoplpush(TASK_QUEUE, TASK_PROCESSING_QUEUE)
         if raw is None:
             return None
         task = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode())
         city, typ = task["city"], task.get("type", "sale")
         key = _task_key(city, typ)
         if not rdb.exists(key):
+            _drop_processing(rdb, raw)  # 任务状态已不存在（master 已清理），丢弃
             continue
         # 抢任务锁：SET NX EX，成功才认领
         lock_key = LOCK_PREFIX + f"{city}:{typ}"
         if not rdb.set(lock_key, MY_ID, nx=True, ex=LOCK_TTL):
-            continue  # 已被其他 worker 持有
+            # 锁被其他 worker 持有：放回主队列，不占 processing（避免重复占用/饿死）
+            # 先 rpush 回主队列；若 rpush 抛错则任务仍留在 processing 列表（可被
+            # recover_processing_tasks 回收），绝不先 drop 再 rpush 导致任务丢失。
+            try:
+                rdb.rpush(TASK_QUEUE, raw)
+            except Exception:
+                continue
+            _drop_processing(rdb, raw)
+            continue
         # 标记 running（保留原 round）
         rdb.hset(key, mapping={"status": "running", "worker": MY_ID, "worker_hb": time.time()})
         task["round"] = int(rdb.hget(key, "round") or 0)
+        # 领取成功：从 processing 列表移除（后续崩溃只丢「已认领成功」的任务，可重入幂等）
+        _drop_processing(rdb, raw)
         return task
+
+
+def _drop_processing(rdb, raw):
+    """从 processing 列表移除指定任务（领取成功或需重派时调用）。"""
+    try:
+        rdb.lrem(TASK_PROCESSING_QUEUE, 1, raw)
+    except Exception:
+        pass
+
+
+def recover_processing_tasks(rdb):
+    """worker 启动时回收 processing 列表里残留的任务（崩溃遗留）回到主队列。
+
+    仅搬运、不认领：回到主队列后由正常 claim_task 流程重新加锁领取，避免重复跑或丢任务。
+    返回回收条数。
+    """
+    try:
+        items = rdb.lrange(TASK_PROCESSING_QUEUE, 0, -1)
+    except Exception:
+        return 0
+    moved = 0
+    for raw in items:
+        try:
+            rdb.lrem(TASK_PROCESSING_QUEUE, 1, raw)
+            rdb.rpush(TASK_QUEUE, raw)
+            moved += 1
+        except Exception:
+            pass
+    return moved
 
 
 def release_lock(rdb, city, typ):
@@ -423,8 +545,16 @@ def crawl(rdb, city, typ, pages, target, round_n, out_dir):
     """抓取一个任务（每 run 每城一轮）。代理复用：一个代理连抓多页直到被拦才换。"""
     from anjuke_crawler.parse import save_numeric_schema_csv  # noqa: F401 (etl 用)
 
-    raw_path = os.path.join(out_dir, "raw", f"{city}_{typ}_{MY_ID}.jsonl")
-    stats_path = os.path.join(out_dir, "stats", f"requests_{city}_{typ}.jsonl")
+    raw_path = os.path.join(out_dir, "raw", f"ds={RUN_DS}", f"{city}_{typ}_{MY_ID}.jsonl")
+    stats_path = os.path.join(
+        out_dir, "stats", f"ds={RUN_DS}", f"requests_{city}_{typ}_{MY_ID}.jsonl"
+    )
+    # 波次在任务领取时读一次即可：一个任务属于一个波次，中途推进到下一波也不改判
+    # （master 的波次快照才是权威时间线，行上的 _wave 只是辅助归因）。
+    try:
+        wave = rdb.get(WAVE_KEY) or ""
+    except Exception:  # noqa: BLE001
+        wave = ""
 
     key = _task_key(city, typ)
     urls_key = URLSET_PREFIX + f"{city}:{typ}"
@@ -510,24 +640,35 @@ def crawl(rdb, city, typ, pages, target, round_n, out_dir):
             # 否则代理池整体失效时 worker 会无限换代理而永不中止。
 
         html = fetch_page(city, typ, page, proxy_str, proxy_src)
+        if html is RENDER_UNREACHABLE:
+            # 宿主渲染服务不可达（基础设施问题，非反爬软封）：不要再换 IP 重试，
+            # 否则会静默烧代理配额且永不提示宿主没起渲染服务。直接终态失败并打醒目告警。
+            log(
+                city,
+                "宿主渲染服务不可达(host.docker.internal:8899)，fangyuan 将无法采集——"
+                "请先在宿主机启动渲染服务(见 tools/orchestrator/render_smoke_test.sh)",
+            )
+            finish_task(
+                rdb,
+                city,
+                typ,
+                "render_unreachable",
+                new_total,
+                dup_total,
+                blocked_total,
+                pages_done,
+            )
+            return new_total
         if html is None:
+            if proxy_src == "qg":
+                report_proxy_failure(MASTER_URL, city, typ, proxy_src, page, proxy_str)
             consecutive_fail += 1
             blocked_total += 1
             # 失败页也写 stats：否则被反爬吃掉的请求在统计里完全不可见，
             # 事后无法区分「这城没数据」和「这城全被拦了」。
             _append_jsonl(
                 stats_path,
-                {
-                    "city": city,
-                    "type": typ,
-                    "page": page,
-                    "proxy": proxy_str,
-                    "proxy_src": proxy_src,
-                    "new_count": 0,
-                    "dup_count": 0,
-                    "status": "blocked",
-                    "ts": time.time(),
-                },
+                _page_stat(city, typ, page, "blocked", wave, proxy=proxy_str, proxy_src=proxy_src),
             )
             log(
                 city,
@@ -575,17 +716,9 @@ def crawl(rdb, city, typ, pages, target, round_n, out_dir):
             log(city, f"p{page} [{typ}] site 404 (beyond real page depth), round done")
             _append_jsonl(
                 stats_path,
-                {
-                    "city": city,
-                    "type": typ,
-                    "page": page,
-                    "proxy": proxy_str,
-                    "proxy_src": proxy_src,
-                    "new_count": 0,
-                    "dup_count": 0,
-                    "status": "not_found",
-                    "ts": time.time(),
-                },
+                _page_stat(
+                    city, typ, page, "not_found", wave, proxy=proxy_str, proxy_src=proxy_src
+                ),
             )
             finish_reason = "not_found"
             break
@@ -601,17 +734,15 @@ def crawl(rdb, city, typ, pages, target, round_n, out_dir):
                 )
                 _append_jsonl(
                     stats_path,
-                    {
-                        "city": city,
-                        "type": typ,
-                        "page": page,
-                        "proxy": proxy_str,
-                        "proxy_src": proxy_src,
-                        "new_count": 0,
-                        "dup_count": 0,
-                        "status": "zero_card_recheck",
-                        "ts": time.time(),
-                    },
+                    _page_stat(
+                        city,
+                        typ,
+                        page,
+                        "zero_card_recheck",
+                        wave,
+                        proxy=proxy_str,
+                        proxy_src=proxy_src,
+                    ),
                 )
                 proxy_str = None
                 continue
@@ -642,23 +773,29 @@ def crawl(rdb, city, typ, pages, target, round_n, out_dir):
         dup_total += len(dup_rows)
 
         # raw JSONL：全部写入（含重复，供 ETL 去重/吞吐统计）
+        # _page 是缺席判定的地基：「今天没见到这条」只有在「扫到了它当年所在页或更深」
+        # 时才成立，所以每条观测都必须带上它出现在第几页。
+        crawled_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         for r in rows:
             r["_source"] = "render" if typ == "fangyuan" else ("qg" if proxy_str else "unknown")
+            r["_page"] = page
+            r["_wave"] = wave
+            r["_crawled_at"] = crawled_at
             _append_jsonl(raw_path, r)
         # stats JSONL：每页一行
         _append_jsonl(
             stats_path,
-            {
-                "city": city,
-                "type": typ,
-                "page": page,
-                "proxy": proxy_str,
-                "proxy_src": proxy_src,
-                "new_count": len(new_rows),
-                "dup_count": len(dup_rows),
-                "status": "ok",
-                "ts": time.time(),
-            },
+            _page_stat(
+                city,
+                typ,
+                page,
+                "ok",
+                wave,
+                new_count=len(new_rows),
+                dup_count=len(dup_rows),
+                proxy=proxy_str,
+                proxy_src=proxy_src,
+            ),
         )
 
         # 每页一次 pipeline：进度 + 任务状态
@@ -719,6 +856,13 @@ def main():
         sys.exit(1)
 
     threading.Thread(target=_hb_loop, args=(rdb,), daemon=True).start()
+    # 启动回收：上轮崩溃遗留的「认领中」任务回到主队列，避免静默丢任务
+    try:
+        recovered = recover_processing_tasks(rdb)
+        if recovered:
+            log("-", f"recovered {recovered} in-flight task(s) from processing queue")
+    except Exception as e:  # noqa: BLE001
+        log("-", f"processing queue recovery skipped: {e}")
     log("-", f"generic worker up, master={MASTER_URL}")
 
     while True:

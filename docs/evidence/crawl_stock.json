@@ -1,0 +1,17 @@
+{
+  "generated_at": "2026-10-17T19:16:06+00:00",
+  "environment": {
+    "python": "3.14.4",
+    "platform": "Linux-6.18.54.1-microsoft-standard-WSL2-x86_64-with-glibc2.43"
+  },
+  "source": "output/guangdong/etl_report.json",
+  "reproducibility": "unavailable",
+  "metrics": {
+    "sale_total": null,
+    "rent_total": null,
+    "n_raw": null,
+    "unique_total": null,
+    "dup_rate": null
+  },
+  "note": "产物缺失：output/guangdong/etl_report.json 位于被 gitignore 的 output/ 目录、未随仓库分发；如需生成请本机跑 `python3 tools/orchestrator/etl.py`。"
+}

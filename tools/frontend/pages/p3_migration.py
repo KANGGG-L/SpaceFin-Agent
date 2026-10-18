@@ -7,17 +7,26 @@
 丢了 loan_id 就无法追踪单笔的迁徙方向。因此必须在贷款粒度上留每日快照，
 本模块建 dws_risk_class_snapshot（snap_date + loan_id）补上这一层。
 
-三个入口：
-  1. snapshot(date)      —— 把 dws_risk_class 当前态落成 date 的快照（真实数据）。
-                            供 tools/pipeline/run_pipeline.py 在 risk 阶段之后调用，
-                            或手工 CLI：python tools/frontend/pages/p3_migration.py --snapshot
-  2. backfill_demo(...)  —— 【演示用】基于当前 200 行造历史快照，见函数注释里的免责说明。
-  3. GET /api/migration  —— 页面接口：迁徙矩阵 + Roll Rate 趋势 + 可选日期列表。
+四个入口：
+  1. snapshot(date)              —— 把 dws_risk_class 当前态落成 date 的快照（真实数据，is_demo=0）。
+                                    供 tools/pipeline/run_pipeline.py 在 risk 阶段之后调用，
+                                    或手工 CLI：python tools/frontend/pages/p3_migration.py --snapshot
+  2. backfill_demo(...)          —— 【演示用】基于当前明细按估值回溯重算分类造历史快照（is_demo=1）。
+  3. reconstruct_from_ads()      —— 【重建用】按 ads_risk_class 真实类笔数把当前贷款池贴回历史各日
+                                    （is_demo=2，非真实观测，仅重建「哪笔属于哪类」这一层缺失信息）。
+  4. GET /api/migration          —— 页面接口：迁徙矩阵 + Roll Rate 趋势 + 可选日期列表。
+
+is_demo 三态（数据层诚实标记，接口/页面据此如实告知用户）：
+    0 = 真实快照（snapshot() 每日累积）
+    1 = 演示回填（backfill_demo()，估值回溯是造的）
+    2 = 重建自 ADS 分布（reconstruct_from_ads()，类笔数是真的，单笔归属是重建假设）
 
 CLI（可重复执行，主键幂等覆盖）：
-    python tools/frontend/pages/p3_migration.py --backfill          # 造 6 期演示历史 + 今日真实快照
-    python tools/frontend/pages/p3_migration.py --snapshot          # 只落今日真实快照
-    python tools/frontend/pages/p3_migration.py --purge-demo        # 清掉所有演示回填数据
+    python tools/frontend/pages/p3_migration.py --backfill              # 造 6 期演示历史 + 今日真实快照
+    python tools/frontend/pages/p3_migration.py --snapshot              # 只落今日真实快照
+    python tools/frontend/pages/p3_migration.py --reconstruct-from-ads  # 按真实类笔数重建历史快照
+    python tools/frontend/pages/p3_migration.py --purge-demo            # 清掉演示回填（is_demo=1）
+    python tools/frontend/pages/p3_migration.py --purge-recon           # 清掉重建快照（is_demo=2）
 """
 
 import argparse
@@ -224,7 +233,7 @@ def backfill_demo(periods=6, step_days=7, end_date=None, seed=DEMO_SEED):
 
 
 def purge_demo():
-    """清掉全部演示回填行（保留真实快照），用于切换到真实历史积累模式。"""
+    """清掉全部演示回填行（保留真实快照与重建快照），用于切换到真实历史积累模式。"""
     ensure_snapshot_table()
     conn = db.crawl_conn()
     try:
@@ -238,17 +247,135 @@ def purge_demo():
         conn.close()
 
 
+def purge_recon():
+    """清掉全部重建快照行（保留真实快照与演示回填），用于重建口径需要重算时。"""
+    ensure_snapshot_table()
+    conn = db.crawl_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(f"DELETE FROM {SNAPSHOT_TABLE} WHERE is_demo=2")
+        conn.commit()
+        n = cur.rowcount
+        cur.close()
+        return {"deleted": n}
+    finally:
+        conn.close()
+
+
+def _ads_class_counts():
+    """读 ads_risk_class：{stat_date: {risk_class: loan_count}}。
+
+    这是重建的硬约束来源——类笔数来自报送链路真实算出来的每日分布，
+    不是造的；重建只补「哪笔贷款属于哪一类」这一层 dws_risk_class 已抹掉的信息。
+    """
+    conn = db.crawl_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT stat_date, risk_class, loan_count FROM ads_risk_class")
+        out = {}
+        for stat_date, risk_class, loan_count in cur.fetchall():
+            out.setdefault(str(stat_date), {})[risk_class] = int(loan_count)
+        cur.close()
+        return out
+    finally:
+        conn.close()
+
+
+def _existing_snap_dates():
+    """快照表已存在的所有 snap_date（去重建时撞真实快照 / 重复贴同一天）。"""
+    ensure_snapshot_table()
+    conn = db.crawl_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(f"SELECT DISTINCT snap_date FROM {SNAPSHOT_TABLE}")
+        dates = {str(r[0]) for r in cur.fetchall()}
+        cur.close()
+        return dates
+    finally:
+        conn.close()
+
+
+def reconstruct_from_ads():
+    """【重建快照 · 非真实观测】按 ads_risk_class 真实类笔数，把当前贷款池贴回历史各日。
+
+    ⚠️ 这些行 is_demo=2，页面/接口显式标注「重建自 ADS 分布」，绝不等于真实历史观测。
+    为什么需要：dws_risk_class 只保留当前态（覆盖写）、ads_risk_class 只有类粒度（5 行，
+    丢了 loan_id），历史贷款级快照从未留存，迁徙矩阵无期初。本函数用 ads_risk_class 里**真实**
+    的每日类笔数作为硬约束，把当前 5000 笔贷款按 LTV 升序切片贴回各历史日——
+    类笔数严格对齐报送口径，单笔归属是重建假设（按风险排序，边界贷款随分布变化迁徙，
+    因而矩阵呈现真实量级的迁徙，而非凭空编造方向）。
+
+    与 backfill_demo 的区别：
+      · demo 用估值回溯**倒推 LTV** 再分类（行情输入是造的）；
+      · reconstruct 直接吃**真实类笔数**（报送链路算出来的），只重建「哪笔属于哪类」。
+    真实历史快照仍由 snapshot() 每日累积（is_demo=0），三者可共存于同一张表，靠 is_demo 区分。
+
+    幂等 & 安全：相同 ads_risk_class 内容每次产出完全相同行，主键覆盖写；若某历史日已存在
+    快照（含真实快照 08-25）则跳过，不覆盖、不重复贴。某日类笔数合计与当前贷款池规模不符
+    时也跳过该日（宁可缺一期也不造错账）。
+    """
+    counts = _ads_class_counts()
+    if not counts:
+        return {
+            "recon_dates": 0,
+            "rows": 0,
+            "skipped": True,
+            "message": "ads_risk_class 无数据，无法重建",
+        }
+
+    existing = _existing_snap_dates()
+    # 当前贷款池（真实余额/估值/LTV）；按 LTV 升序排——LTV 越大风险越差越靠后，
+    # 重建时由后往前填最差类，符合「LTV 抬升 → 下迁」的真实机理。
+    detail = sorted(
+        _current_detail(),
+        key=lambda r: r[5] if r[5] is not None else 1e9,  # ltv 升序，None 置末
+    )
+    pool = len(detail)
+
+    rows = []
+    recon_dates, skipped_dates = [], []
+    for snap_date, cls_counts in sorted(counts.items()):
+        if snap_date in existing:
+            skipped_dates.append(snap_date)  # 已存在快照（含真实 08-25），不覆盖
+            continue
+        total = sum(cls_counts.get(c, 0) for c in CLASS_ORDER)
+        if total != pool:
+            # 该日类笔数合计与当前贷款池规模不符，贴不齐 → 跳过错账。
+            skipped_dates.append(snap_date)
+            continue
+        pos = 0
+        for cls in CLASS_ORDER:
+            n = cls_counts.get(cls, 0)
+            for r in detail[pos : pos + n]:
+                loan_id, cust, coll, balance, valuation, ltv, _real_cls = r
+                rows.append((snap_date, loan_id, cust, coll, balance, valuation, ltv, cls, 2))
+            pos += n
+        recon_dates.append(snap_date)
+
+    n = _upsert_rows(rows)
+    return {
+        "recon_dates": len(recon_dates),
+        "recon_date_list": recon_dates,
+        "rows": n,
+        "is_demo": 2,
+        "skipped_dates": skipped_dates,
+    }
+
+
 # ---------------- 查询 ----------------
 
 
 def _snapshot_dates(cur):
-    """可选快照日期（含每期笔数与是否演示），倒序——页面默认取最近两期。"""
+    """可选快照日期（含每期笔数与 is_demo 取值），倒序——页面默认取最近两期。
+
+    is_demo 返回原始取值（0 真实 / 1 演示 / 2 重建），供页面区分「演示」与「重建」标注。
+    """
     cur.execute(
         f"SELECT snap_date, COUNT(*), MAX(is_demo) FROM {SNAPSHOT_TABLE} "
         "GROUP BY snap_date ORDER BY snap_date DESC"
     )
     return [
-        {"snap_date": str(r[0]), "loan_count": int(r[1]), "is_demo": bool(r[2])}
+        {"snap_date": str(r[0]), "loan_count": int(r[1]), "is_demo": int(r[2])}
         for r in cur.fetchall()
     ]
 
@@ -427,8 +554,16 @@ def migration(date_from=None, date_to=None):
                 "roll_rate": {"periods": [], "series": [], "overall": []},
                 "message": (
                     "快照不足两期，无法计算迁徙。请先执行 "
-                    "python tools/frontend/pages/p3_migration.py --backfill"
+                    "python tools/frontend/pages/p3_migration.py --reconstruct-from-ads "
+                    "（按 ads_risk_class 真实类笔数重建历史）或 --backfill（演示）"
                 ),
+                # 双轨：整句进 migration 字典（CLI 命令名为语言中立标识，原样保留）
+                "message_key": (
+                    "快照不足两期，无法计算迁徙。请先执行 "
+                    "python tools/frontend/pages/p3_migration.py --reconstruct-from-ads "
+                    "（按 ads_risk_class 真实类笔数重建历史）或 --backfill（演示）"
+                ),
+                "message_params": {},
             }
 
         available = [d["snap_date"] for d in dates]
@@ -442,7 +577,8 @@ def migration(date_from=None, date_to=None):
         result = _matrix(cur, date_from, date_to)
         asc_dates = sorted(available)
         roll = _roll_rate(cur, asc_dates)
-        demo_dates = [d["snap_date"] for d in dates if d["is_demo"]]
+        demo_dates = [d["snap_date"] for d in dates if d["is_demo"] == 1]
+        recon_dates = [d["snap_date"] for d in dates if d["is_demo"] == 2]
 
         cur.close()
         return {
@@ -453,6 +589,7 @@ def migration(date_from=None, date_to=None):
             **result,
             "roll_rate": roll,
             "demo_dates": demo_dates,
+            "recon_dates": recon_dates,
             "message": None,
         }
     finally:
@@ -474,9 +611,9 @@ def handle_migration(ctx):
 PAGE = {
     "id": "migration",
     "label": "迁徙与降级追踪",
-    # DA 是主用户；贷后（postloan）不涉及分类迁徙分析，按 PRD §7.3 不开放。
-    "roles": {"admin", "risk", "da"},
-    "order": 30,
+    # 仅 admin 可见（分类迁徙分析；历史 risk/da 角色已移除，postloan 按 PRD §7.3 不开放）。
+    "roles": {"admin"},
+    "order": 50,
     "js": "p3_migration.js",
     "routes": {
         ("GET", "/api/migration"): handle_migration,
@@ -488,22 +625,45 @@ PAGE = {
 
 
 def main():
-    ap = argparse.ArgumentParser(description="P3 迁徙矩阵 · 快照写入 / 演示回填")
-    ap.add_argument("--snapshot", action="store_true", help="落一份当日真实快照")
-    ap.add_argument("--backfill", action="store_true", help="生成演示历史快照（可重复执行）")
-    ap.add_argument("--purge-demo", action="store_true", help="删除全部演示回填行")
+    ap = argparse.ArgumentParser(description="P3 迁徙矩阵 · 快照写入 / 演示回填 / 重建")
+    ap.add_argument("--snapshot", action="store_true", help="落一份当日真实快照（is_demo=0）")
+    ap.add_argument(
+        "--backfill", action="store_true", help="生成演示历史快照（is_demo=1，可重复执行）"
+    )
+    ap.add_argument(
+        "--reconstruct-from-ads",
+        action="store_true",
+        help="按 ads_risk_class 真实类笔数重建历史快照（is_demo=2，非真实观测）",
+    )
+    ap.add_argument("--purge-demo", action="store_true", help="删除全部演示回填行（is_demo=1）")
+    ap.add_argument("--purge-recon", action="store_true", help="删除全部重建快照行（is_demo=2）")
     ap.add_argument("--date", default=None, help="业务日期 YYYY-MM-DD，默认当前业务日")
     ap.add_argument("--periods", type=int, default=6, help="回填期数（默认 6）")
     ap.add_argument("--step-days", type=int, default=7, help="回填步长天数（默认 7）")
     args = ap.parse_args()
 
-    if not (args.snapshot or args.backfill or args.purge_demo):
-        ap.error("至少指定 --snapshot / --backfill / --purge-demo 之一")
+    if not (
+        args.snapshot
+        or args.backfill
+        or args.reconstruct_from_ads
+        or args.purge_demo
+        or args.purge_recon
+    ):
+        ap.error(
+            "至少指定 --snapshot / --backfill / --reconstruct-from-ads "
+            "/ --purge-demo / --purge-recon 之一"
+        )
 
     ensure_snapshot_table()
+    # 清理动作优先于写入：若同时给了 --purge-recon + --reconstruct-from-ads，
+    # 先清空旧重建再贴新的，避免残留行与新行混合。
+    if args.purge_recon:
+        print(f"[p3] 清理重建数据 {purge_recon()}")
     if args.purge_demo:
         print(f"[p3] 清理演示数据 {purge_demo()}")
-    if args.backfill:
+    if args.reconstruct_from_ads:
+        print(f"[p3] 重建快照（非真实观测，is_demo=2）{reconstruct_from_ads()}")
+    elif args.backfill:
         print(
             f"[p3] 演示回填（非真实历史，is_demo=1）"
             f"{backfill_demo(periods=args.periods, step_days=args.step_days, end_date=args.date)}"

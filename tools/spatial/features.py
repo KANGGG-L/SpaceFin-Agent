@@ -89,10 +89,47 @@ def neighborhood_median(
 # ---------------------------------------------------------------------------
 
 
+def ltv_by_price_grid(collaterals: list[dict]) -> dict[tuple, list[float]]:
+    """按 (city, 网格) 聚合抵押物 LTV，供价格面片区回填「片区抵押 LTV 中位」。
+
+    join key 比 `build_ltv_zones` 多一维城市码：价格面网格键本身是 (city, 网格)
+    两级（同一网格坐标可被两个城市码各占一个片区，见 test_price_zones_are_split_per_city），
+    抵押物必须用**同一套城市码**解析后才能对上，否则会把 A 市抵押物的 LTV 填进 B 市片区。
+    城市码由 `config.city_code_from_addr` 从 property_addr 解析（业务库抵押物没有城市码列）。
+
+    排除规则与 `build_ltv_zones` 同源：坐标缺失 / LTV 缺失 → 定不了位、测不出值，
+    不构成样本；城市码解析不出（地址缺失或非广东 21 城）→ 无法与价格面 join，同样跳过。
+
+    返回原始 LTV 列表而非中位数：样本量门槛与中位口径都留给 `build_price_zones` 一处
+    决定，同时让调用方（main.py 的 dry-run 报告）能直接统计「可落位抵押物数」。
+    """
+    bucket: dict[tuple, list[float]] = {}
+    for c in collaterals:
+        if c.get("lat") is None or c.get("lng") is None or c.get("ltv") is None:
+            continue
+        city = c.get("city") or config.city_code_from_addr(c.get("property_addr"))
+        if city is None:
+            continue
+        glng, glat = config.grid_key(c["lng"], c["lat"])
+        bucket.setdefault((city, glng, glat), []).append(float(c["ltv"]))
+    return bucket
+
+
 def build_price_zones(
-    rows: list[dict], radius_km: float = config.NEIGHBOR_RADIUS_KM
+    rows: list[dict],
+    radius_km: float = config.NEIGHBOR_RADIUS_KM,
+    ltv_index: dict | None = None,
 ) -> tuple[list[dict], dict]:
     """按 (city, 网格) 聚合挂牌行，构建价格面区块画像，并标记高危区。
+
+    ltv_index 为 `ltv_by_price_grid` 的产物（{(city, glng, glat): [ltv,...]}）：命中
+    同一网格且样本 >= MIN_LTV_BACKFILL_SAMPLES 时，回填 median_ltv / ltv_sample_count，
+    否则两者留 None——样本不足时留空而不是给个 1-2 笔撑起来的中位数，理由同
+    `build_ltv_zones` 的样本门槛。默认 None 表示不回填（价格面片区的 median_ltv 恒为
+    None，与本参数引入前行为完全一致）。
+
+    注意回填**不参与高危判定**：价格面片区的高危仍只由规则 A（价格洼地）决定，
+    median_ltv 在这里是展示用的补充信息，规则 B 仍走 `build_ltv_zones` 的独立网格。
 
     返回 (zones, zone_index)：
     - zones: 区块画像行列表，每行含网格键/中心/样本量/中位单价/与城市中位偏差/高危标记
@@ -125,6 +162,12 @@ def build_price_zones(
         dev = (med_price / cm - 1.0) if cm and cm > 0 else None
         # 高危规则 A：区块中位显著低于城市中位（价格洼地）且样本足够
         high_risk = bool(cm and med_price <= cm * (1 - config.PRICE_LOW_RATIO))
+        # 抵押 LTV 回填：同一 (city, 网格) 内的抵押物 LTV 中位，样本不足则留空
+        ltvs = (ltv_index or {}).get((city, glng, glat)) or []
+        med_ltv = ltv_n = None
+        if len(ltvs) >= config.MIN_LTV_BACKFILL_SAMPLES:
+            med_ltv = round(float(np.median(ltvs)), 4)
+            ltv_n = len(ltvs)
         zone_id = f"price-{city}-{glng:.2f}-{glat:.2f}"
         zones.append(
             {
@@ -135,7 +178,8 @@ def build_price_zones(
                 "center_lat": round(ctr_lat, 6),
                 "sample_count": n,
                 "median_unit_price": round(med_price, 2),
-                "median_ltv": None,
+                "median_ltv": med_ltv,
+                "ltv_sample_count": ltv_n,
                 "price_dev_vs_city": round(dev, 4) if dev is not None else None,
                 "is_high_risk_zone": int(high_risk),
                 "high_risk_rule": "price_low" if high_risk else None,

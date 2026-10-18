@@ -18,6 +18,7 @@ master 容器（主备高可用版）：任务分配 + 资源（代理）管理 
       GET /tasks                任务状态总览（round/new/dup/source）
       GET /crawl_status         本 run 采集完成状态（Airflow Sensor 依据）
       GET /proxy/qg|/free|/random?city=&type=  原子弹出一个可用代理（按城预算约束）
+      GET /proxy/report?city=&type=&src=qg&page=&proxy=&attempt=  抓取失败退款上报
       GET /proxies?worker=x     该 worker 当前 proxy list
 """
 
@@ -42,6 +43,7 @@ POOL_QG = "spacefin:proxy_pool:qg"  # 青果短效代理池（优先使用）
 POOL_FREE = "spacefin:proxy_pool:free"  # 免费代理池（兜底）
 WORKERS_KEY = "spacefin:workers"  # set of worker names
 TASK_QUEUE = "spacefin:tasks"  # list of pending tasks
+TASK_PROCESSING_QUEUE = "spacefin:tasks:processing"  # processing task queue
 TASK_PREFIX = "spacefin:task:"  # hash per city:type
 LEADER_KEY = "spacefin:master:leader"  # current leader
 HB_KEY = "spacefin:master:heartbeat"  # leader heartbeat ts
@@ -51,12 +53,28 @@ QG_LAST_POP_KEY = "spacefin:qg_last_pop"  # 最近一次成功发放青果的时
 QG_REFILL_KEY = "spacefin:qg_last_refill"  # 最近一次青果提取时间戳（提取限流窗口）
 FREE_USED_KEY = "spacefin:free_used"  # 本轮已发放的免费代理计数（免费池总上限）
 LOCK_PREFIX = "spacefin:task_lock:"  # 任务独占锁前缀
-PHASE_KEY = "spacefin:phase"  # 阶段：sale(先出售) / fangyuan(后出租)
-STOP_KEY = "spacefin:stop"  # 全局终止信号（fangyuan 提前结束/资源耗尽置位）
+PHASE_KEY = "spacefin:phase"  # 调度模式观测标记（2026-08-07 起恒置 "city-interleave"，仅作观测）
+STOP_KEY = "spacefin:stop"  # 全局终止信号（资源耗尽/物理终态置位）
 EMPTY_CYCLES_KEY = "spacefin:empty_cycles"  # 双池连续空转轮数计数（终止判定用）
 IP_USED_PREFIX = "spacefin:ip_used:"  # 每城每类型已发放的青果代理次数
+IP_REFUNDED_PREFIX = "spacefin:ip_refunded:"  # 每城每类型失败退还次数
 IP_BUDGET_PREFIX = "spacefin:ip_budget:"  # 每城每类型青果预算（便于外部查看）
+REFUND_SEEN_PREFIX = "spacefin:refund_seen:"  # 退款 nonce 防重
 RUN_CURRENT_KEY = "spacefin:crawl_run:current"  # 当前 run id
+
+# 波次状态机 Redis 键与配置
+WAVE_KEY = "spacefin:crawl_wave"  # 当前波次：floor/rescue/depth/done
+WAVE_NEXT_KEY = "spacefin:crawl_wave:next"  # 瞬态崩溃安全转移标记
+WAVE_LOG_PREFIX = "spacefin:crawl_wave_log:"  # 每波次快照 hash（按 run 分键）
+# 按 run 分键而非全局单键：单键会在每次新 run 的 bootstrap 被清空，
+# 于是「上一轮各波次实际爬了多少」这份唯一的观测证据每晚消失（census 无从取数）。
+WAVE_LOG_TTL = int(os.getenv("WAVE_LOG_TTL", 14 * 86400))
+WAVE_ENABLED = os.getenv("WAVE_ENABLED", "1") == "1"
+WAVE_FLOOR_PAGES = int(os.getenv("WAVE_FLOOR_PAGES", 5))
+WAVE_DEPTH_ENABLED = os.getenv("WAVE_DEPTH_ENABLED", "1") == "1"
+FANGYUAN_FREE_RESCUE = os.getenv("FANGYUAN_FREE_RESCUE", "1") == "1"
+ACTIVE_WAVES = ("floor", "rescue", "depth")
+FLOOR_MET = {"pages_exhausted", "empty_pages", "not_found", "target_reached"}
 
 POOL_SIZE_MIN = int(os.getenv("POOL_SIZE_MIN", 60))
 QG_TARGET = int(os.getenv("QG_TARGET", 5))  # 青果池目标保有量
@@ -66,12 +84,10 @@ WORKER_TTL = int(os.getenv("WORKER_TTL", 120))  # worker 心跳超时(秒)
 WORKER_HB_TTL = int(os.getenv("WORKER_HB_TTL", 120))  # worker 心跳 key TTL
 MASTER_PORT = int(os.getenv("MASTER_PORT", 5100))
 QG_BUDGET = int(os.getenv("QG_BUDGET", 1000))  # 青果 IP 总预算（跑满 1000）
-QG_SALE_BUDGET = int(os.getenv("QG_SALE_BUDGET", 600))  # sale 阶段青果配额（前 600）
-# 青果提取限流窗口（秒）：两次提取至少间隔该时长，让提取速率匹配 worker 消耗速率
-# （5 worker × 60s 寿命 ≈ 60s 消耗 5 个 → 窗口 60s 正好无缝续供、池子无滞留过期）。
-# 2026-08-05 实测原 25 池目标 + 无限流曾 5 分钟烧 980/1000，其中大部分是
-# 「提 25 用 1-5，滞留池中 55s 过期」的浪费；窗口 60s + QG_TARGET=5 后
-# 日供给上限 720/天 > 1000 配额，配额成为硬闸门而非限流成为瓶颈。
+QG_SALE_BUDGET = int(
+    os.getenv("QG_SALE_BUDGET", 500)
+)  # 历史观测字段（/tasks 回显）；2026-08-07 起不再作为发放闸门，每城配额改由 try_consume_ip 保障
+# 补池节流（秒）：避免高并发时频繁触发青果 API（青果提取有频控，默认 60s 经验值）
 QG_REFILL_INTERVAL = int(os.getenv("QG_REFILL_INTERVAL", 60))
 FREE_BUDGET = int(
     os.getenv("FREE_BUDGET", 1000)
@@ -82,16 +98,16 @@ MAX_REQUEUE = int(
 )  # 单任务一次 run 内重排次数上限（收敛保证，非重试调优）
 
 # ---------------- 每城 IP 预算 ----------------
-# 青果 1000 IP 按城市配额：头部城（gz/sz）各占 15%，其余 19 城均分。
-# sale 池 600 = 91×2 + 22×19；fangyuan 池 400 = 67×2 + 14×19。
+# 青果 1000 IP 按城市配额：头部城（gz/sz）各占 60，其余 19 城各 20（总额 500/500）。
+# 失败退款后语义为"成功页数上限"。
 IP_BUDGET_ENABLED = os.getenv("IP_BUDGET_ENABLED", "1") == "1"
 BUDGET_TOP_CITIES = [
     c.strip() for c in os.getenv("BUDGET_TOP_CITIES", "gz,sz").split(",") if c.strip()
 ]
-IP_BUDGET_SALE_TOP = int(os.getenv("IP_BUDGET_SALE_TOP", 91))
-IP_BUDGET_SALE_OTHER = int(os.getenv("IP_BUDGET_SALE_OTHER", 22))
-IP_BUDGET_FY_TOP = int(os.getenv("IP_BUDGET_FY_TOP", 67))
-IP_BUDGET_FY_OTHER = int(os.getenv("IP_BUDGET_FY_OTHER", 14))
+IP_BUDGET_SALE_TOP = int(os.getenv("IP_BUDGET_SALE_TOP", 60))
+IP_BUDGET_SALE_OTHER = int(os.getenv("IP_BUDGET_SALE_OTHER", 20))
+IP_BUDGET_FY_TOP = int(os.getenv("IP_BUDGET_FY_TOP", 60))
+IP_BUDGET_FY_OTHER = int(os.getenv("IP_BUDGET_FY_OTHER", 20))
 IP_BUDGET_JSON = os.getenv("IP_BUDGET_JSON", "")
 CRAWL_RUN_ID = os.getenv("CRAWL_RUN_ID", "manual")  # 本次 run 标识（Airflow 传 {{ ds }}）
 
@@ -116,6 +132,7 @@ QG_API = os.getenv(
 QG_USER = os.getenv("QG_USER", "")
 QG_PWD = os.getenv("QG_PWD", "")
 QG_ENABLED = os.getenv("QG_ENABLED", "0") == "1"
+_qg_seq = [0]  # 青果提取 seq 自增（部分实现要求唯一请求序号）
 
 # 任务定义：广东 21 城 × sale(出售)/fangyuan(出租)。
 # pages 分开：sale=100, fangyuan=300（出租翻得更深，空页早停仍会提前收敛）。
@@ -148,12 +165,27 @@ PAGES_RENT = int(os.getenv("PAGES_RENT", 300))
 TARGET = int(os.getenv("TARGET", 999999))
 
 
+TASK_TYPES = [t.strip() for t in os.getenv("TASK_TYPES", "sale,fangyuan").split(",") if t.strip()]
+
+
 def _build_default_tasks():
-    """生成 42 任务（21 城 × sale/fangyuan）。"""
+    """生成任务清单（21 城 × TASK_TYPES，默认 sale/fangyuan 共 42 任务）。
+
+    2026-08-07 改（fangyuan 先执行）：全 21 城 fangyuan 排在前、sale 排在后，
+    呼应「fangyuan 优先 + sale 用免费池兜底」的预算分配——fangyuan 波次先消耗其 500 qg，
+    再进入 sale 波次（qg 500 + 免费池）。每城每类型配额仍由 try_consume_ip 单独保障。
+
+    2026-08-28 改（TASK_TYPES 可裁剪类型）：fangyuan 依赖宿主 Chrome 渲染 + 代理池，
+    青果 key 过期期间长期 0 行；TASK_TYPES=sale 即放弃出租、只爬出售（止损空转）。
+    未知类型名忽略；两类型都在时保持「fangyuan 先、sale 后」的原顺序。
+    """
     tasks = []
-    for c in CITIES:
-        tasks.append({"city": c, "type": "sale", "pages": PAGES_SALE, "target": TARGET})
-        tasks.append({"city": c, "type": "fangyuan", "pages": PAGES_RENT, "target": TARGET})
+    if "fangyuan" in TASK_TYPES:
+        for c in CITIES:
+            tasks.append({"city": c, "type": "fangyuan", "pages": PAGES_RENT, "target": TARGET})
+    if "sale" in TASK_TYPES:
+        for c in CITIES:
+            tasks.append({"city": c, "type": "sale", "pages": PAGES_SALE, "target": TARGET})
     return tasks
 
 
@@ -315,21 +347,18 @@ def fetch_qg_proxies(num=5):
         from curl_cffi import requests as creq
 
         n = min(num, 1000)
-        url = (
-            QG_API.split("?")[0]
-            + "?"
-            + urllib.parse.urlencode(
-                {
-                    **{
-                        k: v
-                        for k, v in [
-                            p.split("=", 1) for p in QG_API.split("?")[1].split("&") if "=" in p
-                        ]
-                    },
-                    "num": str(n),
-                }
-            )
-        )
+        base, _, q = QG_API.partition("?")
+        params = {k: v for k, v in (p.split("=", 1) for p in q.split("&") if "=" in p)}
+        # 修正默认 URL 缺参导致的 400：注入青果账号 key（QG_USER），
+        # 兜底 area=0（全国随机），并对每个提取请求自增唯一 seq。
+        if QG_USER and "key" not in params:
+            params["key"] = QG_USER
+        if not params.get("area"):
+            params["area"] = "0"
+        _qg_seq[0] += 1
+        params["seq"] = str(_qg_seq[0])
+        params["num"] = str(n)
+        url = base + "?" + urllib.parse.urlencode(params)
         r = creq.get(url, impersonate="chrome", timeout=20, headers={"User-Agent": UA})
         data = r.json()
         if data.get("code") != "SUCCESS":
@@ -627,57 +656,285 @@ def _task_key(city, typ):
     return f"{TASK_PREFIX}{city}:{typ}"
 
 
-# 阶段推进顺序（单向，不回退）：sale 跑完或青果 sale 配额耗尽才切 fangyuan。
-# 收尾扫描据此区分「阶段已过去」与「阶段还没到」，见 _phase_is_past。
-PHASE_ORDER = ("sale", "fangyuan")
+# 调度顺序（2026-08-09 LIFO 修复 + 波次状态机）：
+# 全 42 任务（21 城 × sale/fangyuan）自 bootstrap 起同时有效。
+# master 采用 LPUSH 入队，worker 从队尾 RPOPLPUSH 领取（FIFO），
+# 领取顺序与 DEFAULT_TASKS 顺序一致：全 21 城 fangyuan（gz→yf）优先执行，
+# 随后全 21 城 sale（gz→yf）执行。
+# 每城每类型配额由 try_consume_ip 单独保障（各 500，合计 QG_BUDGET=1000）。
+SCHED_MODE = "city-interleave"
 
 
-def _get_phase(rdb):
-    """当前阶段：sale(先跑出售，最快消耗青果配额) / fangyuan(后跑出租，不耗 IP)。缺省 sale。"""
-    return rdb.get(PHASE_KEY) or "sale"
+def _init_task_state(city, typ, wave, pages, target, **overrides):
+    """统一生成任务 Hash 初始字典，杜绝多处重复定义。"""
+    st = {
+        "city": city,
+        "type": typ,
+        "pages": str(pages),
+        "target": str(target),
+        "round": "0",
+        "status": "pending",
+        "finished": "0",
+        "finish_reason": "",
+        "requeue_count": "0",
+        "count": "0",
+        "new_count": "0",
+        "dup_count": "0",
+        "blocked_count": "0",
+        "pages_done": "0",
+        "worker": "",
+        "worker_hb": "0",
+        "wave": str(wave),
+        "ts": str(time.time()),
+    }
+    st.update({k: str(v) for k, v in overrides.items()})
+    return st
 
 
-def _init_phase_tasks(rdb, typ):
-    """初始化某阶段任务（状态缺失才创建 pending round=0 并入队，已有状态保持断点）。"""
+def _is_fangyuan_free_rescue_allowed(rdb, city, typ):
+    """rescue 波次且开启 FANGYUAN_FREE_RESCUE 时，允许 fangyuan 回落免费池。"""
+    if typ != "fangyuan":
+        return True
+    if not FANGYUAN_FREE_RESCUE:
+        return False
+    task_wave = (rdb.hget(_task_key(city, typ), "wave") or "") if (city and typ) else ""
+    return task_wave == "rescue"
+
+
+def _init_all_tasks(rdb):
+    """初始化全部 42 任务（21 城 × sale/fangyuan），LPUSH 入队保证 FIFO。
+
+    DEFAULT_TASKS 顺序为 [gz_fangyuan, sz_fangyuan, ..., gz_sale, sz_sale, ...]。
+    master 经 LPUSH 依次压入队首，worker 从队尾 RPOPLPUSH 领取，保证领取顺序与
+    DEFAULT_TASKS 顺序完全一致（FIFO）。
+    仅当任务 hash 缺失（首次创建）才入队，避免每轮 maintenance 重复入队堆积。
+    """
     for t in DEFAULT_TASKS:
-        if t["type"] != typ:
-            continue
         key = _task_key(t["city"], t["type"])
         if not rdb.exists(key):
-            state = {
-                "city": t["city"],
-                "type": t["type"],
-                "pages": t["pages"],
-                "target": t["target"],
-                "round": 0,
-                "status": "pending",
-                "finished": "0",
-                "finish_reason": "",
-                "requeue_count": "0",
-                "worker": "",
-                "count": 0,
-                "worker_hb": 0,
-                "ts": time.time(),
-            }
-            rdb.hset(key, mapping=state)
+            st = _init_task_state(
+                t["city"],
+                t["type"],
+                "floor" if WAVE_ENABLED else "",
+                t["pages"],
+                t["target"],
+            )
+            rdb.hset(key, mapping=st)
             rdb.set(
                 f"{IP_BUDGET_PREFIX}{t['city']}:{t['type']}",
                 _budget_of(t["city"], t["type"]),
             )
-            rdb.rpush(TASK_QUEUE, json.dumps(t))
+            rdb.lpush(TASK_QUEUE, json.dumps(t))
 
 
 def init_tasks(rdb):
-    """按当前阶段初始化任务：仅当前阶段（sale/fangyuan）任务创建并入队。"""
-    _init_phase_tasks(rdb, _get_phase(rdb))
+    """初始化全部任务（按城交错：全 42 同时有效并入队）。"""
+    _init_all_tasks(rdb)
     log(f"tasks initialized, queue len={rdb.llen(TASK_QUEUE)}")
 
 
-def _all_type_done(rdb, typ):
-    """某类型全部任务已终态 finished=1（用于阶段推进判断）。"""
+def _ensure_task_hashes(rdb):
+    """确保全部 42 任务 Hash 与预算镜像存在（不入队）。"""
     for t in DEFAULT_TASKS:
-        if t["type"] != typ:
+        key = _task_key(t["city"], t["type"])
+        if not rdb.exists(key):
+            st = _init_task_state(
+                t["city"],
+                t["type"],
+                "floor" if WAVE_ENABLED else "",
+                WAVE_FLOOR_PAGES if WAVE_ENABLED else t["pages"],
+                t["target"],
+            )
+            rdb.hset(key, mapping=st)
+        rdb.set(
+            f"{IP_BUDGET_PREFIX}{t['city']}:{t['type']}",
+            _budget_of(t["city"], t["type"]),
+        )
+
+
+def _wave_log_key(run_id=None):
+    return f"{WAVE_LOG_PREFIX}{run_id or CRAWL_RUN_ID}"
+
+
+def _snapshot_wave(rdb, current_wave):
+    """记录当前波次历史快照到 spacefin:crawl_wave_log:{run}（按波次名幂等写入，防崩溃重试重复累加）。"""
+    log_key = _wave_log_key()
+    for t in DEFAULT_TASKS:
+        city, typ = t["city"], t["type"]
+        key = _task_key(city, typ)
+        if not rdb.exists(key):
             continue
+        st = rdb.hgetall(key)
+        snap = {
+            "wave": current_wave,
+            "reason": st.get("finish_reason", ""),
+            "new": int(st.get("new_count", 0) or 0),
+            "dup": int(st.get("dup_count", 0) or 0),
+            "blocked": int(st.get("blocked_count", 0) or 0),
+            # planned：本波计划页数。任务 Hash 会在下一波派发时被覆盖，
+            # 所以「计划 vs 实扫」只能在此刻定格（census 用它判定 head 是否扫够）。
+            "pages": int(st.get("pages", 0) or 0),
+            "pages_done": int(st.get("pages_done", 0) or 0),
+            "ip_used": _used_of(rdb, city, typ),
+            "ts": time.time(),
+        }
+        field = f"{city}:{typ}"
+        raw = rdb.hget(log_key, field)
+        try:
+            history = json.loads(raw) if raw else {}
+            if isinstance(history, list):
+                history = {x.get("wave", "unknown"): x for x in history}
+        except Exception:
+            history = {}
+        history[current_wave] = snap
+        rdb.hset(log_key, field, json.dumps(history))
+    rdb.expire(log_key, WAVE_LOG_TTL)
+
+
+def _get_wave_targets(rdb, wave_name):
+    """根据状态推导当前波次的目标任务列表（按执行顺序）。"""
+    if wave_name == "floor":
+        # 领取顺序：每城先 fangyuan 后 sale，CITIES 序（gz/sz 先）
+        targets = []
+        for c in CITIES:
+            targets.append(
+                {"city": c, "type": "fangyuan", "pages": WAVE_FLOOR_PAGES, "target": TARGET}
+            )
+            targets.append({"city": c, "type": "sale", "pages": WAVE_FLOOR_PAGES, "target": TARGET})
+        return targets
+    elif wave_name == "rescue":
+        # rescue: 上一波 finish_reason ∉ FLOOR_MET
+        targets = []
+        for c in CITIES:
+            for typ in ("fangyuan", "sale"):
+                key = _task_key(c, typ)
+                fin_reason = (rdb.hget(key, "finish_reason") or "") if rdb.exists(key) else ""
+                if fin_reason not in FLOOR_MET:
+                    targets.append(
+                        {"city": c, "type": typ, "pages": WAVE_FLOOR_PAGES, "target": TARGET}
+                    )
+        return targets
+    elif wave_name == "depth":
+        if not WAVE_DEPTH_ENABLED:
+            return []
+        # depth: ip_used < budget 且 finish_reason != "not_found"
+        top_cities = [c for c in BUDGET_TOP_CITIES if c in CITY_SET]
+        other_cities = [c for c in CITIES if c not in top_cities]
+        ordered_cities = top_cities + other_cities
+        targets = []
+        for c in ordered_cities:
+            for typ in ("fangyuan", "sale"):
+                key = _task_key(c, typ)
+                fin_reason = (rdb.hget(key, "finish_reason") or "") if rdb.exists(key) else ""
+                used = _used_of(rdb, c, typ)
+                budget = _budget_of(c, typ)
+                if fin_reason != "not_found" and used < budget and budget > 0:
+                    pages = PAGES_RENT if typ == "fangyuan" else PAGES_SALE
+                    targets.append({"city": c, "type": typ, "pages": pages, "target": TARGET})
+        return targets
+    return []
+
+
+def _open_wave(rdb, w):
+    """打开指定波次：重置目标任务状态并 LPUSH 入队。全部完成后 SET wave=w, DEL wave:next。"""
+    targets = _get_wave_targets(rdb, w)
+    if not targets:
+        rdb.set(WAVE_KEY, w)
+        rdb.delete(WAVE_NEXT_KEY)
+        log(f"wave '{w}' has 0 target tasks, marked as {w}")
+        return
+
+    queued_set = set()
+    for q_key in (TASK_QUEUE, TASK_PROCESSING_QUEUE):
+        for item in rdb.lrange(q_key, 0, -1):
+            try:
+                d = json.loads(item) if isinstance(item, str) else json.loads(item.decode())
+                queued_set.add((d["city"], d.get("type", "sale")))
+            except Exception:
+                pass
+
+    # 正序 LPUSH：targets 依次 lpush 压入队首，worker 从队尾 RPOPLPUSH 领取，
+    # 弹出顺序严格与 targets 列表正序完全一致（FIFO）
+    for t in targets:
+        city, typ = t["city"], t["type"]
+        key = _task_key(city, typ)
+        wave_pages = t["pages"]
+        rdb.hset(
+            key,
+            mapping=_init_task_state(city, typ, w, wave_pages, t["target"], requeue_count="0"),
+        )
+        if (city, typ) not in queued_set:
+            payload = {
+                "city": city,
+                "type": typ,
+                "pages": wave_pages,
+                "target": t["target"],
+                "wave": w,
+            }
+            rdb.lpush(TASK_QUEUE, json.dumps(payload))
+            queued_set.add((city, typ))
+
+    rdb.set(WAVE_KEY, w)
+    rdb.delete(WAVE_NEXT_KEY)
+    log(f"wave '{w}' opened with {len(targets)} tasks, queue len={rdb.llen(TASK_QUEUE)}")
+
+
+def _wave_tick(rdb):
+    """波次状态机调度逻辑（每 maintenance 周期由 leader 调用）。"""
+    if not WAVE_ENABLED:
+        init_tasks(rdb)
+        return
+
+    _ensure_task_hashes(rdb)
+
+    next_wave = rdb.get(WAVE_NEXT_KEY)
+    if next_wave:
+        log(f"resuming interrupted wave transition to '{next_wave}'")
+        _open_wave(rdb, next_wave)
+        return
+
+    wave = rdb.get(WAVE_KEY)
+    if wave is None:
+        _open_wave(rdb, "floor")
+        return
+
+    if wave == "done":
+        return
+
+    if not _all_tasks_done(rdb):
+        return
+
+    # 当前波次全部 42 任务已完成 -> 快照并推进后继链
+    _snapshot_wave(rdb, wave)
+
+    chain = ["floor", "rescue", "depth", "done"]
+    try:
+        curr_idx = chain.index(wave)
+    except ValueError:
+        curr_idx = 0
+
+    nxt = "done"
+    for cand in chain[curr_idx + 1 :]:
+        if cand == "done":
+            nxt = "done"
+            break
+        targets = _get_wave_targets(rdb, cand)
+        if targets:
+            nxt = cand
+            break
+
+    if nxt == "done":
+        rdb.set(WAVE_KEY, "done")
+        log("all waves completed, wave=done")
+        return
+
+    rdb.set(WAVE_NEXT_KEY, nxt)
+    _open_wave(rdb, nxt)
+
+
+def _all_tasks_done(rdb):
+    """全部 42 任务已终态 finished=1（用于终止判定）。"""
+    for t in DEFAULT_TASKS:
         key = _task_key(t["city"], t["type"])
         if not rdb.exists(key):
             return False
@@ -686,43 +943,22 @@ def _all_type_done(rdb, typ):
     return True
 
 
-def _check_phase_transition(rdb):
-    """sale -> fangyuan：**所有 sale 城都已完成** 才切换，并初始化 fangyuan 任务。
-
-    2026-08-05 改（诉求：每城配额兑现 + 每城有数据）：
-    原逻辑在 `consumed >= QG_SALE_BUDGET` 时整体截断并 phase_ended 封存未完成任务——
-    先到先得抢全局池的城市提前烧完 500 配额，其余城市即使还有自己的 18/75 预算
-    也被「别人把配额吃完」拖累封存，本轮不再调度 → 每城数据不保证。
-    现改为：切换只依赖 `_all_type_done`（所有 sale 城 finished）。
-    每城的收敛由 worker 端保障：该城预算耗尽（used>=budget）→ 转免费池 →
-    免费池也空 → `budget_exhausted` 终态（NO_PROXY_MAX_CYCLES 后写 finished）；
-    页面持续被拦 → `fail_budget` 终态（requeue MAX_REQUEUE 次后收敛）。
-    只要每城在自己的预算内跑完（配额足够），全部 finished 自然成立，绝不提前截断。
-    """
-    if _get_phase(rdb) != "sale":
-        return
-    if not _all_type_done(rdb, "sale"):
-        return
-    reason = "all sale tasks finished"
-    log(f"phase transition sale -> fangyuan: {reason}")
-    rdb.set(PHASE_KEY, "fangyuan")
-    _init_phase_tasks(rdb, "fangyuan")
-
-
 def _check_termination(rdb):
-    """fangyuan 阶段终止判定（达成任一条件即置 STOP_KEY，worker 暂停、等待统计）：
-    - 全部 fangyuan 任务 finished（提前结束）；
+    """终止判定（达成任一条件即置 STOP_KEY，worker 暂停、等待统计）：
+    - 全部 42 任务 finished（波次开启且未到 done 时抑制该分支）；
     - qg 配额跑满且双池皆空（资源真正耗尽）；
     - 双池连续 EMPTY_STALL_CYCLES 轮皆空（qg 提取失败/免费源失效，避免无限空转）。
     """
-    if _get_phase(rdb) != "fangyuan" or rdb.exists(STOP_KEY):
+    if rdb.exists(STOP_KEY):
         return
     consumed = int(rdb.get(QG_CONSUMED_KEY) or 0)
     qg_empty = rdb.hlen(POOL_QG) == 0
     free_empty = rdb.hlen(POOL_FREE) == 0
     reason = ""
-    if _all_type_done(rdb, "fangyuan"):
-        reason = f"all fangyuan tasks finished (consumed={consumed})"
+    waves_active = bool(WAVE_ENABLED and rdb.get(WAVE_KEY) != "done")
+    if _all_tasks_done(rdb):
+        if not waves_active:
+            reason = f"all 42 tasks finished (consumed={consumed})"
     elif consumed >= QG_BUDGET and qg_empty and free_empty:
         reason = f"qg budget exhausted ({consumed}/{QG_BUDGET}) and both pools empty"
     elif qg_empty and free_empty:
@@ -744,110 +980,36 @@ def _is_finished(rdb, key):
         return False
 
 
-def _purge_queue(rdb, typ):
-    """清理队列中非当前阶段的任务（防阶段切换残留/重启残留被 worker 误领）。"""
+def _purge_queue(rdb):
+    """清理队列中已终态（finished=1）或非法（不在 42 任务表）的项，避免 worker 误领已完成任务。"""
+    valid = {(t["city"], t["type"]) for t in DEFAULT_TASKS}
     removed = 0
     for item in rdb.lrange(TASK_QUEUE, 0, -1):
         try:
             d = json.loads(item) if isinstance(item, str) else json.loads(item.decode())
-            if d.get("type", "sale") != typ:
+            c, t = d.get("city"), d.get("type", "sale")
+            if (c, t) not in valid:
+                rdb.lrem(TASK_QUEUE, 0, item)
+                removed += 1
+                continue
+            if rdb.hget(_task_key(c, t), "finished") == "1":
                 rdb.lrem(TASK_QUEUE, 0, item)
                 removed += 1
         except Exception:
             pass
     if removed:
-        log(f"purged {removed} stale phase-queue items")
+        log(f"purged {removed} stale/terminal queue items")
     return removed
 
 
-def _phase_is_past(typ, phase):
-    """typ 所属阶段是否**严格早于**当前 phase（已经过去，本 run 内不会再被调度）。
-
-    不能简单用 `typ != phase` 判断：_bootstrap_run 会把上一 run 残留的 42 个 task hash
-    全部重置为 pending/finished=0，同时把 phase 拨回 sale。此刻 fangyuan 任务是
-    「还没轮到」而不是「已过去」，若按 typ != phase 盖章，run 一开始就会把 21 个 fangyuan
-    任务全判成完成——而 _init_phase_tasks 对已存在的 key 不会重新入队，出租阶段将整轮不跑，
-    all_done 却为真，ETL 只拿到 sale 数据。
-    """
-    if typ not in PHASE_ORDER or phase not in PHASE_ORDER:
-        return False
-    return PHASE_ORDER.index(typ) < PHASE_ORDER.index(phase)
-
-
-def seal_orphan_tasks(rdb):
-    """孤儿任务收尾扫描（与 phase 过滤无关：「不派单」≠「不收尾」）。
-
-    缺口所在：_check_phase_transition 只在切阶段那一瞬间盖章且跳过 running；
-    requeue_stale_tasks 按 phase 过滤只看当前阶段。于是切 fangyuan 时正在 running 的
-    sale 任务两条路都覆盖不到——worker 撞 fail budget 后 requeue 回 pending、队列项又被
-    _purge_queue 清掉，此后永久 finished=0，42 分母凑不齐，all_done 只能靠 STOP，
-    Airflow Sensor 烧完 6h 超时，ETL 与地理补全永不执行。
-
-    遍历全部 42 个任务，只处理「阶段已过去」且 finished != 1 的：
-    - 非 running → 盖 finished=1 + phase_ended；
-    - running 且判死（锁已过期 且 worker 心跳超过 WORKER_TTL）→ 盖 finished=1 +
-      stale_abandoned。阶段已过去，无论 requeue_count 是否超限都**不重排**；
-    - running 且 worker 仍活着 → 跳过，让 worker 自己写终态（别贴假标签）。
-
-    幂等：finished == "1" 直接跳过，已有 finish_reason 不被覆写。全程不入队，
-    不触碰 crawl_progress:* / crawled_urls:*。
-    """
-    now = time.time()
-    phase = _get_phase(rdb)
-    sealed = 0
-    abandoned = 0
-    detail = []
-    for t in DEFAULT_TASKS:
-        city, typ = t["city"], t["type"]
-        if not _phase_is_past(typ, phase):
-            continue  # 当前阶段归 requeue_stale_tasks 管，未开始的阶段不能碰
-        key = _task_key(city, typ)
-        if not rdb.exists(key):
-            continue
-        state = rdb.hgetall(key)
-        if state.get("finished") == "1":
-            continue  # 幂等：已是终态，保留原有 finish_reason
-        if state.get("status", "pending") == "running":
-            lock_alive = rdb.exists(LOCK_PREFIX + f"{city}:{typ}")
-            worker_hb = float(state.get("worker_hb", 0) or 0)
-            if lock_alive or (now - worker_hb <= WORKER_TTL):
-                continue  # worker 还活着，等它自己收尾
-            reason = "stale_abandoned"
-            abandoned += 1
-        else:
-            reason = "phase_ended"
-            sealed += 1
-        rdb.hset(
-            key,
-            mapping={
-                "status": "done",
-                "finished": "1",
-                "finish_reason": reason,
-                "worker": "",
-                "worker_hb": 0,
-            },
-        )
-        detail.append(f"{city}:{typ}={reason}")
-    if detail:
-        log(
-            f"orphan sweep (phase={phase}): sealed {sealed} phase_ended + "
-            f"{abandoned} stale_abandoned [{', '.join(detail)}]"
-        )
-    return sealed + abandoned
-
-
 def requeue_stale_tasks(rdb):
-    """管理任务队列（仅当前阶段任务入队，非当前阶段不可被领）：
-    - running 但锁已过期且 worker 心跳超时 → 重新入队（本轮重跑）；
-    - pending 但不在队列里 → 补入队。
-    每 run 每城只跑一轮：done 任务不再重排下一轮（由 worker 写 finished 收敛）。
-
-    下面的重排逻辑按 phase 过滤，覆盖不到已过去阶段的残留任务，故先做一次与 phase
-    无关的孤儿收尾扫描（seal_orphan_tasks），保证每个任务有限步内必进终态。
+    """管理任务队列（按城交错：全部 42 任务同时有效）：
+    - running 但锁已过期且 worker 心跳超时 → 判死：
+        * requeue_count 未达 MAX_REQUEUE → 重置为 pending 重新入队（保留 hash pages）；
+        * 已达 MAX_REQUEUE → 盖 finished=1 + stale_abandoned（放弃，避免无限乒乓）。
+    - pending 但不在队列里 → 补入队（从任务 Hash 读取当前波次 pages，不得用全量 DEFAULT_TASKS）。
     """
-    seal_orphan_tasks(rdb)
     now = time.time()
-    phase = _get_phase(rdb)
     queued = set()
     for item in rdb.lrange(TASK_QUEUE, 0, -1):
         try:
@@ -856,14 +1018,24 @@ def requeue_stale_tasks(rdb):
         except Exception:
             pass
     for t in DEFAULT_TASKS:
-        if t["type"] != phase:
-            continue
         key = _task_key(t["city"], t["type"])
         if not rdb.exists(key):
             continue
         state = rdb.hgetall(key)
         status = state.get("status", "pending")
         lock_key = LOCK_PREFIX + f"{t['city']}:{t['type']}"
+        hash_pages = int(state.get("pages", 0) or t["pages"])
+        hash_target = int(state.get("target", 0) or t["target"])
+        hash_wave = state.get("wave", "")
+        task_payload = {
+            "city": t["city"],
+            "type": t["type"],
+            "pages": hash_pages,
+            "target": hash_target,
+        }
+        if hash_wave:
+            task_payload["wave"] = hash_wave
+
         if status == "running":
             lock_alive = rdb.exists(lock_key)
             worker_hb = float(state.get("worker_hb", 0) or 0)
@@ -875,11 +1047,11 @@ def requeue_stale_tasks(rdb):
                         f"requeue ({n}/{MAX_REQUEUE})"
                     )
                     rdb.hset(key, mapping={"status": "pending", "worker": "", "worker_hb": 0})
-                    rdb.rpush(TASK_QUEUE, json.dumps(t))
+                    rdb.rpush(TASK_QUEUE, json.dumps(task_payload))
                 else:
                     log(
                         f"task {t['city']}:{t['type']} requeued {n} times (max {MAX_REQUEUE}), "
-                        f"abandon as stale"
+                        f"abandon as stale_abandoned"
                     )
                     rdb.hset(
                         key,
@@ -892,7 +1064,7 @@ def requeue_stale_tasks(rdb):
                         },
                     )
         elif status == "pending" and (t["city"], t["type"]) not in queued:
-            rdb.rpush(TASK_QUEUE, json.dumps(t))
+            rdb.rpush(TASK_QUEUE, json.dumps(task_payload))
 
 
 # ---------------- run 引导与完成信号 ----------------
@@ -916,33 +1088,30 @@ def _bootstrap_run(rdb):
         return False
     rdb.delete(STOP_KEY)
     rdb.delete(EMPTY_CYCLES_KEY)
-    rdb.set(PHASE_KEY, "sale")
+    rdb.set(PHASE_KEY, "city-interleave")
     rdb.delete(QG_CONSUMED_KEY)
-    rdb.delete(QG_REFILL_KEY)  # 新 run 重置提取限流窗口（否则上一 run 的窗口残留会卡首轮提取）
+    rdb.delete(QG_REFILL_KEY)
     rdb.delete(FREE_USED_KEY)
     rdb.delete(TASK_QUEUE)
+    rdb.delete(TASK_PROCESSING_QUEUE)
+    rdb.delete(WAVE_KEY)
+    rdb.delete(WAVE_NEXT_KEY)
+    for k in rdb.keys(f"{REFUND_SEEN_PREFIX}*"):
+        rdb.delete(k)
     for t in DEFAULT_TASKS:
         city, typ = t["city"], t["type"]
         key = _task_key(city, typ)
-        if rdb.exists(key):  # 不存在的由 init_tasks 按完整字段创建
-            rdb.hset(
-                key,
-                mapping={
-                    "status": "pending",
-                    "round": 0,
-                    "finished": "0",
-                    "finish_reason": "",
-                    "requeue_count": "0",
-                    "count": 0,
-                    "new_count": 0,
-                    "dup_count": 0,
-                    "blocked_count": 0,
-                    "pages_done": 0,
-                    "worker": "",
-                    "worker_hb": 0,
-                },
+        if rdb.exists(key):
+            st = _init_task_state(
+                city,
+                typ,
+                "floor" if WAVE_ENABLED else "",
+                WAVE_FLOOR_PAGES if WAVE_ENABLED else t["pages"],
+                t["target"],
             )
+            rdb.hset(key, mapping=st)
         rdb.delete(f"{IP_USED_PREFIX}{city}:{typ}")
+        rdb.delete(f"{IP_REFUNDED_PREFIX}{city}:{typ}")
         rdb.set(f"{IP_BUDGET_PREFIX}{city}:{typ}", _budget_of(city, typ))
     rdb.set(RUN_CURRENT_KEY, CRAWL_RUN_ID)
     log(
@@ -955,18 +1124,39 @@ def _bootstrap_run(rdb):
 def crawl_status(rdb):
     """本 run 采集完成状态（Airflow Sensor 依据）。all_done 首次为真时幂等写完成信号。
 
-    仅当 `spacefin:crawl_run:current` 已等于 CRAWL_RUN_ID（leader 跑过 _bootstrap_run）
-    才可能 all_done：HTTP 服务在选主之前就起、standby 也照常应答，未引导时读到的是上一
-    run 的残留状态（stop 仍置位、任务仍 finished=1），直接判完成会让 Sensor 首次 poke
-    就通过、并把本 run 的 done 键（SET NX）永久写死，一页没跑就走到 ETL。
+    run_ready 门控：spacefin:crawl_run:current == CRAWL_RUN_ID，防止跨 run 误读。
     """
     run_ready = rdb.get(RUN_CURRENT_KEY) == CRAWL_RUN_ID
     stop = rdb.get(STOP_KEY)
+    wave = rdb.get(WAVE_KEY)
+    waves_active = bool(WAVE_ENABLED and wave != "done")
     cities = []
     finished_tasks = 0
     finished_by_type = {"sale": 0, "fangyuan": 0}
     rows_new = 0
     rows_dup = 0
+    total_refunded = 0
+
+    snapshot_rows_by_city = {}
+    log_key = _wave_log_key()
+    if rdb.exists(log_key):
+        for field, raw in rdb.hgetall(log_key).items():
+            field_str = field.decode() if isinstance(field, bytes) else field
+            raw_str = raw.decode() if isinstance(raw, bytes) else raw
+            try:
+                history = json.loads(raw_str)
+                if isinstance(history, dict):
+                    entries = history.values()
+                elif isinstance(history, list):
+                    entries = history
+                else:
+                    entries = []
+                snap_new = sum(int(x.get("new", 0) or 0) for x in entries)
+                snap_dup = sum(int(x.get("dup", 0) or 0) for x in entries)
+                snapshot_rows_by_city[field_str] = {"new": snap_new, "dup": snap_dup}
+            except Exception:
+                pass
+
     for t in DEFAULT_TASKS:
         city, typ = t["city"], t["type"]
         key = _task_key(city, typ)
@@ -977,8 +1167,18 @@ def crawl_status(rdb):
             finished_by_type[typ] = finished_by_type.get(typ, 0) + 1
         new_c = int(st.get("new_count", 0) or 0)
         dup_c = int(st.get("dup_count", 0) or 0)
-        rows_new += new_c
-        rows_dup += dup_c
+
+        field = f"{city}:{typ}"
+        snap_data = snapshot_rows_by_city.get(field, {"new": 0, "dup": 0})
+        task_total_new = new_c + snap_data["new"]
+        task_total_dup = dup_c + snap_data["dup"]
+
+        rows_new += task_total_new
+        rows_dup += task_total_dup
+
+        refunded_c = int(rdb.get(f"{IP_REFUNDED_PREFIX}{city}:{typ}") or 0)
+        total_refunded += refunded_c
+
         cities.append(
             {
                 "city": city,
@@ -987,15 +1187,21 @@ def crawl_status(rdb):
                 "used": _used_of(rdb, city, typ),
                 "finished": fin,
                 "reason": st.get("finish_reason", "") or None,
-                "rows": new_c,
+                "rows": task_total_new,
+                "wave": st.get("wave", wave or ""),
             }
         )
     total_tasks = len(DEFAULT_TASKS)
     all_finished = finished_tasks >= total_tasks
-    all_done = run_ready and (all_finished or bool(stop))
+    all_done = run_ready and (bool(stop) or (not waves_active and all_finished))
     done_reason = None
     if all_done:
-        done_reason = "all_finished" if all_finished else f"stop:{stop}"
+        if not waves_active and all_finished:
+            done_reason = "all_finished"
+        elif stop:
+            done_reason = f"stop:{stop}"
+        else:
+            done_reason = "all_finished" if all_finished else "unknown"
         done_key = _run_done_key(CRAWL_RUN_ID)
         if rdb.set(done_key, time.strftime("%Y-%m-%dT%H:%M:%S"), nx=True):
             rdb.set(_run_done_reason_key(CRAWL_RUN_ID), done_reason)
@@ -1005,12 +1211,15 @@ def crawl_status(rdb):
         "run_id": CRAWL_RUN_ID,
         "all_done": all_done,
         "done_reason": done_reason,
-        "phase": _get_phase(rdb),
+        "phase": SCHED_MODE,
+        "wave": wave or ("floor" if WAVE_ENABLED else "legacy"),
+        "waves_active": waves_active,
         "stop": stop,
         "total_tasks": total_tasks,
         "finished_tasks": finished_tasks,
         "finished_by_type": finished_by_type,
         "qg_consumed": int(rdb.get(QG_CONSUMED_KEY) or 0),
+        "refunded": total_refunded,
         "rows": {"total": rows_new + rows_dup, "new": rows_new, "dup": rows_dup},
         "cities": cities,
     }
@@ -1089,11 +1298,10 @@ def leader_loop(rdb):
                 if rdb.exists(STOP_KEY):
                     time.sleep(REFRESH_INTERVAL)
                     continue
-                init_tasks(rdb)
+                _wave_tick(rdb)
                 requeue_stale_tasks(rdb)
-                _check_phase_transition(rdb)
-                # 确保队列只含当前阶段任务（阶段切换/重启残留防误领）
-                _purge_queue(rdb, _get_phase(rdb))
+                # 按城交错：全 42 任务同时有效，无需阶段切换
+                _purge_queue(rdb)
                 prune_stale_workers(rdb)
                 # 双池独立闸门：青果按 QG_TARGET 补（sale/fangyuan 两阶段都真实耗 IP）、
                 # 免费按 POOL_SIZE_MIN 补（青果池空时才拉，兜底）。
@@ -1207,12 +1415,14 @@ class Handler(BaseHTTPRequestHandler):
                     "pages_done": st.get("pages_done", 0),
                     "source": st.get("source", ""),
                     "worker": st.get("worker", ""),
+                    "wave": st.get("wave", ""),
                 }
             self._json(
                 {
                     "tasks": out,
                     "queue_len": rdb.llen(TASK_QUEUE),
-                    "phase": _get_phase(rdb),
+                    "phase": SCHED_MODE,
+                    "wave": rdb.get(WAVE_KEY),
                     "stop": rdb.get(STOP_KEY),
                     "qg_consumed": int(rdb.get(QG_CONSUMED_KEY) or 0),
                     "qg_budget": QG_BUDGET,
@@ -1224,19 +1434,47 @@ class Handler(BaseHTTPRequestHandler):
             )
         elif path == "/crawl_status":
             self._json(crawl_status(rdb))
+        elif path == "/proxy/report":
+            city, typ = _resolve_scope(query.get("city", ""), query.get("type", ""))
+            src = query.get("src", "")
+            attempt = query.get("attempt", "")
+            used, budget, _ = _budget_state(rdb, city, typ)
+            if not attempt:
+                self._json(
+                    {
+                        "refunded": False,
+                        "used": used,
+                        "budget": budget,
+                        "error": "attempt is required",
+                    }
+                )
+                return
+            if src != "qg" or not city or not typ:
+                self._json({"refunded": False, "used": used, "budget": budget})
+                return
+            seen_key = f"{REFUND_SEEN_PREFIX}{attempt}"
+            if not rdb.set(seen_key, "1", nx=True, ex=7200):
+                self._json({"refunded": False, "used": used, "budget": budget})
+                return
+            lua = """
+            local v = redis.call('GET', KEYS[1])
+            if v and tonumber(v) > 0 then return redis.call('DECR', KEYS[1]) end
+            return tonumber(v) or 0
+            """
+            try:
+                new_used = int(rdb.eval(lua, 1, f"{IP_USED_PREFIX}{city}:{typ}") or 0)
+            except Exception as e:
+                log(f"report eval error: {e}")
+                new_used = used
+            try:
+                rdb.incr(f"{IP_REFUNDED_PREFIX}{city}:{typ}")
+            except Exception:
+                pass
+            self._json({"refunded": True, "used": new_used, "budget": budget})
         elif path == "/proxy/qg":
             city, typ = _resolve_scope(query.get("city", ""), query.get("type", ""))
-            # sale 阶段发放闸门：consumed 达 QG_SALE_BUDGET 后不再向 sale 任务发青果
-            # （转免费池继续，不封存任务）——保证 sale/fangyuan 各用约 500 配额，
-            # 同时不因「某城烧完配额」整体截断其他城。见 _check_phase_transition 注释。
-            if typ == "sale" and _get_phase(rdb) == "sale":
-                _sale_consumed = int(rdb.get(QG_CONSUMED_KEY) or 0)
-                if _sale_consumed >= QG_SALE_BUDGET:
-                    used, budget, _ = _budget_state(rdb, city, typ)
-                    self._proxy_json(
-                        None, None, city, typ, used, budget, False, "sale qg quota spent, use free"
-                    )
-                    return
+            # 按城交错调度（2026-08-07）：不再有全局 sale 配额闸门。
+            # 每城每类型配额由 try_consume_ip 单独保障（sale 500 / fangyuan 500，合计 1000）。
             allowed, used, budget = try_consume_ip(rdb, city, typ)
             if not allowed:
                 self._proxy_json(None, None, city, typ, used, budget, True, "ip budget exhausted")
@@ -1255,8 +1493,22 @@ class Handler(BaseHTTPRequestHandler):
             _remove_from_worker_lists(rdb, p)
             self._proxy_json(p, "qg", city, typ, used, budget, budget > 0 and used >= budget)
         elif path == "/proxy/free":
-            # 免费池=碰运气兜底：本轮发放总量受 FREE_BUDGET 限制，到限后本轮不再发免费代理
+            # 免费池=碰运气兜底：本轮发放总量受 FREE_BUDGET 限制，到限后本轮不再发免费代理。
+            # fangyuan 仅用青果（qg only），免费池默认不对其发放（rescue 波次开启 FANGYUAN_FREE_RESCUE 时除外）。
             city, typ = _resolve_scope(query.get("city", ""), query.get("type", ""))
+            if typ == "fangyuan" and not _is_fangyuan_free_rescue_allowed(rdb, city, typ):
+                used, budget, exhausted = _budget_state(rdb, city, typ)
+                self._proxy_json(
+                    None,
+                    None,
+                    city,
+                    typ,
+                    used,
+                    budget,
+                    exhausted,
+                    "free pool not available for fangyuan (qg only)",
+                )
+                return
             p = pop_proxy(rdb, POOL_FREE)
             used, budget, exhausted = _budget_state(rdb, city, typ)
             if p:
@@ -1273,18 +1525,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._proxy_json(None, None, city, typ, used, budget, exhausted, "free pool empty")
         elif path == "/proxy/random":
-            # 青果优先（受预算约束），青果不可用（池空或预算耗尽）则回落免费池
+            # 青果优先（受预算约束），青果不可用（池空或预算耗尽）则回落免费池；
+            # fangyuan 为 qg only，默认不允许回落免费池（rescue 波次开启 FANGYUAN_FREE_RESCUE 时除外）。
             city, typ = _resolve_scope(query.get("city", ""), query.get("type", ""))
-            allowed = True
-            used, budget = 0, 0
-            # sale 阶段发放闸门（同 /proxy/qg）：consumed 达 QG_SALE_BUDGET 后
-            # sale 任务不再尝试青果，直接走免费池——保证 fangyuan 阶段有 QG 可用。
-            if typ == "sale" and _get_phase(rdb) == "sale":
-                _sale_consumed = int(rdb.get(QG_CONSUMED_KEY) or 0)
-                if _sale_consumed >= QG_SALE_BUDGET:
-                    allowed = False
-            if allowed:
-                allowed, used, budget = try_consume_ip(rdb, city, typ)
+            allowed, used, budget = try_consume_ip(rdb, city, typ)
             if allowed:
                 p = pop_proxy(rdb, POOL_QG)
                 if not p:
@@ -1298,6 +1542,19 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     return
                 release_ip(rdb, city, typ)  # 未真正发放，回滚预扣
+            if typ == "fangyuan" and not _is_fangyuan_free_rescue_allowed(rdb, city, typ):
+                used2, budget2, exhausted2 = _budget_state(rdb, city, typ)
+                self._proxy_json(
+                    None,
+                    None,
+                    city,
+                    typ,
+                    used2,
+                    budget2,
+                    exhausted2,
+                    "qg pool empty for fangyuan (qg only, no free fallback)",
+                )
+                return
             p = pop_proxy(rdb, POOL_FREE)
             used, budget, exhausted = _budget_state(rdb, city, typ)
             if p:
@@ -1330,7 +1587,11 @@ class MasterServer(HTTPServer):
 
 
 def main():
-    rdb = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
+    # REDIS_DB 默认 0；本地热重载开发时置 1，与 Docker master（默认 db=0）隔离，
+    # 避免两个 master 抢同一把 spacefin:master:leader 锁、互相让位打断采集。
+    rdb = redis.Redis(
+        host=REDIS_HOST, port=REDIS_PORT, db=int(os.getenv("REDIS_DB", 0)), decode_responses=True
+    )
     rdb.ping()
     log(
         f"master up, redis={REDIS_HOST}:{REDIS_PORT}, "

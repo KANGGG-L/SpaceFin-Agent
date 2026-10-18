@@ -10,7 +10,7 @@
 
 安居客列表页按 **IP 频次**拦截（每个新 IP 约只放行第 1 页），多页/多区抓取必须分布式 + 代理轮换。Redis 在此承担：
 
-- **任务队列**：`anjuke_task_queue`（List），producer 推入 城市×页 任务，worker 副本 `lpop` 并行消费；
+- **任务队列**：`anjuke_task_queue`（List），producer 推入 城市×页 任务，worker 副本 `lpop` 消费（单进程内 asyncio 串行取任务，横向扩展靠 k8s 多副本）；
 - **结果聚合**：`anjuke_results`（Hash，以 url 去重），worker 写入、exporter 汇总导出；
 - **proxy_pool 后端**：jhao104/proxy_pool 用 Redis 存储/验证代理（见 [proxy-pool.md](proxy-pool.md)）。
 
@@ -25,7 +25,7 @@
 ## 3. 数据结构与队列流
 
 ```
-producer ──rpush──> anjuke_task_queue (List) ──lpop──> worker×N (asyncio)
+producer ──rpush──> anjuke_task_queue (List) ──lpop──> worker×N（各 worker 内串行消费）
                                                         │ parse + 去重
                                                         ▼ hset
                                               anjuke_results (Hash, key=url)

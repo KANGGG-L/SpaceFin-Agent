@@ -73,8 +73,8 @@ def read_offset(conn) -> int:
 def write_offset(conn, last_id: int) -> None:
     cur = conn.cursor()
     cur.execute(
-        f"INSERT INTO {OFFSET_TABLE} (consumer, last_id) VALUES (%s,%s) "
-        f"ON DUPLICATE KEY UPDATE last_id=VALUES(last_id)",
+        f"INSERT INTO {OFFSET_TABLE} (consumer, last_id, updated_at) VALUES (%s,%s,NOW()) "
+        f"ON DUPLICATE KEY UPDATE last_id=VALUES(last_id), updated_at=NOW()",
         (CONSUMER_NAME, last_id),
     )
     conn.commit()
@@ -174,7 +174,13 @@ def recalc_loans(biz_conn, crawl_conn, root_conn, loan_ids: list[int], date: str
     avm_model = valuation.load_avm_model()
 
     rows = store.compute_rows(
-        loans, collaterals, customers, dwd_unit, avm_model=avm_model, spatial=spatial
+        loans,
+        collaterals,
+        customers,
+        dwd_unit,
+        avm_model=avm_model,
+        spatial=spatial,
+        policy_map=spatial[2],
     )
     store.upsert_dws(root_conn, rows)
     n_alerts = store.replace_alerts(root_conn, rows, date)
@@ -228,7 +234,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="CDC ODS 变更 → DWS/ADS 增量消费")
     ap.add_argument("--once", action="store_true", help="消费一批后退出（默认行为）")
     ap.add_argument("--loop", action="store_true", help="常驻轮询（systemd 用）")
-    ap.add_argument("--interval", type=float, default=20.0, help="--loop 的轮询间隔秒")
+    ap.add_argument(
+        "--interval",
+        type=float,
+        default=float(os.getenv("SPACEFIN_CDC_CONSUMER_INTERVAL", "20.0")),
+        help="--loop 的轮询间隔秒",
+    )
     ap.add_argument("--batch", type=int, default=500, help="单批最多消费的事件数")
     ap.add_argument("--date", default=None, help="预警/汇总的业务日期，默认今天")
     ap.add_argument(

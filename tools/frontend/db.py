@@ -19,6 +19,13 @@ import pymysql
 _RISK_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "risk")
 sys.path.insert(0, _RISK_DIR)
 
+# REPO 根目录加入 sys.path：前端按需从 tools/spatial/store 等上层模块做 schema 自愈
+# （如 ensure_spatial_schema 直接复用空间链路的 ensure_tables）。
+# db.py 位于 <REPO>/tools/frontend/，向上三层到仓库根。
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 # 显式按路径加载 risk/config，避免被同名顶层模块（如 tools/spatial/config）抢注
 # sys.modules['config'] 导致 CLASS_ORDER 取错——测试混合跑 frontend/spatial 时会踩到。
 _config_path = os.path.join(_RISK_DIR, "config.py")
@@ -150,25 +157,12 @@ def dashboard():
                 ltv_buckets[">1.00"] += 1
         ltv_hist = [{"bucket": k, "count": v} for k, v in ltv_buckets.items()]
 
-        # 预警概览：离线/实时预警笔数与按风险类拆分。
-        cur.execute(
-            "SELECT src, risk_class, cnt FROM ("
-            "SELECT 'offline' src, risk_class, COUNT(*) cnt FROM ads_ltv_alerts GROUP BY risk_class "
-            "UNION ALL "
-            "SELECT 'stream', risk_class, COUNT(*) cnt FROM ads_stream_ltv_alerts GROUP BY risk_class"
-            ") t ORDER BY src"
-        )
-        alert_breakdown = {
-            "offline": {r[1]: int(r[2]) for r in cur.fetchall() if r[0] == "offline"}
-        }
-        cur.execute(
-            "SELECT 'stream', risk_class, COUNT(*) FROM ads_stream_ltv_alerts GROUP BY risk_class"
-        )
-        alert_breakdown["stream"] = {r[1]: int(r[2]) for r in cur.fetchall()}
+        # 预警概览：离线（T+1）预警笔数与按风险类拆分。
+        # 实时预警（ads_stream_ltv_alerts，由已废弃的 Kafka/Flink 链产出）已从概览移除。
+        cur.execute("SELECT risk_class, COUNT(*) cnt FROM ads_ltv_alerts GROUP BY risk_class")
+        alert_breakdown = {"offline": {r[0]: int(r[1]) for r in cur.fetchall()}}
         cur.execute("SELECT COUNT(*) FROM ads_ltv_alerts")
         alert_breakdown["offline_total"] = int(cur.fetchone()[0])
-        cur.execute("SELECT COUNT(*) FROM ads_stream_ltv_alerts")
-        alert_breakdown["stream_total"] = int(cur.fetchone()[0])
 
         # 城市分布：明细 join 业务库抵押物地址（dws_spatial_feature 的 district 全为 NULL，
         # 地址是最可靠的城市来源），按 CITY_MAP 解析「XX市」前缀。
@@ -208,7 +202,7 @@ def dashboard():
             for c, v in sorted(city_agg.items(), key=lambda kv: kv[1]["loan_count"], reverse=True)
         ]
 
-        # 数据底座信任卡：爬取规模 / 新鲜度 / 解析成功率 / 模型版本。
+        # 数据底座信任卡：爬取规模 / 新鲜度 / 解析成功率。
         # 全部来自真实运行态，无 mock——爬取规模与 P1 登记表、README 的数字互相印证。
         cur.execute("SELECT COUNT(*) FROM crawl_housing_sale")
         sale_rows = int(cur.fetchone()[0])
@@ -216,7 +210,14 @@ def dashboard():
         rent_rows = int(cur.fetchone()[0])
         cur.execute("SELECT COUNT(*) FROM community_coords")
         coords_rows = int(cur.fetchone()[0])
-        cur.execute("SELECT COUNT(DISTINCT district) FROM crawl_housing_sale")
+        # 只数 21 城白名单内的 district，排除 beijing/nb 等外省桶（代理 IP 带偏的房源），
+        # 否则"城市数"会被算成 23 而非真实的广东 21 城。CITY_MAP 来自 risk/config（单一事实源）。
+        _gd_codes = tuple(config.CITY_MAP.values())
+        cur.execute(
+            f"SELECT COUNT(DISTINCT district) FROM crawl_housing_sale "
+            f"WHERE district IN ({','.join('%s' for _ in _gd_codes)})",
+            _gd_codes,
+        )
         crawl_scale = {
             "sale": sale_rows,
             "rent": rent_rows,
@@ -292,27 +293,14 @@ def dashboard():
             else None,
         }
 
-        # 模型版本：dws_risk_class 最新产出的估值模型（按 etl_ts 取最新一组）。
-        cur.execute(
-            "SELECT model_version, MAX(etl_ts), COUNT(*) FROM dws_risk_class "
-            "GROUP BY model_version ORDER BY MAX(etl_ts) DESC LIMIT 1"
-        )
-        mv = cur.fetchone()
-        model_version = {
-            "version": str(mv[0]) if mv and mv[0] else None,
-            "etl_ts": str(mv[1]) if mv and mv[1] else None,
-            "loan_count": int(mv[2]) if mv else 0,
-        }
-
         trust_cards = {
             "crawl_scale": crawl_scale,
             "freshness": {"layers": freshness_layers, "overall": overall},
             "parse_success": parse_success,
-            "model_version": model_version,
         }
 
         # 预警闭环漏斗：预警 → 确认 → 处置 → 恢复。
-        # 预警量 = 离线 + 实时；确认量 = confirmed_by 非空的行（处置契约：
+        # 预警量 = 离线（T+1）；确认量 = confirmed_by 非空的行（处置契约：
         # 有 confirmed_by/confirmed_ts 才算确认；处置/恢复行同样带确认人，
         # 故确认≥处置，漏斗单调）。
         # 处置量 = 累计已处置（disposed + recovered），恢复量 = recovered。
@@ -321,8 +309,6 @@ def dashboard():
         # （字段未就绪时 _confirm_has_cols 降级为 0，漏斗照常渲染。）
         cur.execute("SELECT COUNT(*) FROM ads_ltv_alerts")
         off_total = int(cur.fetchone()[0])
-        cur.execute("SELECT COUNT(*) FROM ads_stream_ltv_alerts")
-        str_total = int(cur.fetchone()[0])
         cur.execute("SELECT COUNT(*) FROM ads_alert_confirm WHERE confirmed_by IS NOT NULL")
         confirm_total = int(cur.fetchone()[0])
         disposed_total = recovered_total = 0
@@ -335,7 +321,7 @@ def dashboard():
             recovered_total = int(disp_map.get("recovered", 0))
             disposed_total = int(disp_map.get("disposed", 0)) + recovered_total
         alert_funnel = {
-            "alert": off_total + str_total,
+            "alert": off_total,
             "confirmed": confirm_total,
             "disposed": disposed_total,
             "recovered": recovered_total,
@@ -378,6 +364,7 @@ def alerts(
     source=None,
     city=None,
     keyword=None,
+    zone=None,
     page=1,
     page_size=20,
 ):
@@ -411,6 +398,15 @@ def alerts(
         # q 搜索：贷款号 / 客户号模糊匹配（LIKE 值走参数化，不拼 SQL，防注入）。
         where.append("(loan_id LIKE %s OR customer_id LIKE %s)")
         params.extend([f"%{keyword}%", f"%{keyword}%"])
+    if zone:
+        # 方向 1：按高危区 zone_id 过滤。以子查询解析落在该区的抵押物集合
+        # （dws_spatial_feature 在 crawl 库，与 alerts 同连接），不传 zone 时
+        # 该分支跳过，行为与现状完全一致（向后兼容）。
+        where.append(
+            "collateral_id IN (SELECT entity_id FROM dws_spatial_feature "
+            "WHERE zone_id=%s AND entity_type='collateral')"
+        )
+        params.append(zone)
 
     crawl = crawl_conn()
     biz = biz_conn()
@@ -457,8 +453,16 @@ def alerts(
         cur.execute(f"SELECT COUNT(*) FROM ({base}) t", params)
         total = int(cur.fetchone()[0])
         offset = max(0, (page - 1) * page_size)
+        # low_confidence（D-06）：只在分页 SELECT 的**外层** LEFT JOIN dws_risk_class。
+        # 为什么不能放进 base（`) t {where_sql}` 之前）：dws_risk_class 与预警视图同名列
+        # 多达 5 个（loan_id/collateral_id/ltv/risk_class/is_high_risk_zone），WHERE 里
+        # 的裸列名会立刻 1052 Column ambiguous；且 COUNT 查询共用 base，一旦 JOIN 进去
+        # 还得改 COUNT。loan_id 是 dws_risk_class 主键，1:1 不放大行数，total 不受影响。
+        # ORDER BY 保持裸列名：alert_date / id 都只存在于 t（dws_risk_class 无这两列），无歧义。
         cur.execute(
-            f"SELECT * FROM ({base}) t ORDER BY alert_date DESC, id DESC LIMIT %s OFFSET %s",
+            f"SELECT t.*, COALESCE(d.low_confidence,0) low_confidence FROM ({base}) t "
+            "LEFT JOIN dws_risk_class d ON d.loan_id=t.loan_id "
+            "ORDER BY alert_date DESC, id DESC LIMIT %s OFFSET %s",
             [*params, page_size, offset],
         )
         cols = [d[0] for d in cur.description]
@@ -477,6 +481,27 @@ def alerts(
             )
             addr_map = {r[0]: r[1] for r in bcur.fetchall()}
             bcur.close()
+
+        # 方向 2：批量关联高危区 zone_id（参照 addr_map 的 IN 查询，禁止逐行查）。
+        # dws_spatial_feature 主键含 build_date，同一抵押物可能有多行；且同一
+        # 抵押物可能同时落在 price 与 ltv 两类高危区（两行）。按确定性规则固定
+        # 取唯一 zone_id：build_date 最新优先，同级时 ltv 型优先——方向 1/2 须一致。
+        zone_map = {}
+        if cids:
+            placeholders = ",".join(["%s"] * len(cids))
+            cur.execute(
+                f"SELECT entity_id, zone_id, build_date FROM dws_spatial_feature "
+                f"WHERE entity_type='collateral' "
+                f"AND entity_id IN ({placeholders})",
+                list(cids),
+            )
+            best = {}
+            for eid, zid, bdate in cur.fetchall():
+                prefer = 0 if str(zid).startswith("ltv-") else 1  # ltv 优先
+                existing = best.get(eid)
+                if existing is None or (bdate, -prefer) > (existing[1], -existing[2]):
+                    best[eid] = (zid, bdate, prefer)
+            zone_map = {eid: v[0] for eid, v in best.items()}
 
         # 确认/处置状态：按 (loan_id, alert_date, src) 关联前端自建确认表。
         # 表由 app 启动时用 root 建；若权限不足未建成，降级为无状态而不报错。
@@ -502,6 +527,9 @@ def alerts(
         for r in rows:
             key = (r["loan_id"], str(r["alert_date"]), r["src"])
             r["property_addr"] = addr_map.get(r.get("collateral_id")) or "未标注"
+            r["zone_id"] = zone_map.get(r.get("collateral_id")) or None
+            # 用 get 兜底：假连接（测试）与旧列头可能没有 low_confidence 列。
+            r["low_confidence"] = bool(r.get("low_confidence"))
             conf = conf_map.get(key)
             r["confirmed"] = (
                 {"confirmed_by": conf["confirmed_by"], "confirmed_ts": conf["confirmed_ts"]}
@@ -659,6 +687,127 @@ def dispose_alert(loan_id, alert_date, source, status, user):
         conn.close()
 
 
+def derive_suggestion(risk_factors):
+    """按风险因子现算「处置建议」（规则派生，不建表、不落库）。
+
+    为什么规则派生而不新建建议表：建议的输入（LTV、估值偏差、高危区、低置信）全部已在
+    dws_risk_class 落库，再存一份文案就会与阈值调参漂移——阈值改了旧建议还挂在表里。
+    这里每次读详情现算，天然跟随 config 阈值。
+
+    优先级（自上而下，命中即返回，只给一个主建议避免风控看到互相矛盾的动作）：
+      1. low_confidence      → 空间特征严重缺失，估值不可信，先人工复核（并抑制自动推送）
+      2. abnormal_valuation 或 |偏差| > VALUATION_DEVIATION_THRESHOLD → 转人工复估
+      3. is_high_risk_zone   → 区域下行风险，加严审批 / 提高抵押率要求
+      4. ltv > LTV_RED_LINE  → 已越强预警线，压降敞口（追保/提前收回）
+      5. ltv > LTV_WARN_LINE → 越警示线，加密监控
+      6. 其余                → 常规监控
+    返回 {level, headline, actions[], basis[]}；risk_factors 为 None（实时流新贷款查不到
+    风险宽表）时返回 None，前端照常渲染其余区块。
+
+    level 取值与前端色条对应：bad（红）/ warn（黄）/ info（蓝）/ ok（绿）。
+    """
+    if not risk_factors:
+        return None
+    rf = risk_factors
+    ltv = rf.get("ltv")
+    dev = rf.get("valuation_deviation_pct")
+    dev_line = config.VALUATION_DEVIATION_THRESHOLD
+    red = config.LTV_RED_LINE
+    warn = config.LTV_WARN_LINE
+    miss = config.LOW_CONF_MISSING_PCT
+
+    def pct(v):
+        return f"{v * 100:.1f}%" if v is not None else "—"
+
+    if rf.get("low_confidence"):
+        return {
+            "level": "warn",
+            "headline": "转人工复核（估值置信度不足）",
+            "actions": [
+                "暂不依据本次自动估值做处置决策，先转人工/线下复核抵押物",
+                "补齐抵押物空间特征（坐标、小区行情样本）后重跑估值",
+                "复核期间该笔预警不进入自动推送队列，避免误催收",
+            ],
+            "basis": [
+                f"空间特征缺失率超过 {miss:.0f}% 阈值，模型标记为低置信",
+                f"当前 LTV {pct(ltv)}（低置信下该值仅供参考）",
+            ],
+        }
+
+    if rf.get("abnormal_valuation") or (dev is not None and abs(dev) > dev_line):
+        return {
+            "level": "bad",
+            "headline": "转人工复估（估值偏差异常）",
+            "actions": [
+                "冻结本笔自动估值结果，转评估部门人工复估",
+                "核对抵押物面积/楼层/挂牌样本，确认是否同名小区串号",
+                "复估结论回填后重算 LTV 与五级分类",
+            ],
+            "basis": [
+                f"AVM 估值与参考基准偏差 {pct(abs(dev)) if dev is not None else '—'}，"
+                f"超过阈值 {pct(dev_line)}",
+                f"当前 LTV {pct(ltv)}",
+            ],
+        }
+
+    if rf.get("is_high_risk_zone"):
+        return {
+            "level": "warn",
+            "headline": "加严审批（抵押物位于高危区）",
+            "actions": [
+                "该笔新增授信/展期需上提一级审批",
+                "提高抵押率要求或追加担保物",
+                "纳入区域下行风险名单，按月复估抵押物",
+            ],
+            "basis": [
+                "抵押物落在空间高危区（区域价格/LTV 双高）",
+                f"当前 LTV {pct(ltv)}",
+            ],
+        }
+
+    if ltv is not None and ltv > red:
+        return {
+            "level": "bad",
+            "headline": "压降敞口（已越强预警线）",
+            "actions": [
+                "启动追加保证金或追加抵押物流程",
+                "评估提前收回部分本金，把 LTV 压回警示线以下",
+                "同步贷后资产保全，纳入重点跟踪名单",
+            ],
+            "basis": [
+                f"LTV {pct(ltv)} 已越强预警线 {pct(red)}",
+                f"五级分类：{rf.get('risk_class') or '—'}",
+            ],
+        }
+
+    if ltv is not None and ltv > warn:
+        return {
+            "level": "info",
+            "headline": "加密监控（已越警示线）",
+            "actions": [
+                "监控频次提高至每周复估抵押物估值",
+                "提示客户经理跟进还款意愿与经营现金流",
+                "如继续上行越过强预警线，转压降敞口流程",
+            ],
+            "basis": [
+                f"LTV {pct(ltv)} 越警示线 {pct(warn)}，但未越强预警线 {pct(red)}",
+                f"五级分类：{rf.get('risk_class') or '—'}",
+            ],
+        }
+
+    return {
+        "level": "ok",
+        "headline": "常规监控",
+        "actions": [
+            "按 T+1 批次常规跟踪，无需额外处置动作",
+            "下一次估值更新后自动重算 LTV 与五级分类",
+        ],
+        "basis": [
+            f"LTV {pct(ltv)} 未越警示线 {pct(warn)}，无估值异常与高危区标记",
+        ],
+    }
+
+
 def alert_detail(loan_id, alert_date, source):
     """单笔预警行内详情：预警基础 + 风险因子（dws_risk_class）+ 抵押物地址 + 确认/处置记录。
 
@@ -754,6 +903,8 @@ def alert_detail(loan_id, alert_date, source):
             "property_addr": addr,
             "risk_factors": risk_factors,
             "confirm": confirm,
+            # 处置建议：按风险因子现算（阈值全走 config），无风险宽表记录时为 None。
+            "suggestion": derive_suggestion(risk_factors),
         }
     finally:
         crawl.close()
@@ -784,6 +935,46 @@ def ensure_export_audit_table():
         )
         conn.commit()
         cur.close()
+        # R2-7 路线 B：推演历史要落库整份 impact 快照（rows 全量 + cover.rows 全量），
+        # 单条 JSON 可达 MB 级，TEXT(64KB) 装不下 → 升级 detail 为 MEDIUMTEXT(16MB)。
+        # 幂等：先查 INFORMATION_SCHEMA 当前 COLUMN_TYPE，已是 MEDIUMTEXT 就跳过，
+        # 否则执行 ALTER；捕获「无需变更」类异常（如 Redundant / 1060）忽略，保证旧库
+        # 可平滑升级、重复调用幂等。
+        cur = conn.cursor()
+        # SELECT 失败（权限/库名）必须冒泡，不能和 ALTER 的冗余异常一起被吞掉——
+        # 否则连 INFORMATION_SCHEMA 都查不了时，会静默跳过迁移，直到写大 JSON 才暴露失败。
+        cur.execute(
+            "SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'ads_export_audit' "
+            "AND COLUMN_NAME = 'detail'"
+        )
+        row = cur.fetchone()
+        if not row or str(row[0]).upper() != "MEDIUMTEXT":
+            try:
+                cur.execute("ALTER TABLE ads_export_audit MODIFY detail MEDIUMTEXT")
+                conn.commit()
+            except Exception as exc:  # noqa: BLE001 - 个别 MySQL 把「已是 MEDIUMTEXT」报冗余异常
+                print(f"[db] detail 列扩容 MEDIUMTEXT 跳过（{exc}）", file=sys.stderr)
+        cur.close()
+    finally:
+        conn.close()
+
+
+def ensure_spatial_schema():
+    """启动时幂等确保空间库表结构（建表 + 补列 + 补索引），防止旧库 schema 漂移导致
+    /api/spatial 查询 500（真实踩过的坑：ads_spatial_zone 缺 ltv_sample_count 列）。
+
+    直接复用 tools/spatial/store.ensure_tables：CREATE TABLE IF NOT EXISTS + 补新增列
+    （_ensure_zone_columns，1060 Duplicate column name 忽略）+ 补索引
+    （_ensure_feature_indexes，1061 Duplicate key name 忽略），全部幂等。
+    与空间链路写库同源——store.py 后续新增列会自动覆盖，前端无需再改。用 root 连接
+    （ddl_conn）执行 DDL。
+    """
+    from tools.spatial import store  # 延迟导入：避免前端模块加载期硬依赖 tools/spatial
+
+    conn = ddl_conn()
+    try:
+        store.ensure_tables(conn)
     finally:
         conn.close()
 
@@ -809,6 +1000,18 @@ def write_audit(action, username, role, detail, result, ip):
 
 
 # ---------------- 1104 报送 ----------------
+
+# 报送单类型：本页只做 G11 资产质量表，落库时与 ads_report_alert 的 report_type 同口径。
+REPORT_TYPE = "1104_g11"
+
+# 报送状态五态（前端徽标与按钮禁用规则共用这一份定义）：
+#   pending    尚无可报送快照（该业务日 ads_1104_g11 无行）
+#   consistent 口径一致，可报送
+#   submitted  已报送（落库，刷新/重启后保留）
+#   blocked    口径不一致，已阻断（含「已报送后快照又漂移」）
+#   checking   正在实时复算（前端瞬时态，**永不落库**）
+REPORT_STATUSES = {"pending", "consistent", "submitted", "blocked", "checking"}
+
 
 # ads_1104_g11 重建前置检查的必要列（与 tools/reporting/main.py 建表 DDL 对齐）。
 _G11_REQUIRED_COLS = {
@@ -860,20 +1063,242 @@ def _dws_aggregate(cur):
 
 
 def _g11_consistency(rows, dws):
-    """以 dws 明细聚合为裁判，比对 g11 快照行的笔数/余额，返回 mismatch 列表。
+    """以 dws 明细聚合为裁判，比对 g11 快照行的笔数/余额，返回 mismatch 明细列表。
 
     与 tools/reporting/main.py 的 1104_vs_dws 校验同源：余额差超 EPS_BALANCE 即不一致。
+    每项携带双方取值与差值（snapshot=1104 快照行，dws=明细聚合，diff=snapshot-dws），
+    前端据此渲染「两边各是多少、差多少」的对照矩阵，用户不用再猜差异在哪。
+    调用方用 m["key"] 即可派生旧版的字符串 mismatch 列表（兼容既有测试与告警 detail）。
     """
-    mismatches = []
+    details = []
     for r in rows:
         if r["is_total"]:
             continue
         cnt, bal = dws.get(r["risk_class"], (0, 0.0))
         if r["loan_count"] != cnt:
-            mismatches.append(f"g11_vs_dws:{r['risk_class']}:loan_count")
+            details.append(
+                {
+                    "key": f"g11_vs_dws:{r['risk_class']}:loan_count",
+                    "risk_class": r["risk_class"],
+                    "field": "loan_count",
+                    "snapshot": r["loan_count"],
+                    "dws": cnt,
+                    "diff": r["loan_count"] - cnt,
+                    "tolerance": 0,
+                }
+            )
         if abs(r["balance_total"] - bal) > EPS_BALANCE:
-            mismatches.append(f"g11_vs_dws:{r['risk_class']}:balance")
-    return mismatches
+            details.append(
+                {
+                    "key": f"g11_vs_dws:{r['risk_class']}:balance",
+                    "risk_class": r["risk_class"],
+                    "field": "balance",
+                    "snapshot": r["balance_total"],
+                    "dws": bal,
+                    "diff": round(r["balance_total"] - bal, 2),
+                    "tolerance": EPS_BALANCE,
+                }
+            )
+    return details
+
+
+def ensure_report_submission_table():
+    """幂等建报送状态表（root+房产库）。
+
+    为什么单独建表：报送「已报送」是前端页面的动作留痕，不属于 ads_1104_g11 快照本身
+    （快照可以被重建，报送事实不能被重算）。用 (report_date, report_type) 做主键，
+    同一业务日重复报送幂等覆盖，submitted_at 保留首报时刻（见 set_report_submitted）。
+    """
+    conn = ddl_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS ads_report_submission ("
+            "report_date DATE NOT NULL,"
+            "report_type VARCHAR(16) NOT NULL,"
+            "status VARCHAR(16) NOT NULL,"
+            "submitted_by VARCHAR(32) NULL,"
+            "submitted_at DATETIME NULL,"
+            "updated_at DATETIME NULL,"
+            "PRIMARY KEY (report_date, report_type)"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        )
+        conn.commit()
+        cur.close()
+    finally:
+        conn.close()
+
+
+def _load_submission(cur, date):
+    """读该业务日的报送记录；无记录或表还没建 → None（降级，不让页面 500）。"""
+    try:
+        cur.execute(
+            "SELECT status, submitted_by, submitted_at, updated_at "
+            "FROM ads_report_submission WHERE report_date=%s AND report_type=%s",
+            (date, REPORT_TYPE),
+        )
+    except pymysql.err.ProgrammingError:
+        return None
+    r = cur.fetchone()
+    if not r:
+        return None
+    return {
+        "status": r[0],
+        "submitted_by": r[1],
+        "submitted_at": str(r[2]) if r[2] is not None else None,
+        "updated_at": str(r[3]) if r[3] is not None else None,
+    }
+
+
+def _block_alert_sent(cur, date):
+    """该业务日已落多少条 block 级阻断告警（ads_report_alert 实时派生，不新建列）。
+
+    「告警已发」= 报送 CLI 已经把阻断结论推出去了，此时页面上再点报送没有意义。
+    表缺失 → 0（降级）。
+    """
+    try:
+        cur.execute(
+            "SELECT COUNT(*) FROM ads_report_alert "
+            "WHERE report_type=%s AND report_date=%s AND alert_level='block'",
+            (REPORT_TYPE, date),
+        )
+    except pymysql.err.ProgrammingError:
+        return 0
+    r = cur.fetchone()
+    return int(r[0]) if r and r[0] is not None else 0
+
+
+def _derive_report_status(rows, mismatches, submission):
+    """五态派生：blocked > submitted > consistent > pending（checking 只在前端出现）。
+
+    无快照（rows 空）优先判 pending——没有快照谈不上一致/不一致。
+    已报送后快照又漂移 → blocked（而不是 submitted），提示需要重报；此时 submission
+    仍随返回体下发，前端据此显示「曾于 X 报送，快照已变更」。
+    """
+    if not rows:
+        return "pending"
+    if mismatches:
+        return "blocked"
+    if submission and submission.get("status") == "submitted":
+        return "submitted"
+    return "consistent"
+
+
+def set_report_submitted(date, user):
+    """把该业务日标记为已报送（PK upsert，幂等）。
+
+    submitted_at 用 COALESCE 保留**首报时刻**：重复点报送不刷新首报时间（幂等语义），
+    updated_at 每次都刷新，用于区分「首报」与「最近一次确认」。
+    """
+    ensure_report_submission_table()
+    conn = crawl_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO ads_report_submission "
+            "(report_date, report_type, status, submitted_by, submitted_at, updated_at) "
+            "VALUES (%s,%s,'submitted',%s,NOW(),NOW()) "
+            "ON DUPLICATE KEY UPDATE status='submitted', "
+            "submitted_by=VALUES(submitted_by), "
+            "submitted_at=COALESCE(submitted_at, VALUES(submitted_at)), "
+            "updated_at=NOW()",
+            (date, REPORT_TYPE, user),
+        )
+        conn.commit()
+        cur.close()
+    finally:
+        conn.close()
+
+
+def reset_report_submission(date):
+    """重建快照后回退报送态：删除该业务日的报送记录（无记录 = pending）。
+
+    为什么必须回退：快照被重建后内容已经变了，之前那次「已报送」对应的是旧快照，
+    继续显示「已报送」会让报送人以为新快照也报过。表缺失时静默降级。
+    """
+    conn = crawl_conn()
+    try:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "DELETE FROM ads_report_submission WHERE report_date=%s AND report_type=%s",
+                (date, REPORT_TYPE),
+            )
+            conn.commit()
+        except pymysql.err.ProgrammingError:
+            pass
+        cur.close()
+    finally:
+        conn.close()
+
+
+def report_submit(date=None, user="system"):
+    """「报送」动作：服务端自复算口径，一致才落 submitted。
+
+    绝不相信前端传来的 consistent——页面上的状态可能是几分钟前的快照，期间 dws 明细
+    可能已被重跑。这里重新走一遍 _load_g11_rows + _dws_aggregate + _g11_consistency，
+    不一致直接返回 ok=False（**不写任何状态**），由 handler 转 409。
+    """
+    crawl = crawl_conn()
+    try:
+        cur = crawl.cursor()
+        if not date:
+            date = _latest_g11_date(cur)
+        rows = _load_g11_rows(cur, date) if date else []
+        if not rows:
+            cur.close()
+            return {
+                "ok": False,
+                "reason": "该业务日尚无可报送快照",
+                "date": date,
+                "status": "pending",
+                "consistent": None,
+                "mismatches": [],
+                "submission": None,
+                "alert_sent": False,
+                "alert_sent_count": 0,
+            }
+        mismatch_details = _g11_consistency(rows, _dws_aggregate(cur))
+        mismatches = [m["key"] for m in mismatch_details]
+        alert_count = _block_alert_sent(cur, date)
+        if mismatches:
+            submission = _load_submission(cur, date)
+            cur.close()
+            return {
+                "ok": False,
+                "reason": "口径不一致，报送已阻断",
+                "date": date,
+                "status": "blocked",
+                "consistent": False,
+                "mismatches": mismatches,
+                "mismatch_details": mismatch_details,
+                "submission": submission,
+                "alert_sent": alert_count > 0,
+                "alert_sent_count": alert_count,
+            }
+        cur.close()
+    finally:
+        crawl.close()
+
+    set_report_submitted(date, user)
+
+    crawl = crawl_conn()
+    try:
+        cur = crawl.cursor()
+        submission = _load_submission(cur, date)
+        cur.close()
+    finally:
+        crawl.close()
+    return {
+        "ok": True,
+        "date": date,
+        "status": "submitted",
+        "consistent": True,
+        "mismatches": [],
+        "submission": submission,
+        "alert_sent": alert_count > 0,
+        "alert_sent_count": alert_count,
+    }
 
 
 def report(date=None):
@@ -890,10 +1315,24 @@ def report(date=None):
         if not date:
             date = _latest_g11_date(cur)
         if not date:
-            return {"date": None, "rows": [], "consistent": None, "mismatches": [], "alerts": []}
+            return {
+                "date": None,
+                "rows": [],
+                "consistent": None,
+                "mismatches": [],
+                "mismatch_details": [],
+                "alerts": [],
+                "status": "pending",
+                "submission": None,
+                "alert_sent": False,
+                "alert_sent_count": 0,
+            }
 
         rows = _load_g11_rows(cur, date)
-        mismatches = _g11_consistency(rows, _dws_aggregate(cur))
+        mismatch_details = _g11_consistency(rows, _dws_aggregate(cur))
+        mismatches = [m["key"] for m in mismatch_details]
+        submission = _load_submission(cur, date)
+        alert_count = _block_alert_sent(cur, date)
 
         # 阻断告警历史。
         cur.execute(
@@ -918,9 +1357,15 @@ def report(date=None):
         return {
             "date": date,
             "rows": rows,
+            # consistent 保留：旧前端与既有测试依赖该字段，status 是叠加而非替换。
             "consistent": not mismatches,
             "mismatches": mismatches,
+            "mismatch_details": mismatch_details,
             "alerts": alerts,
+            "status": _derive_report_status(rows, mismatches, submission),
+            "submission": submission,
+            "alert_sent": alert_count > 0,
+            "alert_sent_count": alert_count,
         }
     finally:
         crawl.close()
@@ -939,16 +1384,35 @@ def report_recheck(date=None):
         if not date:
             date = _latest_g11_date(cur)
         if not date:
-            return {"date": None, "consistent": None, "mismatches": [], "checked_at": None}
+            return {
+                "date": None,
+                "consistent": None,
+                "mismatches": [],
+                "mismatch_details": [],
+                "checked_at": None,
+                "status": "pending",
+                "submission": None,
+                "alert_sent": False,
+                "alert_sent_count": 0,
+            }
         cur.execute("SELECT NOW()")
         checked_at = str(cur.fetchone()[0])
-        mismatches = _g11_consistency(_load_g11_rows(cur, date), _dws_aggregate(cur))
+        rows = _load_g11_rows(cur, date)
+        mismatch_details = _g11_consistency(rows, _dws_aggregate(cur))
+        mismatches = [m["key"] for m in mismatch_details]
+        submission = _load_submission(cur, date)
+        alert_count = _block_alert_sent(cur, date)
         cur.close()
         return {
             "date": date,
             "consistent": not mismatches,
             "mismatches": mismatches,
+            "mismatch_details": mismatch_details,
             "checked_at": checked_at,
+            "status": _derive_report_status(rows, mismatches, submission),
+            "submission": submission,
+            "alert_sent": alert_count > 0,
+            "alert_sent_count": alert_count,
         }
     finally:
         crawl.close()
@@ -977,6 +1441,7 @@ def report_rebuild(date=None):
                     "rebuilt_rows": 0,
                     "consistent": None,
                     "mismatches": [],
+                    "mismatch_details": [],
                     "etl_ts": None,
                 }
 
@@ -1010,13 +1475,15 @@ def report_rebuild(date=None):
             )
             cur.execute("SELECT NOW()")
             etl_ts = str(cur.fetchone()[0])
-            mismatches = _g11_consistency(rows, dws)
+            mismatch_details = _g11_consistency(rows, dws)
+            mismatches = [m["key"] for m in mismatch_details]
             conn.commit()
             return {
                 "date": date,
                 "rebuilt_rows": len(rows),
                 "consistent": not mismatches,
                 "mismatches": mismatches,
+                "mismatch_details": mismatch_details,
                 "etl_ts": etl_ts,
             }
         finally:

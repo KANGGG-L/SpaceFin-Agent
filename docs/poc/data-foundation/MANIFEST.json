@@ -1,0 +1,27 @@
+{
+  "kind": "poc-artifact-manifest",
+  "generated_at": "2026-10-18",
+  "note": "固定随机种子的 PoC 产物指纹；用于校验『脚本 ↔ 产物』血缘，无需分发大文件。",
+  "files": [
+    {
+      "path": "avm_poc.py",
+      "sha256": "92abafe55d5df8dc25aacf05d72710be53afd1d1d941524854518a382f801d0b"
+    },
+    {
+      "path": "ods.csv",
+      "sha256": "fd27b8a7ad8a3d0c7277316a2e67b8d70f415258cef4cad627a9d244ee142de6"
+    },
+    {
+      "path": "dwd.csv",
+      "sha256": "218d8398e7be2da1fe6efb6c59d5ff8daf76e60e5b6789e88092cda5aa956c1a"
+    },
+    {
+      "path": "dws.csv",
+      "sha256": "a1847450be414a86d1daa00858fc1194b5c5c253106c41b52415865bde1bace2"
+    },
+    {
+      "path": "ads.csv",
+      "sha256": "b5a7cf5cf9d90c6a1b9fcef8a985c6cd1ab8f98d84f4acd416f4a18a6f2e854a"
+    }
+  ]
+}

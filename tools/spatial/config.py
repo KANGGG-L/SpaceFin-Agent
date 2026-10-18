@@ -74,13 +74,36 @@ CITY_CENTER = {
 GD_BBOX = {"lat_min": 20.0, "lat_max": 26.0, "lng_min": 108.0, "lng_max": 118.0}
 
 
+def city_code_from_addr(addr: str | None) -> str | None:
+    """「广州市黄埔区…」→ 'gz'；取不到返回 None。
+
+    抵押物只有中文地址（business 库 collateral.property_addr），价格面网格的 city
+    是城市码（DWD district）。两边要 join 就必须有一套共用的解析，放在 config 是因为
+    CITY_MAP 本身在这里，且 features/store 都 import config。解析口径（「XX市…」前缀
+    匹配 CITY_MAP 键）与前端 tools/frontend/pages/p5_spatial.py: _city_code_from_addr
+    一致——前端因 sys.path 撞名不能 import 本模块（见该文件注释），只能各持一份实现，
+    改口径时两处必须同步。
+    """
+    if not addr:
+        return None
+    for name, code in CITY_MAP.items():
+        if str(addr).startswith(name):
+            return code
+    return None
+
+
 def business_date() -> str:
     """当前业务日期 YYYY-MM-DD（Asia/Shanghai），与 risk 层口径一致。"""
     return datetime.now(BUSINESS_TZ).strftime("%Y-%m-%d")
 
 
 def load_env() -> dict:
-    """读仓库根 .env（仅取 MYSQL_* 相关键，不写回）。"""
+    """读仓库根 .env（仅取 MYSQL_* 相关键，不写回）。
+
+    允许进程环境 os.environ 中的 MYSQL_* 覆盖 .env 的值——容器化 Airflow 通过
+    compose env_file 注入 MYSQL_HOST=host.docker.internal，使 ETL 脚本在桥接网络容器内
+    也能连到宿主 MySQL；宿主/采集栈（host 网络）进程无此变量，则回退 .env 的 127.0.0.1。
+    """
     env = {}
     path = os.path.join(REPO_ROOT, ".env")
     if os.path.exists(path):
@@ -91,6 +114,9 @@ def load_env() -> dict:
                     continue
                 k, _, v = line.partition("=")
                 env[k.strip()] = v.strip().strip('"').strip("'")
+    for k, v in os.environ.items():
+        if k.startswith("MYSQL_"):
+            env[k] = v
     return env
 
 
@@ -138,6 +164,11 @@ PRICE_LOW_RATIO = float(os.getenv("SPATIAL_PRICE_LOW_RATIO", "0.25"))
 # 高危区规则 B（LTV 集中）：区块内 LTV 中位 > 红线 且 样本足够
 LTV_RED_LINE = float(os.getenv("RISK_LTV_RED_LINE", "0.85"))
 MIN_LTV_ZONE_SAMPLES = int(os.getenv("SPATIAL_MIN_LTV_SAMPLES", "3"))
+
+# 价格面片区回填「片区抵押 LTV 中位」的最少抵押样本。与 MIN_LTV_ZONE_SAMPLES 同默认值
+# 但独立可调：那个门槛决定「要不要判高危」，这个只决定「敢不敢把中位数显示出来」，
+# 语义不同，未来收紧展示口径时不该被迫连高危判定一起动。
+MIN_LTV_BACKFILL_SAMPLES = int(os.getenv("SPATIAL_MIN_LTV_BACKFILL_SAMPLES", "3"))
 
 # POI 密度代理：半径 2km 内 DWD 挂牌数 / 圆面积（个/平方公里）
 POI_RADIUS_KM = 2.0

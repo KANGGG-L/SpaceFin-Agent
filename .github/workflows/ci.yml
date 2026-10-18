@@ -2,9 +2,9 @@ name: CI
 
 on:
   pull_request:
-    branches: [main, master, dev]
+    branches: [main, master, dev, demo]
   push:
-    branches: [main, master, dev]
+    branches: [main, master, dev, demo]
 
 jobs:
   pre-commit:
@@ -24,3 +24,30 @@ jobs:
         run: npm ci
       - name: Run pre-commit on all files
         run: pre-commit run --all-files --show-diff-on-failure
+
+  trace-check:
+    name: Traceability checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Run traceability checks
+        # 链接 / ADR 字段 / 证据登记 schema / 文档一致性 / 术语黑名单
+        run: python tools/dev/trace_check.py
+      - name: Run traceability extra checks
+        run: python tools/dev/trace_extra.py
+      - name: Check ledger constants
+        run: python tools/dev/gen_ledger.py --check
+      - name: Check evidence snapshots (drift)
+        run: python tools/dev/gen_evidence.py --check --out docs/evidence
+      - name: Generate evidence snapshots
+        run: python tools/dev/gen_evidence.py --out docs/evidence
+      - name: Upload evidence artifacts
+        # 评估产物被 .gitignore 排除，故把可复算的快照在 CI 上归档，补足可复现性
+        uses: actions/upload-artifact@v4
+        with:
+          name: spacefin-evidence
+          path: docs/evidence/*.json
+          if-no-files-found: warn

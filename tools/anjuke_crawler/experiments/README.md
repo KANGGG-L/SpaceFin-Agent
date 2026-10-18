@@ -13,8 +13,8 @@
 | `test_parse_houses.py` | 列表页卡片解析探针（lxml） | 解析 | ✅ 验证 XPath 可抽出结构化字段（早期版，含重复 bug） |
 
 > 这些脚本各自独立运行，依赖见各文件头部（selenium / undetected-chromedriver /
-> selenium-stealth / curl_cffi / lxml）。它们不进入主采集链路——主链路见 `../fetcher.py`
-> （阶段三）与 `../stealth.py`（持久化 profile）。
+> selenium-stealth / curl_cffi / lxml）。它们不进入主采集链路——主链路见 `../fetch/fetcher.py`
+> （阶段三）与 `../fetch/stealth.py`（持久化 profile）。
 
 ⚠️ 合规：仅用于反爬可行性论证，采集公开非 PII 数据；数据源锁定安居客（已知悉并接受其
 TOS/反爬风险，见 docs/product/01/数据现状摸底.md §3.3）。

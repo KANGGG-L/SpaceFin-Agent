@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Git LFS：AVM 模型产物为二进制大文件（约 22MB），交由 LFS 管理，避免膨胀 git 历史
+# 注：output/ 被 .gitignore 排除，本行需配合提交 + git lfs track 方生效；当前仓库未分发该模型。
+output/avm/model.joblib filter=lfs diff=lfs merge=lfs -text

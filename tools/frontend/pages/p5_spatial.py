@@ -34,6 +34,39 @@ if _FRONTEND_DIR not in sys.path:
 
 import db  # noqa: E402
 
+# 底图瓦片源。默认值按「本机有没有本地瓦片产物」推导，而不是只认环境变量：
+# app.py 自己不读 .env（只有 dev_server.py 的 load_env 会把它注入子进程），
+# 而文档写的启动方式正是直起 app.py —— 那条路径下若默认公网 OSM，出不去公网的
+# 机器就整片灰图。优先级：显式 SPATIAL_TILE_URL（内网部署可控）> 本地瓦片 > 公网 OSM，
+# 因此 fresh clone（没跑 download_tiles.py）行为不变。
+# 静态目录路径在本文件内算：app.py 会 import pages，反向 import app.STATIC_DIR 会成环。
+# 地图交互依赖 vendor/leaflet（随部署包分发，不依赖外网），但瓦片源本身可配置——因此
+# 「全站零依赖、离线可跑」对地图页不成立：前提是「可交互」优先于「零依赖」。
+_LOCAL_TILE_DIR = os.path.join(_FRONTEND_DIR, "static", "tiles")
+_LOCAL_TILE_URL = "/tiles/{z}/{x}/{y}.png"
+_OSM_TILE_URL = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+
+
+def _has_local_tiles(tile_dir):
+    """download_tiles.py 的本地产物是否在位（目录存在且非空）。不可读一律当作没有。"""
+    try:
+        return bool(os.listdir(tile_dir))
+    except OSError:
+        return False
+
+
+def _resolve_tile_url(env=None, tile_dir=None):
+    """瓦片源默认值推导。env / tile_dir 只是给测试注入的口子，默认取真实环境与目录。"""
+    explicit = (os.environ if env is None else env).get("SPATIAL_TILE_URL")
+    if explicit:
+        return explicit
+    if _has_local_tiles(_LOCAL_TILE_DIR if tile_dir is None else tile_dir):
+        return _LOCAL_TILE_URL
+    return _OSM_TILE_URL
+
+
+TILE_URL = _resolve_tile_url()
+
 # 不良 = 五级后三档（次级/可疑/损失）。取 CLASS_ORDER 切片而非硬编码字符串，
 # 保证与风险引擎/报送链路的五级口径同源，改一处即可全仓一致。
 NPL_CLASSES = tuple(db.CLASS_ORDER[2:])
@@ -49,24 +82,6 @@ KM_PER_DEG_LNG = 111.32
 
 # 城市码 → 中文名（业务库地址用中文，空间表用城市码，展示层统一成中文）。
 CITY_NAME = {code: name for name, code in db.config.CITY_MAP.items()}
-
-# 页面上如实标注的口径与局限，逐条对应 docs/tech/components/spatial-feature.md §7。
-# 放在服务端而不是写死在 js 里：口径变化时后端与数据同步改，前端不必跟着发版。
-CAVEATS = [
-    "POI 密度是「挂牌房源密度」代理（半径 2km 内 DWD 挂牌行数 / 圆面积，单位 个/km²），"
-    "反映房源热度而非真实配套；平台无 POI 图层数据源。",
-    "通勤时长是「到城市行政中心的球面直线距离 ÷ 30km/h」近似，无路网、不分交通方式，"
-    "系统性低估实际通勤（路网系数通常 1.4–1.6×）；城市中心坐标为约值（±2km）。",
-    "价格面只覆盖有坐标的挂牌行（12,939 / 44,369 ≈ 29%），无坐标行不参与空间计算，"
-    "网格中位单价代表的是「该网格有坐标样本」的中位数。",
-    "高危区规则 A（price_low）：网格中位单价 ≤ 城市中位 ×(1-25%) 且样本 ≥20；"
-    "规则 B（ltv_high）：网格 LTV 中位 >0.85 且样本 ≥3。阈值可由环境变量覆盖。",
-    "LTV 型网格样本极少（2 个、各 3 笔），且坐标为坐标补全前的历史构建结果，"
-    "当前无抵押物落入，判别力不足，仅作规则演示。",
-    "单机 cKDTree 近似替代 Sedona 分布式空间连接，距离用等距圆柱投影；"
-    "数据量到百万级需迁回 R-Tree 半径连接。",
-]
-
 
 # ---------------- 工具函数 ----------------
 
@@ -115,33 +130,42 @@ def _rate(num, den):
 
 
 def _load_zones(cur):
-    """全部区块画像（132 行级，一次取全，筛选在 Python 侧做，省一次往返）。"""
+    """全部区块画像（一次取全，筛选在 Python 侧做，省一次往返）。
+
+    ads_spatial_zone 同一 zone_id 存在多行（历史构建按细分维度重复落库，数值
+    基本一致），而页面语义以「网格」为单位 → 此处按 zone_id 去重、保留
+    sample_count 最大的一行；不去重会导致高危列表同格多行、KPI 与地图重复计数。
+    """
     cur.execute(
         "SELECT zone_id, zone_type, city, center_lng, center_lat, sample_count, "
-        "median_unit_price, median_ltv, price_dev_vs_city, is_high_risk_zone, "
-        "high_risk_rule, build_date "
+        "median_unit_price, median_ltv, ltv_sample_count, price_dev_vs_city, "
+        "is_high_risk_zone, high_risk_rule, build_date "
         "FROM ads_spatial_zone"
     )
-    zones = []
+    by_id = {}
     for r in cur.fetchall():
-        zones.append(
-            {
-                "zone_id": r[0],
-                "zone_type": r[1],
-                "city": r[2],
-                "city_name": CITY_NAME.get(r[2], "未标注" if r[2] is None else r[2]),
-                "center_lng": _f(r[3]),
-                "center_lat": _f(r[4]),
-                "sample_count": int(r[5] or 0),
-                "median_unit_price": _f(r[6]),
-                "median_ltv": _f(r[7]),
-                "price_dev_vs_city": _f(r[8]),
-                "is_high_risk_zone": int(r[9] or 0),
-                "high_risk_rule": r[10],
-                "build_date": str(r[11]) if r[11] else None,
-            }
-        )
-    return zones
+        z = {
+            "zone_id": r[0],
+            "zone_type": r[1],
+            "city": r[2],
+            "city_name": CITY_NAME.get(r[2], "未标注" if r[2] is None else r[2]),
+            "center_lng": _f(r[3]),
+            "center_lat": _f(r[4]),
+            "sample_count": int(r[5] or 0),
+            "median_unit_price": _f(r[6]),
+            "median_ltv": _f(r[7]),
+            # 支撑 median_ltv 的抵押笔数；NULL 表示没有回填（价格面片区样本不足，
+            # 或 LTV 型片区——其 sample_count 本身就是 LTV 观测数），前端据此显示「-」
+            "ltv_sample_count": None if r[8] is None else int(r[8]),
+            "price_dev_vs_city": _f(r[9]),
+            "is_high_risk_zone": int(r[10] or 0),
+            "high_risk_rule": r[11],
+            "build_date": str(r[12]) if r[12] else None,
+        }
+        prev = by_id.get(z["zone_id"])
+        if prev is None or z["sample_count"] > prev["sample_count"]:
+            by_id[z["zone_id"]] = z
+    return list(by_id.values())
 
 
 def _load_zone_feature_agg(cur):
@@ -188,19 +212,35 @@ def _load_city_feature_stats(cur):
     }
 
 
+# 与 attribution 同源：city stats 是 T+1 恒定的全表聚合，按 build_date 缓存，
+# 避免每次改筛选都重跑 GROUP BY（即便加了索引也省一次 SQL 往返）。
+_CITY_FEAT_CACHE = {}
+
+
+def _load_city_feature_stats_cached(cur, build_date):
+    if build_date is not None and build_date in _CITY_FEAT_CACHE:
+        return _CITY_FEAT_CACHE[build_date]
+    result = _load_city_feature_stats(cur)
+    if build_date is not None:
+        _CITY_FEAT_CACHE[build_date] = result
+    return result
+
+
 def _load_loans(cur, bcur):
     """贷款明细 + 抵押物空间特征 + 城市（200 行级，全量取回后在内存里按城市切）。
 
-    左连接空间特征表：collateral 的 zone_id 目前全为 NULL（见交叉核对说明），
-    但 lat/lng 有值，地图叠加层要用。
+    空间特征不能直接 LEFT JOIN：dws_spatial_feature 的主键是
+    (entity_type, entity_id, build_date)，同一抵押物每个构建日一行，直接 join
+    会把每笔贷款复制数倍（本页「位于高危网格贷款」会与驾驶舱同名指标对不上）。
+    这里单独取特征、每抵押物只保留最新 build_date 一行，再一对一挂到贷款上，
+    保证每笔贷款恰出现一次，与驾驶舱口径一致。
+    （collateral 的 zone_id 目前全为 NULL，见交叉核对说明；但 lat/lng 有值，
+    地图叠加层要用。）
     """
     cur.execute(
-        "SELECT r.loan_id, r.collateral_id, r.balance, r.ltv, r.risk_class, "
-        "r.is_high_risk_zone, r.alert, r.low_confidence, "
-        "f.lat, f.lng, f.poi_density, f.commute_min, f.spatial_feat_missing_pct, f.zone_id "
-        "FROM dws_risk_class r "
-        "LEFT JOIN dws_spatial_feature f "
-        "ON f.entity_type='collateral' AND f.entity_id=CAST(r.collateral_id AS CHAR)"
+        "SELECT loan_id, collateral_id, balance, ltv, risk_class, "
+        "is_high_risk_zone, alert, low_confidence "
+        "FROM dws_risk_class"
     )
     loans = []
     for r in cur.fetchall():
@@ -214,14 +254,46 @@ def _load_loans(cur, bcur):
                 "is_high_risk_zone": int(r[5] or 0),
                 "alert": int(r[6] or 0),
                 "low_confidence": int(r[7] or 0),
-                "lat": _f(r[8]),
-                "lng": _f(r[9]),
-                "poi_density": _f(r[10]),
-                "commute_min": _f(r[11]),
-                "missing_pct": _f(r[12]),
-                "zone_id": r[13],
+                "lat": None,
+                "lng": None,
+                "poi_density": None,
+                "commute_min": None,
+                "missing_pct": None,
+                "zone_id": None,
             }
         )
+
+    # 每抵押物仅保留最新构建日的一行特征（build_date 为 ISO 日期，字符串比较即时间序）。
+    cur.execute(
+        "SELECT entity_id, lat, lng, poi_density, commute_min, "
+        "spatial_feat_missing_pct, zone_id, build_date "
+        "FROM dws_spatial_feature WHERE entity_type='collateral'"
+    )
+    feat_by_cid = {}
+    for r in cur.fetchall():
+        bd = str(r[7]) if r[7] else ""
+        prev = feat_by_cid.get(r[0])
+        if prev is None or bd > prev["build_date"]:
+            feat_by_cid[r[0]] = {
+                "lat": _f(r[1]),
+                "lng": _f(r[2]),
+                "poi_density": _f(r[3]),
+                "commute_min": _f(r[4]),
+                "missing_pct": _f(r[5]),
+                "zone_id": r[6],
+                "build_date": bd,
+            }
+    for ln in loans:
+        if ln["collateral_id"] is None:
+            continue
+        f = feat_by_cid.get(str(ln["collateral_id"]))
+        if f:
+            ln["lat"] = f["lat"]
+            ln["lng"] = f["lng"]
+            ln["poi_density"] = f["poi_density"]
+            ln["commute_min"] = f["commute_min"]
+            ln["missing_pct"] = f["missing_pct"]
+            ln["zone_id"] = f["zone_id"]
 
     # 批量取地址定城市（IN 查询，避免 N+1）。
     cids = [ln["collateral_id"] for ln in loans if ln["collateral_id"] is not None]
@@ -302,49 +374,6 @@ def _npl_concentration(loans):
         "total": _npl_group(loans),
         "lift_count": lift(g_high["npl_rate_count"], g_normal["npl_rate_count"]),
         "lift_balance": lift(g_high["npl_rate_balance"], g_normal["npl_rate_balance"]),
-        # 小样本提示交给前端展示：23 笔的不良率一笔迁徙就跳 4pct，不能当结论用。
-        "small_sample": g_high["loan_count"] < 30,
-    }
-
-
-def _attribution_check(zones, loans):
-    """口径交叉核对：引擎标记 vs 空间网格归属。
-
-    引擎口径 = dws_risk_class.is_high_risk_zone（业务库 collateral 合成字段）；
-    空间口径 = 用 tools/spatial 同款 0.02° 网格，把抵押物坐标重新落到 ads_spatial_zone。
-    两者对不上说明「高危区」标记当前没有空间证据支撑，必须显式告诉风控经理。
-    """
-    grid = {}
-    for z in zones:
-        if z["center_lng"] is None or z["center_lat"] is None:
-            continue
-        grid[_grid_key(z["center_lng"], z["center_lat"])] = z
-
-    coords = [(z["center_lng"], z["center_lat"], z["is_high_risk_zone"]) for z in zones]
-    in_zone = in_high = 0
-    dists = []
-    for ln in loans:
-        if ln["lat"] is None or ln["lng"] is None:
-            continue
-        hit = grid.get(_grid_key(ln["lng"], ln["lat"]))
-        if hit:
-            in_zone += 1
-            if hit["is_high_risk_zone"]:
-                in_high += 1
-        if coords:
-            dists.append(min(_km(ln["lng"], ln["lat"], c[0], c[1]) for c in coords))
-
-    return {
-        "loan_total": len(loans),
-        "with_coord": sum(1 for ln in loans if ln["lat"] is not None),
-        "flagged_by_engine": sum(1 for ln in loans if ln["is_high_risk_zone"]),
-        "in_any_zone_grid": in_zone,
-        "in_high_risk_grid": in_high,
-        "with_zone_id": sum(1 for ln in loans if ln["zone_id"]),
-        "nearest_zone_km_median": round(statistics.median(dists), 2) if dists else None,
-        "nearest_zone_km_min": round(min(dists), 2) if dists else None,
-        "within_5km": sum(1 for d in dists if d <= 5.0),
-        "consistent": in_high == sum(1 for ln in loans if ln["is_high_risk_zone"]),
     }
 
 
@@ -397,7 +426,11 @@ def overview(ctx):
     if zone_type and zone_type not in ("price", "ltv"):
         raise ValueError("zone_type 只能是 price / ltv")
     if city and city not in CITY_NAME:
-        raise ValueError(f"未知城市码：{city}")
+        return 400, {
+            "error": f"未知城市码：{city}",
+            "error_key": "未知城市码：{city}",
+            "error_params": {"city": city},
+        }
 
     crawl = db.crawl_conn()
     biz = db.biz_conn()
@@ -405,8 +438,9 @@ def overview(ctx):
         cur = crawl.cursor()
         bcur = biz.cursor()
         zones_all = _load_zones(cur)
+        build_date = next((z["build_date"] for z in zones_all if z["build_date"]), None)
         zone_feat = _load_zone_feature_agg(cur)
-        city_feat = _load_city_feature_stats(cur)
+        city_feat = _load_city_feature_stats_cached(cur, build_date)
         loans_all = _load_loans(cur, bcur)
 
         for z in zones_all:
@@ -456,7 +490,7 @@ def overview(ctx):
         return {
             "filters": {"city": city, "zone_type": zone_type},
             "cities": _city_options(zones_all, loans_all, city_feat),
-            "build_date": next((z["build_date"] for z in zones_all if z["build_date"]), None),
+            "build_date": build_date,
             "kpi": kpi,
             "zones": zones,
             "high_risk_zones": sorted(high_zones, key=lambda z: z["price_dev_vs_city"] or 0),
@@ -478,8 +512,7 @@ def overview(ctx):
             ],
             "npl": npl,
             "city_layers": city_layers,
-            "attribution": _attribution_check(zones_all, loans_all),
-            "caveats": CAVEATS,
+            "tile_url": TILE_URL,
         }
     finally:
         crawl.close()
@@ -509,7 +542,11 @@ def zone_detail(ctx):
         )
         row = cur.fetchone()
         if not row:
-            return 404, {"error": f"网格不存在：{zone_id}"}
+            return 404, {
+                "error": f"网格不存在：{zone_id}",
+                "error_key": "网格不存在：{zone_id}",
+                "error_params": {"zone_id": zone_id},
+            }
         zone = {
             "zone_id": row[0],
             "zone_type": row[1],
@@ -620,10 +657,10 @@ def zone_detail(ctx):
 
 PAGE = {
     "id": "spatial",
-    "label": "高危地图与黑名单",
-    # 风控策略经理是主用户；DA 需要看口径，admin 全量可见。贷后不参与空间策略，故不开。
-    "roles": {"admin", "risk", "da"},
-    "order": 50,
+    "label": "空间风险画像",
+    # 仅 admin 可见（空间风险画像；历史 risk/da 角色已移除，postloan 不参与空间策略故不开）。
+    "roles": {"admin"},
+    "order": 40,
     "js": "p5_spatial.js",
     "routes": {
         ("GET", "/api/spatial"): overview,

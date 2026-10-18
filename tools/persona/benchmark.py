@@ -1,4 +1,4 @@
-"""基准分布快照：从 MySQL 抽取 spacefin.customer 三特征并落盘（运行不再依赖 MySQL）。
+"""基准分布快照：从 MySQL 抽取 spacefin.customer 三特征（附行业/城市维度）并落盘（运行不再依赖 MySQL）。
 
 派生违约概率公式（本模块固定，与 benchmark_customer.json 内嵌的公式一致）：
 
@@ -57,13 +57,20 @@ def derive_default_prob(debt_ratio, credit_score):
 
 @dataclass
 class Benchmark:
-    """基准分布：三特征数组 + 派生违约概率 + 来源元信息。"""
+    """基准分布：三特征数组 + 派生违约概率 + 来源元信息。
+
+    industry / city 是每行基准客户的属性维度（非 KS 特征）：industry 为借款人
+    行业 slug，city 为抵押物地址所在城市（脱敏到市级，来自 loan→collateral 关联）。
+    两者可选（旧快照没有）：为 None 时下游画像不携带该维度。
+    """
 
     income_monthly: np.ndarray
     debt_ratio: np.ndarray
     credit_score: np.ndarray
     source: str = ""
     extracted_at: str = ""
+    industry: list = None
+    city: list = None
 
     @property
     def n(self):
@@ -85,7 +92,14 @@ class Benchmark:
 
 # ------------------------------------------------------------------ MySQL 抽取
 def extract_from_mysql(env_path=None, container="spacefin-mysql", password=None):
-    """用 docker exec 读 spacefin.customer 的三特征，返回 Benchmark（连不上则抛错）。
+    """用 docker exec 读 spacefin.customer 的三特征 + 行业/城市，返回 Benchmark。
+
+    行业/城市是画像的属性维度（供规则影响判读，不参与 KS/违约率公式）：
+    - industry：customer.industry 的行业 slug；
+    - city：客户唯一贷款的抵押物地址城市前缀（脱敏到市级，如「广州市」），
+      经 loan→collateral 关联取得——customer 表本身没有地址列。
+    客户:贷款为 1:1（种子约束），LEFT JOIN 不会翻倍行数；无贷款/抵押物的
+    客户两列为 NULL，保留行（三特征仍是基准的一部分）。
 
     密码优先级：显式 password 参数 > .env 的 MYSQL_ROOT_PASSWORD。env_path 缺省时
     自动找 repo 根 .env（tools/persona 的上级目录）。
@@ -96,12 +110,19 @@ def extract_from_mysql(env_path=None, container="spacefin-mysql", password=None)
         )
         password = _read_env_password(env_path)
 
-    sql = "SELECT income_monthly, debt_ratio, credit_score FROM spacefin.customer"
+    sql = (
+        "SELECT c.income_monthly, c.debt_ratio, c.credit_score, c.industry, "
+        "SUBSTRING(col.property_addr, 1, 3) "
+        "FROM spacefin.customer c "
+        "LEFT JOIN spacefin.loan l ON l.customer_id = c.customer_id "
+        "LEFT JOIN spacefin.collateral col ON col.collateral_id = l.collateral_id"
+    )
     cmd = [
         "docker",
         "exec",
         container,
         "mysql",
+        "--default-character-set=utf8mb4",
         "-uroot",
         f"-p{password}",
         "-N",
@@ -118,18 +139,23 @@ def extract_from_mysql(env_path=None, container="spacefin-mysql", password=None)
     if len(rows) < 2:
         raise RuntimeError("spacefin.customer 无数据（或解析异常），请确认 seed 已灌入。")
 
-    income, debt, score = [], [], []
+    income, debt, score, industry, city = [], [], [], [], []
     for r in rows:
         if len(r) < 3:
             continue
         income.append(float(r[0]))
         debt.append(float(r[1]))
         score.append(float(r[2]))
+        # -B 模式下 NULL 就是字面量 "NULL"；只有全列一致时才按 NULL 处理。
+        industry.append(None if len(r) < 4 or r[3] == "NULL" else r[3])
+        city.append(None if len(r) < 5 or r[4] == "NULL" else r[4])
     return Benchmark(
         income_monthly=np.asarray(income, dtype=float),
         debt_ratio=np.asarray(debt, dtype=float),
         credit_score=np.asarray(score, dtype=float),
         source=f"{container}: spacefin.customer",
+        industry=industry,
+        city=city,
     )
 
 
@@ -160,6 +186,9 @@ def save_snapshot(benchmark, path=None, extracted_at=None):
             "income_monthly": [round(float(x), 4) for x in benchmark.income_monthly],
             "debt_ratio": [round(float(x), 4) for x in benchmark.debt_ratio],
             "credit_score": [round(float(x), 4) for x in benchmark.credit_score],
+            # 属性维度（非 KS 特征）：供明细表判读规则影响；城市脱敏到市级。
+            "industry": benchmark.industry or [],
+            "city": benchmark.city or [],
         },
         "derived_default_prob": [round(float(x), 6) for x in benchmark.default_prob],
     }
@@ -181,6 +210,8 @@ def load_benchmark(path=None):
         credit_score=np.asarray(feats["credit_score"], dtype=float),
         source=doc.get("source", ""),
         extracted_at=doc.get("extracted_at", ""),
+        industry=feats.get("industry") or None,
+        city=feats.get("city") or None,
     )
 
 

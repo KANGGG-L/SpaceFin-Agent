@@ -7,7 +7,8 @@
 #   worker-1 .. worker-5             泛化 worker：不绑定城市/类型，从任务队列领任务
 #       {city, type, pages, target, round}，从 master/Redis 拿 https proxy 抓取。
 # 任务模型：42 任务 = 21 城 × sale(出售)/fangyuan(出租)，每 run 每城一轮，
-#           阶段化执行：先 sale 后 fangyuan；sale 用 500 青果 + 免费池兜底、fangyuan 用 500 青果；
+#           按城交错（city-interleave）全量入队，波次状态机（floor->rescue->depth->done）；
+#           sale 用 500 青果 + 免费池兜底、fangyuan 用 500 青果（rescue 波次允许回落免费池）；
 #           免费池本轮发放上限 FREE_BUDGET(1000)，到限后本轮不再用免费池；
 #           停止条件=全部任务 finished=1。关键参数：LEADER_TTL=60、POOL_SIZE_MIN=60、
 #           PAGES_SALE=100、PAGES_RENT=53（fangyuan 每城页数上限）。
@@ -18,7 +19,11 @@
 # 依赖：
 #   - 已有 spacefin-net 网络上的 spacefin-redis（对外 6379）
 #
-# 启动：
+# 启动（推荐走脚本，它会推导 bind 源需要的 dockerd 视角仓库根）：
+#   bash tools/orchestrator/start_all.sh      # build + up -d
+#   bash tools/orchestrator/stop_stack.sh     # stop（保留容器与日志）
+# 直接敲 compose 必须先导出该变量，否则 ${SPACEFIN_REPO_ROOT:?} 会当场报错（故意的）：
+#   export SPACEFIN_REPO_ROOT="$(pwd)"
 #   docker compose --env-file .env -f tools/orchestrator/docker-compose.yml build
 #   docker compose --env-file .env -f tools/orchestrator/docker-compose.yml up -d
 # 注意：青果代理凭据（QG_*）从项目根 .env 读取（.env 已 gitignore），勿写入源码。
@@ -50,6 +55,11 @@ x-worker-env: &worker-env
   NO_PROXY_MAX_CYCLES: "5"
   # 单任务单 run 内允许被重新入队的次数上限（收敛保证，防 requeue 乒乓使 all_done 永不成立）
   MAX_REQUEUE: "3"
+  # 失败退款开关
+  PROXY_REPORT_ENABLED: "1"
+  # 观测日：worker 据此写 raw/ds=<观测日>/，ETL 只读当日目录（漏传会落成 ds=manual，
+  # 当天的 ETL 就看不见这批数据——不是报错，是静默零行，所以必须在 DAG 侧显式传 {{ ds }}）
+  CRAWL_RUN_ID: "${CRAWL_RUN_ID:-manual}"
 
 x-worker: &worker
   build:
@@ -67,9 +77,14 @@ x-worker: &worker
   # Chrome 渲染需要足够的 /dev/shm（默认 64M 太小，Chrome 会因共享内存不足启动失败）
   shm_size: "256mb"
   volumes:
-    - ../../output/guangdong:/output
+    # bind 源由 dockerd 解析（不是 compose 客户端），必须是 **dockerd 视角的绝对路径**。
+    # 写成 ../../ 时，若 compose 由 airflow 容器内调起，dockerd 会把解析出的
+    # /opt/spacefin/output/... 当作宿主路径自行新建，采集结果就永远进不了仓库
+    # （2026-08-30 实测丢过 5 晚数据）。start_all.sh / stop_stack.sh 会推导并导出该变量；
+    # 直接手敲 docker compose 时需先 export SPACEFIN_REPO_ROOT="$(pwd)"。
+    - ${SPACEFIN_REPO_ROOT:?SPACEFIN_REPO_ROOT 必须是 dockerd 可见的仓库绝对路径，见 tools/orchestrator/lib_host_repo_root.sh}/output/guangdong:/output
     # B1 并行化 fangyuan：只读挂载已验证 chrome_profile 作为源，start.sh 拷贝到每 worker 私有目录
-    - ../../tools/anjuke_crawler/chrome_profile:/app/anjuke_crawler/chrome_profile_src:ro
+    - ${SPACEFIN_REPO_ROOT:?同上}/tools/anjuke_crawler/chrome_profile:/app/anjuke_crawler/chrome_profile_src:ro
   restart: unless-stopped
 
 services:
@@ -102,14 +117,20 @@ services:
       FREE_BUDGET: "1000"
       PAGES_SALE: "100"
       PAGES_RENT: "53"
+      TASK_TYPES: "${TASK_TYPES:-sale,fangyuan}"
       TARGET: "999999"
-      # 每城 IP 预算：广深各 ~15%（sale 500 ≈ 75×2 + 18×19；fangyuan 500 ≈ 75×2 + 18×19）
+      # 每城 IP 预算：广深各 60，其余 19 城各 20（总额 500/500）
       IP_BUDGET_ENABLED: "1"
       BUDGET_TOP_CITIES: "gz,sz"
-      IP_BUDGET_SALE_TOP: "75"
-      IP_BUDGET_SALE_OTHER: "18"
-      IP_BUDGET_FY_TOP: "75"
-      IP_BUDGET_FY_OTHER: "18"
+      IP_BUDGET_SALE_TOP: "60"
+      IP_BUDGET_SALE_OTHER: "20"
+      IP_BUDGET_FY_TOP: "60"
+      IP_BUDGET_FY_OTHER: "20"
+      # 波次状态机调度配置
+      WAVE_ENABLED: "1"
+      WAVE_FLOOR_PAGES: "5"
+      WAVE_DEPTH_ENABLED: "1"
+      FANGYUAN_FREE_RESCUE: "1"
       # 本次 run 标识：Airflow 注入 {{ ds }}，手动启动时为 manual
       CRAWL_RUN_ID: "${CRAWL_RUN_ID:-manual}"
       # 单任务单 run 内允许被重新入队的次数上限（收敛保证，防 requeue 乒乓使 all_done 永不成立）
@@ -147,13 +168,18 @@ services:
       FREE_BUDGET: "1000"
       PAGES_SALE: "100"
       PAGES_RENT: "53"
+      TASK_TYPES: "${TASK_TYPES:-sale,fangyuan}"
       TARGET: "999999"
       IP_BUDGET_ENABLED: "1"
       BUDGET_TOP_CITIES: "gz,sz"
-      IP_BUDGET_SALE_TOP: "75"
-      IP_BUDGET_SALE_OTHER: "18"
-      IP_BUDGET_FY_TOP: "75"
-      IP_BUDGET_FY_OTHER: "18"
+      IP_BUDGET_SALE_TOP: "60"
+      IP_BUDGET_SALE_OTHER: "20"
+      IP_BUDGET_FY_TOP: "60"
+      IP_BUDGET_FY_OTHER: "20"
+      WAVE_ENABLED: "1"
+      WAVE_FLOOR_PAGES: "5"
+      WAVE_DEPTH_ENABLED: "1"
+      FANGYUAN_FREE_RESCUE: "1"
       CRAWL_RUN_ID: "${CRAWL_RUN_ID:-manual}"
       # 单任务单 run 内允许被重新入队的次数上限（收敛保证，防 requeue 乒乓使 all_done 永不成立）
       MAX_REQUEUE: "3"

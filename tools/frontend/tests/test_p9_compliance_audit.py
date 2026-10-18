@@ -1,13 +1,13 @@
-"""P9 合规审计/特征归因页的最小测试集（零 DB：db.crawl_conn 换成录制型假连接）。
+"""P9 合规审计页的最小测试集（零 DB：db.crawl_conn 换成录制型假连接）。
 
-覆盖三个验收要点：
+覆盖四个验收要点：
 1. PAGE 契约正确（admin/risk 可见、路由 /api/compliance_audit）；
 2. 导出审计行能正确解析 detail JSON 里的 rows 字段；
-3. 归因报告缺失时页面降级为 available=False 且带重建命令，绝不 500。
+3. 报送告警返回所有级别（不再硬编码 alert_level='block'）；
+4. 筛选参数正确传递到 SQL。
 """
 
 import datetime
-import json
 
 import pages.p9_compliance_audit as mod
 
@@ -33,7 +33,7 @@ _ALERT_COLS = [
 
 
 def _audit_conn(conn):
-    """预置一张含 2 行导出审计 + 1 条阻断告警的假库。"""
+    """预置一张含 2 行导出审计 + 2 条告警（不同级别）的假库。"""
     conn.when(
         "SELECT COUNT(*) FROM ads_export_audit",
         [(28,)],
@@ -64,9 +64,10 @@ def _audit_conn(conn):
         ],
         columns=_AUDIT_COLS,
     )
+    # 不再硬编码 WHERE alert_level='block'，返回所有级别
     conn.when(
-        "SELECT COUNT(*) FROM ads_report_alert WHERE alert_level='block'",
-        [(3,)],
+        "SELECT COUNT(*) FROM ads_report_alert",
+        [(5,)],
     )
     conn.when(
         "SELECT id, report_date, report_type, alert_level, check_name, detail, etl_ts "
@@ -80,68 +81,26 @@ def _audit_conn(conn):
                 "1104_vs_dws:正常:balance",
                 "口径不一致: 1104_vs_dws:正常:balance",
                 datetime.datetime(2026, 8, 6, 3, 3, 39),
-            )
+            ),
+            (
+                4,
+                datetime.date(2026, 8, 4),
+                "1104_g11",
+                "warn",
+                "dws_vs_internal:次级:balance_pct",
+                "口径不一致: dws_vs_internal:次级:balance_pct",
+                datetime.datetime(2026, 8, 5, 3, 3, 39),
+            ),
         ],
         columns=_ALERT_COLS,
     )
     return conn
 
 
-def _missing_attribution(monkeypatch, tmp_path):
-    """把归因报告指向不存在的路径，模拟 output/ 未生成（克隆后常态）。"""
-    monkeypatch.setattr(mod, "_ATTRIBUTION_FILE", str(tmp_path / "no_attribution.json"))
-
-
-def _write_attribution(monkeypatch, tmp_path, payload):
-    p = tmp_path / "attribution_report.json"
-    p.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    monkeypatch.setattr(mod, "_ATTRIBUTION_FILE", str(p))
-
-
-# 与 output/avm/attribution_report.json 的真实结构一致（dev-attrib 2026-08-05-r11 产物：
-# method=permutation_importance，top_features 数组含 importance_mean，full_importances 字典）。
-_REAL_ATTR_PAYLOAD = {
-    "version": "2026-08-05-r11",
-    "method": "permutation_importance",
-    "n_repeats": 5,
-    "seed": 42,
-    "n_test": 8041,
-    "generated_at": "2026-08-05T20:14:00+08:00",
-    "top_features": [
-        {
-            "feature": "comm_mean",
-            "importance_mean": 11.312702,
-            "importance_std": 0.271125,
-            "chinese_name": "小区目标编码均值",
-            "description": "同(城市,小区)训练折内 log 单价均值（OOF，防泄漏）",
-        },
-        {
-            "feature": "comm_median",
-            "importance_mean": 10.309426,
-            "importance_std": 0.18751,
-            "chinese_name": "小区目标编码中位数",
-            "description": "同(城市,小区)训练折内 log 单价中位数",
-        },
-        {
-            "feature": "city_code",
-            "importance_mean": 7.123482,
-            "importance_std": 0.124236,
-            "chinese_name": "城市编码",
-            "description": "广东 21 城码，HistGBR 类别特征",
-        },
-    ],
-    "full_importances": {
-        "comm_mean": {"importance_mean": 11.312702, "importance_std": 0.271125},
-        "comm_median": {"importance_mean": 10.309426, "importance_std": 0.18751},
-        "city_code": {"importance_mean": 7.123482, "importance_std": 0.124236},
-    },
-}
-
-
 # ---------------------------------------------------------------- PAGE 契约
-def test_page_contract_admin_risk_and_route():
+def test_page_contract_admin_and_route():
     assert mod.PAGE["id"] == "compliance_audit"
-    assert mod.PAGE["roles"] == {"admin", "risk"}
+    assert mod.PAGE["roles"] == {"admin"}
     assert ("GET", "/api/compliance_audit") in mod.PAGE["routes"]
     assert mod.PAGE["js"] == "p9_compliance_audit.js"
 
@@ -164,15 +123,16 @@ def test_export_audit_parses_rows_from_detail(monkeypatch, conn, ctx):
     assert out["export_rows"][1]["rows"] is None
 
 
-def test_report_alerts_only_block_level(monkeypatch, conn, ctx):
+def test_report_alerts_returns_all_levels(monkeypatch, conn, ctx):
+    """不再硬编码 alert_level='block'，返回所有级别。"""
     monkeypatch.setattr(mod.db, "crawl_conn", lambda: _audit_conn(conn))
     out = mod.get_compliance_audit(ctx)
 
-    assert out["report_alert_total"] == 3
-    assert len(out["report_alerts"]) == 1
-    alert = out["report_alerts"][0]
-    assert alert["alert_level"] == "block"
-    assert alert["check_name"] == "1104_vs_dws:正常:balance"
+    assert out["report_alert_total"] == 5
+    assert len(out["report_alerts"]) == 2
+    levels = {a["alert_level"] for a in out["report_alerts"]}
+    assert "block" in levels
+    assert "warn" in levels
 
 
 def test_queries_limit_recent_rows(monkeypatch, conn, ctx):
@@ -184,55 +144,40 @@ def test_queries_limit_recent_rows(monkeypatch, conn, ctx):
     assert params[0] == mod.PAGE_LIMIT
 
 
-# ---------------------------------------------------------------- 特征归因降级
-def test_attribution_missing_degrades_not_500(monkeypatch, conn, ctx, tmp_path):
+# ---------------------------------------------------------------- 筛选参数
+def test_filters_date_from(monkeypatch, conn, ctx):
+    """date_from 筛选正确传递到 SQL WHERE。"""
     monkeypatch.setattr(mod.db, "crawl_conn", lambda: _audit_conn(conn))
-    _missing_attribution(monkeypatch, tmp_path)
-    out = mod.get_compliance_audit(ctx)
-
-    assert out["attribution"]["available"] is False
-    # 降级提示必须给出重建命令（output/ 是 .gitignore 目录，克隆后需重跑）。
-    assert "tools/avm" in out["attribution"]["message"]
+    ctx.query["date_from"] = ["2026-08-01"]
+    _out = mod.get_compliance_audit(ctx)
+    sql, _ = conn.find_sql("created_at >=")
+    assert sql is not None
 
 
-def test_attribution_available_returns_real_report(monkeypatch, conn, ctx, tmp_path):
-    """真实报告结构：top_features 数组（importance_mean）+ full_importances 字典。"""
+def test_filters_action(monkeypatch, conn, ctx):
+    """action 筛选正确传递到 SQL WHERE。"""
     monkeypatch.setattr(mod.db, "crawl_conn", lambda: _audit_conn(conn))
-    _write_attribution(monkeypatch, tmp_path, _REAL_ATTR_PAYLOAD)
-    out = mod.get_compliance_audit(ctx)
-
-    assert out["attribution"]["available"] is True
-    report = out["attribution"]["report"]
-    # 方法字段动态来自报告本身，不硬编码。
-    assert report["method"] == "permutation_importance"
-    top = report["top_features"]
-    assert len(top) == 3
-    assert top[0]["feature"] == "comm_mean"
-    assert top[0]["importance_mean"] > 0
-    assert "importance_std" in top[0]
-    # full_importances 是 {特征: {importance_mean, importance_std}} 字典形态。
-    assert report["full_importances"]["city_code"]["importance_mean"] == 7.123482
+    ctx.query["action"] = ["export"]
+    _out = mod.get_compliance_audit(ctx)
+    sql, _ = conn.find_sql("action =")
+    assert sql is not None
 
 
-def test_attribution_old_summary_shape_still_supported(monkeypatch, conn, ctx, tmp_path):
-    """旧形态（summary.features）保留向后兼容，方法字段同样动态。"""
+def test_filters_alert_level(monkeypatch, conn, ctx):
+    """alert_level 筛选正确传递到告警 SQL。"""
     monkeypatch.setattr(mod.db, "crawl_conn", lambda: _audit_conn(conn))
-    _write_attribution(
-        monkeypatch,
-        tmp_path,
-        {
-            "summary": {
-                "method": "permutation_importance",
-                "features": [{"name": "area", "importance": 0.42}],
-            }
-        },
-    )
-    out = mod.get_compliance_audit(ctx)
+    ctx.query["alert_level"] = ["block"]
+    _out = mod.get_compliance_audit(ctx)
+    sql, _ = conn.find_sql("alert_level =")
+    assert sql is not None
 
-    assert out["attribution"]["available"] is True
-    summary = out["attribution"]["report"]["summary"]
-    assert summary["method"] == "permutation_importance"
-    assert summary["features"][0]["name"] == "area"
+
+# ---------------------------------------------------------------- 特征归因不再存在
+def test_attribution_removed_from_page(monkeypatch, conn, ctx):
+    """特征归因已移至 P7，P9 不再返回 attribution 字段。"""
+    monkeypatch.setattr(mod.db, "crawl_conn", lambda: _audit_conn(conn))
+    out = mod.get_compliance_audit(ctx)
+    assert "attribution" not in out
 
 
 # ---------------------------------------------------------------- detail rows 工具

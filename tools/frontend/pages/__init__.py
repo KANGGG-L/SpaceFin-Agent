@@ -2,7 +2,7 @@
 """S5 前端页面插件注册表。
 
 为什么要插件化：设计评审定义 P1~P10 十个页面，若全部塞进 app.py 的 if/elif 路由链，
-单文件会膨胀到不可维护，且多人（多 agent）并行开发同一文件必然冲突。
+单文件会膨胀到不可维护，且多人并行开发同一文件必然冲突。
 这里把「一个页面 = 一个模块文件」固化下来：新增页面只需在本目录放一个 pN_xxx.py，
 无需改动 app.py / index.html / app.js 任何一行。
 
@@ -11,8 +11,8 @@
     PAGE = {
         "id":     "migration",              # 唯一标识，前端 section id = page-{id}
         "label":  "五级分类迁徙矩阵",        # 导航栏显示名
-        "roles":  {"admin", "risk", "da"},  # 可见角色；服务端强制校验，非仅前端隐藏
-        "order":  30,                       # 导航排序，小的在前
+        "roles":  {"admin"},  # 可见角色；服务端强制校验，非仅前端隐藏（历史 risk/da 已移除，见 frontend.md 角色已删）  # 可见角色；服务端强制校验，非仅前端隐藏
+        "order":  30,                       # 跨分组的全局导航序号，小的在前；与数据链路主线一致，见 app.py PAGE_VISIBILITY
         "js":     "p3_migration.js",        # static/pages/ 下的前端模块文件名
         "routes": {
             ("GET", "/api/migration"): handler,
@@ -36,6 +36,21 @@ import pkgutil
 
 # 加载失败的页面记录在此，便于启动日志排查（不让单个页面异常拖垮整个服务）。
 LOAD_ERRORS = []
+
+# 导航分组（功能导向）：前端 renderNav 按此组装分区，组名一律常显为分区标签、不折叠。
+# 组名 → 展示文案、以及分组之间的先后顺序，都在 static/app.js 的 renderNav；
+# 调整页面归属只改这里，调整组内条目序改各页 PAGE["order"]。
+_PAGE_GROUP = {
+    "dashboard": "overview",  # 资产总览：驾驶舱是唯一入口页
+    "alerts": "monitoring",  # 风险监控与预警
+    "spatial": "monitoring",  # 高危地图与黑名单
+    "avm": "monitoring",  # 估值精度看板
+    "migration": "monitoring",  # 迁徙与降级追踪
+    "policy": "strategy",  # 策略推演中心
+    "report": "governance",  # 报送与合规
+    "compliance_audit": "governance",
+    "datasource": "data",  # 数据底座
+}
 
 
 def _discover():
@@ -62,6 +77,7 @@ def _discover():
         page.setdefault("order", 999)
         page.setdefault("routes", {})
         page.setdefault("js", None)
+        page.setdefault("group", _PAGE_GROUP.get(page["id"], "overview"))
         pages.append(page)
     pages.sort(key=lambda p: (p["order"], p["id"]))
     return pages
@@ -77,9 +93,20 @@ for _p in PAGES:
 
 
 def nav_for(role):
-    """返回某角色可见的导航项（含前端模块文件名，供动态加载）。"""
+    """返回某角色可见的导航项（含前端模块文件名，供动态加载）。
+
+    带上 order：app.py 的 _nav_for 要用它对内置页 + 插件页的合并结果统一排序。
+    """
     return [
-        {"id": p["id"], "label": p["label"], "js": p["js"]} for p in PAGES if role in p["roles"]
+        {
+            "id": p["id"],
+            "label": p["label"],
+            "js": p["js"],
+            "group": p["group"],
+            "order": p["order"],
+        }
+        for p in PAGES
+        if role in p["roles"]
     ]
 
 

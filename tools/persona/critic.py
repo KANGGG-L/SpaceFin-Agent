@@ -103,5 +103,9 @@ def calibrate(benchmark_data, personas, target_ks=DEFAULT_TARGET_KS, max_rounds=
         credit_score=features[:, 2],
         bias=f"{personas.bias}→calibrated",
         seed=personas.seed,
+        # 行业/城市是画像的属性维度，不参与校准：原样带过，保证校准前后
+        # 同一画像在明细表里仍是同一作用域（否则前后对照失去判读意义）。
+        industry=personas.industry,
+        city=personas.city,
     )
     return calibrated, trajectory

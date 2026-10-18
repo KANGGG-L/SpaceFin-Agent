@@ -21,6 +21,13 @@ import os
 import sys
 import time
 
+# 单笔推理时 sklearn 的 OpenMP 会为每次 tiny predict 起大量线程，在受限/高负载环境
+# （如 WSL）下线程颠簸，导致每笔 AVM 估值从 ~30ms 暴涨到 ~7s（5000 笔≈2h，看似「卡死」）。
+# 限制 OpenMP/BLAS 线程数为 1，单笔预测走单线程，整体从小时级降到分钟级。
+# 仅限推理进程；训练进程不设置，以保留多核加速。setdefault 不覆盖用户显式设定。
+for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_v, "1")
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
@@ -47,6 +54,7 @@ DWS_COLS = [
     "valuation_deviation_pct",
     "abnormal_valuation",
     "model_version",
+    "is_rejected",
 ]
 ALERT_COLS = [
     "loan_id",
@@ -94,7 +102,15 @@ def main():
         f"avm_model={'loaded' if avm_model else 'absent'} spatial_feats={len(spatial[0])}"
     )
 
-    rows = store.compute_rows(loans, collaterals, customers, dwd_unit, avm_model, spatial)
+    rows = store.compute_rows(
+        loans,
+        collaterals,
+        customers,
+        dwd_unit,
+        avm_model,
+        spatial,
+        policy_map=spatial[2],
+    )
 
     agg = risk_engine.build_aggregate(rows)
     alerts = [r for r in rows if r["alert"]]

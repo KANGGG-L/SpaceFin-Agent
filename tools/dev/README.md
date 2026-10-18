@@ -1,6 +1,6 @@
 # 演示回填工具（tools/dev）
 
-本目录提供 7 天风险演进剧本（`docs/demo/script_7d.md`）的灌数与验收工具。
+本目录提供 7 天风险演进剧本的灌数与验收工具。
 
 ## backfill_7d.py —— 7 天回填
 
@@ -20,16 +20,16 @@ tools/orchestrator/.venv/bin/python tools/dev/backfill_7d.py --verify
 
 ## verify.py —— 验收 SQL 检查
 
-按 `docs/demo/acceptance.md` 的 A/C/D 组逐项打勾：7 日齐全、广州事件传导比值、
+按验收标准的 A/C/D 组逐项打勾：7 日齐全、广州事件传导比值、
 处置闭环、金额对账、边界与诚实性。输出 `[PASS]/[FAIL]` 清单。
 
 ## 运行时注意
 
 - 回填期间请暂停 `tools/cdc/consumer.py` 与 `tools/cdc/main.py`（CDC 增量消费会用
   当日 business_date 并发写 ads 表，破坏回填数据确定性）。暂停幂等，可随时重启。
-- **当前演示状态**：CDC 消费者已暂停，直到全部验收完成前不要重启（理由：作品集核心是
-  确定性 7 天剧本，CDC 用今天日期重算会污染 D6 的 08-06 数据；实时预警走 Flink 链路
-  `ads_stream_ltv_alerts`，不受影响）。演示需要重启时执行：
+- **当前演示状态**：CDC 消费者已暂停，直到全部验收完成前不要重启（理由：本项目核心是
+  确定性 7 天剧本，CDC 用今天日期重算会污染 D6 的 08-06 数据；精简版已移除实时链路，
+  `ads_stream_ltv_alerts` 不再新增数据）。演示需要重启时执行：
   ```bash
   tools/orchestrator/.venv/bin/python tools/cdc/consumer.py --loop --interval 20
   ```

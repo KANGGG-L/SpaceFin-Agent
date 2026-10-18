@@ -5,14 +5,11 @@
 # 执行器：LocalExecutor —— 采集本身已有自己的 Redis 队列派单，再引入 Celery/Redis
 #         只是多余复杂度；DAG 的任务是「拉起 / 探活 / 等待 / 跑 ETL」，单机足够。
 #
-# ⚠️ 本文件是**备选**方案。推荐形态是宿主 systemd 直装 Airflow（见 README.md §1），
-#    因为 DAG 的 Bash 任务要在**宿主**上跑 start_all.sh / docker compose / venv python，
-#    容器化的 Airflow 默认做不到。若坚持用本文件，必须满足 README §1.2 的额外条件：
-#    挂 docker.sock、挂仓库根、宿主网络可达（或改 network_mode: host）。
+# 本文件为实际采用形态（容器化部署，开发机已验证；标准 Linux 新机端到端未验证；systemd 直装单元未随仓库交付）
 #
 # 用法：
 #   cd airflow && cp .env.example .env && vi .env   # 填 Fernet/密码，勿提交
-#   mkdir -p logs plugins && echo "AIRFLOW_UID=$(id -u)" >> .env
+#   mkdir -p logs plugins && echo "AIRFLOW_UID=50000" >> .env
 #   docker compose -f docker-compose.airflow.yml up -d
 # 校验（不启动）：docker compose -f docker-compose.airflow.yml config --quiet
 # ==============================================================================
@@ -39,6 +36,8 @@ x-airflow-common: &airflow-common
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
     - ./plugins:/opt/airflow/plugins
+    # 容器内原生 venv（pymysql/pyarrow/pandas 等依赖），用命名卷持久化，避免容器重建后丢失需重装。
+    - airflow_venv:/opt/airflow/venv
     # 仓库根：DAG 的 cwd / venv / etl.py 都在这里；容器化时 Variable spacefin_repo_root
     # 必须设成容器内路径 /opt/spacefin（否则 Bash 任务找不到脚本）
     - ${SPACEFIN_REPO_ROOT:-..}:/opt/spacefin
@@ -48,6 +47,10 @@ x-airflow-common: &airflow-common
     # 容器内访问宿主 master(5100) / 渲染服务(8899)：
     # Variable spacefin_master_url / spacefin_render_url 要改成 http://host.docker.internal:PORT
     - "host.docker.internal:host-gateway"
+  # 让容器内 airflow 用户(50000)加入宿主 docker 组 GID(1001)，从而获得 /var/run/docker.sock 读写权，
+  # 否则 DAG 里 start_all.sh 调 docker compose 会 permission denied。GID 随宿主 docker 组而变，可调 DOCKER_GID。
+  group_add:
+    - "${DOCKER_GID:-1001}"
   depends_on:
     postgres:
       condition: service_healthy
@@ -128,3 +131,4 @@ services:
 
 volumes:
   airflow-postgres-db:
+  airflow_venv:

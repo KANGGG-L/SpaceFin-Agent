@@ -16,6 +16,7 @@ import datetime
 import io
 import os
 import sys
+import time
 import uuid
 
 import pymysql
@@ -23,6 +24,18 @@ import requests
 
 # 允许 `python tools/lake/sync.py` 与 `python sync.py` 两种入口
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# 广东 21 城码白名单：与 risk/config.CITY_MAP 同源（单一事实源），用于"城市数"口径
+# 过滤省外桶（beijing/nb 等免费代理 IP 带偏的外省房源），避免把外省子域算作广东城市。
+import importlib.util as _ilu
+
+_spec = _ilu.spec_from_file_location(
+    "risk_config",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "risk", "config.py"),
+)
+_risk_cfg = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_risk_cfg)
+GD_CITY_CODES = tuple(_risk_cfg.CITY_MAP.values())
 
 import config  # noqa: E402
 import minio_sync  # noqa: E402
@@ -39,7 +52,7 @@ from schema import (  # noqa: E402
     ddl_for,
 )
 
-DEFAULT_LAKE_DATE = "2026-08-04"
+DEFAULT_LAKE_DATE = "2026-08-31"
 
 
 # ---------------- 连接 ---------------
@@ -70,6 +83,26 @@ def sql(cursor, statement):
         cursor.execute(statement)
     except Exception as e:  # noqa: BLE001
         raise RuntimeError(f"SQL failed: {e}\nSQL: {statement[:400]}") from e
+
+
+def truncate_table_wait(cursor, qualified_table, timeout=120):
+    """TRUNCATE 后轮询等待 BE 真正清空再返回。
+
+    Doris 的 TRUNCATE 是异步的：语句返回时 FE 已接受，但 BE 尚未真正删除数据。
+    若随后立即 stream load / INSERT，旧行会残留并与新行叠加，导致 ODS 行数翻倍
+    （2026-08-25 实测：loaded 58121 but counted 116242）。故显式轮询 COUNT 直到为 0。
+    """
+    sql(cursor, f"TRUNCATE TABLE {qualified_table}")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        cursor.execute(f"SELECT COUNT(*) FROM {qualified_table}")
+        if cursor.fetchone()[0] == 0:
+            return
+        time.sleep(2)
+    raise RuntimeError(
+        f"TRUNCATE {qualified_table} 后等待 BE 清空超时（{timeout}s），"
+        f"疑似异步删除竞态未收敛，终止以避免数据叠加"
+    )
 
 
 # ---------------- 建库建表 ---------------
@@ -159,7 +192,7 @@ def sync_mysql_to_ods(d_cursor, d_conn):
     for mysql_db, mysql_table, doris_table in MYSQL_SOURCES:
         cols = [c[0] for c in ODS_TABLES[doris_table]["columns"]]
         csv_text, sanitized = dump_table_csv(mysql_db, mysql_table, cols)
-        sql(d_cursor, f"TRUNCATE TABLE ods.{doris_table}")
+        truncate_table_wait(d_cursor, f"ods.{doris_table}")
         ok, payload = stream_load("ods", doris_table, csv_text)
         if not ok:
             raise RuntimeError(
@@ -184,7 +217,7 @@ def sync_mysql_to_ods(d_cursor, d_conn):
 def fill_layer(d_cursor, tables, fill_sql, stat_date):
     for name in tables:
         target = tables_drop_target(name)
-        sql(d_cursor, f"TRUNCATE TABLE {target}")
+        truncate_table_wait(d_cursor, target)
         stmt = fill_sql[name].format(stat_date=stat_date)
         sql(d_cursor, stmt)
         d_cursor.execute(f"SELECT COUNT(*) FROM {target}")
@@ -217,7 +250,7 @@ def lake_tvf():
 
 def materialize_lake(d_cursor, lake_date):
     """把湖上的 sale Parquet 落成 ods.ods_housing_sale_lake（证明 湖→仓 导入链路）。"""
-    sql(d_cursor, "TRUNCATE TABLE ods.ods_housing_sale_lake")
+    truncate_table_wait(d_cursor, "ods.ods_housing_sale_lake")
     select_cols = [
         "url_key",
         "url",
@@ -281,7 +314,12 @@ def verify_reconciliation(d_cursor, mysql_conn, expected=None):
 
     # 2) 湖上联邦查询（不落仓，直查 MinIO Parquet）
     tvf_count = row(f"SELECT COUNT(*) FROM {lake_tvf()}")
-    tvf_cities = row(f"SELECT COUNT(DISTINCT district) FROM {lake_tvf()}")
+    # 只数 21 城白名单内的 district，排除 beijing/nb 等外省桶（按城覆盖口径）。
+    _ph = ",".join("%s" for _ in GD_CITY_CODES)
+    tvf_cities = row(
+        f"SELECT COUNT(DISTINCT district) FROM {lake_tvf()} WHERE district IN ({_ph})",
+        GD_CITY_CODES,
+    )
     report.append(("联邦查询(MinIO)", "sale/*.parquet", f"{tvf_count} 行 / {tvf_cities} 城", "OK"))
 
     # 3) 湖文件落仓行数应与联邦查询一致

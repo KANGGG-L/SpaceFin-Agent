@@ -11,6 +11,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 
 # 与 tools/risk/config.py 保持同一套 .env 解析逻辑（读不写）
 def load_env() -> dict:
+    """读仓库根 .env。允许进程环境 os.environ 中的 MYSQL_* 覆盖 .env 的值，\
+使容器化 Airflow（注入 MYSQL_HOST=host.docker.internal）也能连到宿主 MySQL。"""
     env = {}
     path = os.path.join(REPO_ROOT, ".env")
     if os.path.exists(path):
@@ -21,6 +23,9 @@ def load_env() -> dict:
                     continue
                 k, _, v = line.partition("=")
                 env[k.strip()] = v.strip().strip('"').strip("'")
+    for k, v in os.environ.items():
+        if k.startswith("MYSQL_"):
+            env[k] = v
     return env
 
 
@@ -48,11 +53,17 @@ DORIS = {
 }
 
 # ---- MinIO 对象存储（湖的底座；凭据与 deploy/doris-minio/docker-compose.yml 一致）----
+# 生产【必须】用环境变量注入 MINIO_ACCESS_KEY / MINIO_SECRET_KEY（下方 spacefin_minio /
+# spacefin_minio_dev_only 仅供本地联调，切勿带到生产）。取值优先级：进程环境
+# os.environ > 仓库根 .env > 开发默认值——与 MYSQL_* 的覆盖语义一致，行为默认不变。
 MINIO = {
-    "endpoint": _ENV.get("MINIO_ENDPOINT", "http://127.0.0.1:9000"),
-    "access_key": _ENV.get("MINIO_ACCESS_KEY", "spacefin_minio"),
-    "secret_key": _ENV.get("MINIO_SECRET_KEY", "spacefin_minio_dev_only"),
-    "bucket": _ENV.get("MINIO_BUCKET", "housing"),
+    "endpoint": os.environ.get("MINIO_ENDPOINT")
+    or _ENV.get("MINIO_ENDPOINT", "http://127.0.0.1:9000"),
+    "access_key": os.environ.get("MINIO_ACCESS_KEY")
+    or _ENV.get("MINIO_ACCESS_KEY", "spacefin_minio"),
+    "secret_key": os.environ.get("MINIO_SECRET_KEY")
+    or _ENV.get("MINIO_SECRET_KEY", "spacefin_minio_dev_only"),
+    "bucket": os.environ.get("MINIO_BUCKET") or _ENV.get("MINIO_BUCKET", "housing"),
 }
 
 # 数据湖本地快照：tools/lake/sync.py 上传的 Parquet 源目录（仓库内 data_lake/housing）

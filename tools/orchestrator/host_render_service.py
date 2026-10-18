@@ -277,6 +277,29 @@ def _render(city, page_no, proxy=None, auth=0, profile_dir=None, debug_port=None
     _clean_orphan_chrome(profile_dir)
     os.makedirs(profile_dir, exist_ok=True)
     co = ChromiumOptions()
+    # 显式指定浏览器路径：DrissionPage 自检会命中机器上残留的旧 Chrome
+    # （如 ~/opt/chrome-linux64/chrome，缺系统库起不来 → BrowserConnectError）。
+    # 注意 systemd 用户服务 PATH 极简，shutil.which 探不到 ~/bin 下的 wrapper，
+    # 故候选里带家目录的 Chrome for Testing 安装位（wrapper 已注入 LD_LIBRARY_PATH）。
+    _browser = next(
+        (
+            c
+            for c in (
+                shutil.which("google-chrome"),
+                shutil.which("google-chrome-stable"),
+                shutil.which("chromium"),
+                os.path.expanduser("~/bin/google-chrome"),
+                os.path.expanduser("~/.local/bin/google-chrome"),
+                os.path.expanduser("~/.local/chrome-for-testing/chrome-linux64/chrome"),
+                "/opt/google/chrome/chrome",
+                "/usr/bin/google-chrome",
+            )
+            if c and os.access(c, os.X_OK)
+        ),
+        None,
+    )
+    if _browser:
+        co.set_browser_path(_browser)
     co.set_user_data_path(profile_dir)
     if debug_port:
         co.set_local_port(debug_port)

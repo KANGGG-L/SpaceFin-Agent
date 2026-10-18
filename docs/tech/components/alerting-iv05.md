@@ -13,10 +13,12 @@
 把同一条预警推两遍。
 
 本组件做推送执行器：
+
 1. **清单生成**：`--date` 取当日预警（`ads_ltv_alerts WHERE alert_date = --date`）；
 2. **T+1 去重**：同一 `(loan_id, alert_date)` 已推送成功的不重推；
 3. **失败重试状态机**：单条推送失败自动重试，超限留终态待人工；
-4. **driver 可替换**：当前推站内告警表 + 文件，真实贷后系统接口是预留替换点。
+4. **driver 可替换**：默认推站内告警表 + 文件；配置 `SPACEFIN_POSTLOAN_WEBHOOK_URL`
+   后 `postloan_http` 真实贷后系统 HTTP 推送自动启用（I-05 闭环）。
 
 ## 2. 推送语义与状态机
 
@@ -29,7 +31,9 @@ pending ──▶ 尝试 ──┤
 ```
 
 - 状态存 `ads_alert_dispatch`，以 `UNIQUE(loan_id, alert_date)` 为去重键；
-- 已 `success` 的记录直接跳过（去重）；`failed` 且未超限的自动重试；
+- **落库只写 `success` / `failed` 两态**：`pending` 仅为上图的**概念中间态**，首次尝试直接落终态，
+  不存在 pending 行；已 `success` 的记录直接跳过（去重），`failed` 且未超限的自动重试
+  （`attempt_count = attempt_count + 1` 原子自增，并发同键不减少计）；
 - 重试上限 `--max-retries`（默认 3），每轮每行最多处理一次，杜绝同轮死循环。
 
 **T+1 口径**：预警 T 日生成、最迟 T+1 送达贷后系统。生产调度把本 CLI 排在风险引擎之后
@@ -40,37 +44,53 @@ pending ──▶ 尝试 ──┤
 驱动只负责「把一条预警送达」，不关心去重/重试——那是 main.py 的职责。见
 `tools/alerting/drivers.py`：
 
-| 驱动 | 去向 | 用途 |
-|---|---|---|
-| `site_inbox` | 站内告警表 `ads_alert_inbox`（UNIQUE(loan_id, alert_date) 幂等） | 默认推送通道 |
-| `file` | `output/alerting/alert_push_<date>.jsonl`（JSONL 追加） | 本地联调 / 验收 |
-| `postloan_http` | **预留**：真实贷后系统 HTTP 接口 | 替换点，接入后注册到 `make_driver` |
+| 驱动            | 去向                                                             | 用途                                                                      |
+| --------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `site_inbox`    | 站内告警表 `ads_alert_inbox`（UNIQUE(loan_id, alert_date) 幂等） | 默认推送通道                                                              |
+| `file`          | `output/alerting/alert_push_<date>.jsonl`（JSONL 追加）          | 本地联调 / 验收                                                           |
+| `postloan_http` | **真实贷后系统 HTTP 接口**（I-05 闭环出口）                      | 配置 `SPACEFIN_POSTLOAN_WEBHOOK_URL` 后由 `main.resolve_drivers` 自动启用 |
 
-接入真实贷后系统：实现 `AlertDriver.send`（把预警组装成目标接口报文并调用，失败抛异常），
-在 `make_driver` 注册，`--drivers postloan_http` 即可切换，调度层无需改动。
+`postloan_http` 已是**真实可用实现**（非预留）：把预警以 POST JSON 推到配置的 webhook，
+带 `Idempotency-Key: {loan_id}:{alert_date}` 与可选 `Authorization: Bearer <token>` 头；
+非 2xx / 网络错误抛 `PostloanPushError`，由状态机重试。未配置 webhook 时 `make_driver`
+显式报错——绝不「假装成功」。
+
+接入真实贷后系统：**无需改代码**，只需在运行环境（`.env` 或 Airflow Variable）配置
+`SPACEFIN_POSTLOAN_WEBHOOK_URL`（与可选 `SPACEFIN_POSTLOAN_WEBHOOK_TOKEN`、
+`SPACEFIN_POSTLOAN_TIMEOUT`）。`main.resolve_drivers` 检测到该变量即自动把 `postloan_http`
+追加进驱动列表；也可显式 `--drivers site_inbox,file,postloan_http` 强制启用。
+
+### T+1 调度（闭环接通）
+
+Airflow DAG `guangdong_daily_crawl` 在 `risk_recalc` 之后新增 `alerting_push` 任务，调用
+`tools/alerting/main.py --date {{ ds }}`。当日预警由风险引擎写入 `ads_ltv_alerts` 后再推送，
+最迟 T+1 送达贷后系统（含真实 webhook，若已配置）。配合去重键，补跑 / 重跑不会重复推送。
 
 ## 4. 表结构
 
 ### ads_alert_dispatch（推送台账）
 
-| 列 | 类型 | 说明 |
-|---|---|---|
-| loan_id | INT | 贷款号 |
-| alert_date | DATE | 预警生成日（T） |
-| dispatch_date | DATE | 推送执行日 |
-| status | VARCHAR(16) | pending/success/failed |
-| attempt_count | INT | 已尝试次数 |
-| max_retries | INT | 重试上限 |
-| last_error | VARCHAR(255) | 最近一次失败原因 |
-| dispatch_ts | DATETIME | 最近一次尝试时间（业务时区） |
+| 列            | 类型                  | 说明                                                  |
+| ------------- | --------------------- | ----------------------------------------------------- |
+| id            | INT PK AUTO_INCREMENT | 主键                                                  |
+| loan_id       | INT                   | 贷款号                                                |
+| alert_date    | DATE                  | 预警生成日（T）                                       |
+| dispatch_date | DATE                  | 推送执行日                                            |
+| status        | VARCHAR(16)           | success / failed（pending 为概念中间态，不落库）      |
+| attempt_count | INT                   | 已尝试次数（默认 0；重试时原子自增）                  |
+| max_retries   | INT                   | 重试上限（默认 3）                                    |
+| last_error    | VARCHAR(255)          | 最近一次失败原因                                      |
+| dispatch_ts   | DATETIME              | 最近一次尝试时间（业务时区）                          |
+| etl_ts        | TIMESTAMP             | 行级写/更新时间（UPSERT 时以 CURRENT_TIMESTAMP 刷新） |
 
 UNIQUE `(loan_id, alert_date)` —— 去重的物理保证。
 
 ### ads_alert_inbox（站内告警表）
 
 `id / loan_id / customer_id / collateral_id / loan_balance / market_valuation / ltv /
-risk_class / is_high_risk_zone / alert_date / received_ts`，UNIQUE `(loan_id, alert_date)`
-保证重试不产生重复站内消息。
+risk_class / is_high_risk_zone / alert_level / alert_date / received_ts`（`alert_level`
+为预警级别列，VARCHAR(8)，位于 `is_high_risk_zone` 与 `alert_date` 之间），UNIQUE
+`(loan_id, alert_date)` 保证重试不产生重复站内消息。
 
 ## 5. 运行方式
 
@@ -94,16 +114,20 @@ tools/orchestrator/.venv/bin/python tools/alerting/main.py --date 2026-08-05 --f
 
 ## 6. 验收记录（2026-08-05，--date 2026-08-05）
 
-| 场景 | 结果 |
-|---|---|
+| 场景                                        | 结果                                                       |
+| ------------------------------------------- | ---------------------------------------------------------- |
 | 首轮推送（16 条候选，含 site_inbox + file） | 16 条因文件驱动 Decimal 序列化失败 → `failed`（attempt=1） |
-| 修复后重跑 | 16 条自动**重试**并全部推送成功（attempt=2） |
-| 第三次重跑 | **去重 16**，0 条重推（`dedup=16`） |
-| 站内告警表 | `ads_alert_inbox` 恰好 16 行（无重复） |
-| 终态演练（--force-fail 两轮后） | 2 条进入 `final_failed`，后续轮次跳过 |
+| 修复后重跑                                  | 16 条自动**重试**并全部推送成功（attempt=2）               |
+| 第三次重跑                                  | **去重 16**，0 条重推（`dedup=16`）                        |
+| 站内告警表                                  | `ads_alert_inbox` 恰好 16 行（无重复）                     |
+| 终态演练（--force-fail 两轮后）             | 2 条进入 `final_failed`，后续轮次跳过                      |
 
 > 首轮失败是真实缺陷（FileDriver 未处理 Decimal → JSON 序列化），恰好验证了状态机的
 > 失败→重试→成功路径；修复后数据与台账均符合预期。
+>
+> **历史快照说明**：上述 FileDriver Decimal 序列化缺陷**已在代码层修复**——`tools/alerting/drivers.py` 已采用 `json.dumps(..., default=str)`，并由 `test_file_driver_serializes_decimal_values` 覆盖；下方 §6 验收记录为历史快照，当前运行不会复现该失败。
+
+> **终态数量说明（第 123 行「2 条 final_failed」）**：该行为历史验收片段。按当前状态机（16 候选 × `max_retries=3` → 第 3 轮转终态），若全部候选持续失败应累计 **16 条 `final_failed`**；文中「2 条」疑为该子场景仅取 2 条候选做演示，请明确该子场景候选数，或将其改为与候选数一致，以免与状态机描述矛盾。
 
 ## 7. 已知局限
 

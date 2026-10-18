@@ -32,5 +32,5 @@ dependencies:
       - aiohttp            # tools/ 爬虫（asyncio 生产级改进）
       - beautifulsoup4     # 爬虫 HTML 解析
       - selenium           # tools/ Selenium 版爬虫
-      - pre-commit==4.6.1  # 提交前 / 提交信息钩子（README/CLAUDE 锁定版本）
+      - pre-commit==4.6.1  # 提交前 / 提交信息钩子（与 README 锁定版本一致）
       - pytest             # 阶段 5 计划引入的单测

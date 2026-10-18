@@ -1,0 +1,17 @@
+{
+  "generated_at": "2026-10-17T19:16:06+00:00",
+  "environment": {
+    "python": "3.14.4",
+    "platform": "Linux-6.18.54.1-microsoft-standard-WSL2-x86_64-with-glibc2.43"
+  },
+  "source": "output/avm/avm_report.json",
+  "reproducibility": "unavailable",
+  "metrics": {
+    "model_version": null,
+    "mape_full": null,
+    "baseline_mape": null,
+    "ac07_coverage_at_10pct": null,
+    "n_test": null
+  },
+  "note": "产物缺失：output/avm/avm_report.json 位于被 gitignore 的 output/ 目录、未随仓库分发；如需生成请在本机重训 `python3 tools/avm/train.py --loss quantile --quantile 0.45 --smooth-mode eb`。"
+}

@@ -1,0 +1,21 @@
+{
+  "generated_at": "2026-10-17T19:16:06+00:00",
+  "environment": {
+    "python": "3.14.4",
+    "platform": "Linux-6.18.54.1-microsoft-standard-WSL2-x86_64-with-glibc2.43"
+  },
+  "source": "仓库全量 test_*.py（排除 .git/node_modules/缓存）",
+  "reproducibility": "verified",
+  "metrics": {
+    "test_total_def_test": 1361,
+    "test_in_tests_dirs": 1346,
+    "test_files_total": 109,
+    "test_core_four_modules": 858,
+    "breakdown": {
+      "tools/frontend": 604,
+      "tools/risk": 141,
+      "tools/alerting": 60,
+      "tools/avm": 53
+    }
+  }
+}

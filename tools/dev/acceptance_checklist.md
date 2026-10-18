@@ -1,6 +1,6 @@
 # 7 天演示验收清单（2026-08-06 实测）
 
-> 对应 `docs/demo/acceptance.md`，由 `tools/dev/verify.py` 自动打勾；本文件记录实测数值。
+> 对应演示验收标准，由 `tools/dev/verify.py` 自动打勾；本文件记录实测数值。
 > 结论：**24/24 通过**。完整输出见 `tools/orchestrator/.venv/bin/python tools/dev/verify.py`。
 
 ## A 数据侧
@@ -57,8 +57,7 @@
 | D6 08-06 | 209 | 120 | 0.636 | r19 |
 | D7 08-07 | 147 | 57 | 0.478 | r20（企稳重训） |
 
-## 诚实性说明
+## 数据来源口径
 
-- 仅 `customer / collateral / loan` 三表为脚本合成（5,000 笔，gz≈1,233）；`crawl_housing_sale` 4.4 万条为真实爬取。
+- 仅 `customer / collateral / loan` 三表为脚本合成（5,000 笔，gz≈1,233）；`crawl_housing_sale` 为真实爬取（生产 DWD 存量 59,081 条，7 天演示库取其中 44,369 条）。
 - D4/D5 广州挂牌价下探为**演示脚本扰动**：天河 -12%（满足 A2.5），非核心区（含 DWD 实有键 增城/万科城）加深至 -28%~-52%，使 AVM 重训的估值下探足够显著；原值记录于 `ads_demo_gz_perturb`，`--rollback-gz` 可回滚。
-- 7 天数据为演示回填产物，不构成真实市场或授信结论。

@@ -1,0 +1,16 @@
+{
+  "generated_at": "2026-10-17T19:16:06+00:00",
+  "environment": {
+    "python": "3.14.4",
+    "platform": "Linux-6.18.54.1-microsoft-standard-WSL2-x86_64-with-glibc2.43"
+  },
+  "source": "tools/frontend/tests/llm_eval_report.json",
+  "reproducibility": "recorded",
+  "metrics": {
+    "llm_fallback_rate": 41.67,
+    "llm_guard_block_rate": 13.89,
+    "llm_eval_case_pass_rate": 95.65,
+    "llm_p95_latency_s": 40.71
+  },
+  "note": "评测集口径（非生产流量）；单次运行、LLM 非确定性；完整复跑需 .env 配 LLM_KEY，本仓默认无 key 时只测得确定性路径子集。复跑见 llm_eval_harness.py。"
+}

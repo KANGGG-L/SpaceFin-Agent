@@ -2,7 +2,7 @@
 
 覆盖本批新增能力：
 1. db._confirm_row_from：确认/处置记录结构（含「处置字段未建好」的降级推导）；
-2. db.dashboard()：trust_cards（爬取规模/新鲜度/解析成功率/模型版本）+ alert_funnel；
+2. db.dashboard()：trust_cards（爬取规模/新鲜度/解析成功率）+ alert_funnel；
 3. db.alerts()：disposition 字段随行返回；
 4. app._handle_detail / _handle_dispose：新 API 的参数校验、成功路径与审计留痕。
 
@@ -15,7 +15,7 @@ import urllib.parse
 import app as frontend_app
 import db
 import pytest
-from conftest import FakeConn
+from fakeconn import FakeConn
 
 # ---------------- _confirm_row_from（纯函数） ----------------
 
@@ -82,7 +82,6 @@ def _dashboard_fake_conn(has_disposition=True):
     conn.when("SELECT src, risk_class", [("offline", "次级", 6), ("offline", "可疑", 4)])
     conn.when("SELECT 'stream', risk_class", [("stream", "次级", 10), ("stream", "损失", 5)])
     conn.when("SELECT COUNT(*) FROM ads_ltv_alerts", [(34,)])
-    conn.when("SELECT COUNT(*) FROM ads_stream_ltv_alerts", [(160,)])
     conn.when("SELECT r.collateral_id", [(1, 100000.0, 0), (2, 200000.0, 1)])
     conn.when("FROM collateral", [(1, "广州市黄埔区"), (2, "深圳市南山区")])
     conn.when("SELECT COUNT(*) FROM crawl_housing_sale", [(44369,)])
@@ -108,10 +107,6 @@ def _dashboard_fake_conn(has_disposition=True):
     conn.when(
         "geocode_status, COUNT(*) FROM crawl_housing_rent",
         [("hit", 1000), ("pending", 3000), ("miss", 100)],
-    )
-    conn.when(
-        "GROUP BY model_version ORDER BY MAX(etl_ts) DESC",
-        [("2026-08-05-r11", "2026-08-06 03:00:00", 200)],
     )
     conn.when("SELECT COUNT(*) FROM ads_alert_confirm", [(3,)])
     if has_disposition:
@@ -147,14 +142,13 @@ def test_dashboard_trust_cards_and_funnel(monkeypatch):
         "rate": 95.59,
         "pending_pct": 70.82,
     }
-    assert tc["model_version"]["version"] == "2026-08-05-r11"
-    assert tc["model_version"]["loan_count"] == 200
 
-    # 漏斗：预警 = 离线 34 + 实时 160；确认/处置/解除来自 ads_alert_confirm。
+    # 漏斗：预警 = 离线(T+1) 笔数（实时链已废弃，概览移除，仅计 ads_ltv_alerts）。
+    # 确认/处置/解除来自 ads_alert_confirm。
     # 处置 = 累计已处置（disposed 1 + recovered 1 = 2），解除 = recovered 1，
-    # 保证 B2.2 单调：194 ≥ 3 ≥ 2 ≥ 1。
+    # 保证 B2.2 单调：34 ≥ 3 ≥ 2 ≥ 1。
     funnel = d["alert_funnel"]
-    assert funnel == {"alert": 194, "confirmed": 3, "disposed": 2, "recovered": 1}
+    assert funnel == {"alert": 34, "confirmed": 3, "disposed": 2, "recovered": 1}
     assert funnel["alert"] >= funnel["confirmed"] >= funnel["disposed"] >= funnel["recovered"]
     # 确认量按处置契约 = confirmed_by 非空的行（处置行也带确认人）。
     assert conn.find_sql("confirmed_by IS NOT NULL") is not None
@@ -290,7 +284,7 @@ def _parse(path):
 
 def test_handle_detail_success(monkeypatch):
     payload = {
-        "alert": {"loan_id": 101, "ltv": 0.9, "src": "offline"},
+        "alert": {"loan_id": 101, "ltv": 0.9, "src": "offline", "customer_id": "C123456789"},
         "property_addr": "广州市",
         "risk_factors": {"valuation_deviation_pct": 0.12, "low_confidence": False},
         "confirm": None,
@@ -305,6 +299,9 @@ def test_handle_detail_success(monkeypatch):
     out = json.loads(h.sent["body"])
     assert out["alert"]["loan_id"] == 101
     assert out["risk_factors"]["valuation_deviation_pct"] == 0.12
+    # AC-06 口径：read 接口对 PII 列脱敏，明文 customer_id 不得回传（仅留后 4 位）。
+    assert out["alert"]["customer_id"] == "c****6789"
+    assert "C123456789" not in h.sent["body"].decode("utf-8")
 
 
 def test_handle_detail_missing_params_400(monkeypatch):
@@ -329,7 +326,7 @@ def test_handle_dispose_success(monkeypatch):
     monkeypatch.setattr(db, "dispose_alert", lambda *a, **k: calls["dispose"].append(a))
     monkeypatch.setattr(db, "write_audit", lambda *a, **k: calls["audit"].append(a))
 
-    user = {"user": "risk", "role": "risk", "label": "风控策略经理"}
+    user = {"user": "admin", "role": "admin", "label": "内部管理(风控/分析/管理员)"}
     h = _Handler(
         {"loan_id": 101, "alert_date": "2026-08-05", "source": "offline", "status": "disposed"}
     )
@@ -340,9 +337,9 @@ def test_handle_dispose_success(monkeypatch):
     assert out["ok"] is True and out["status"] == "disposed"
     # dispose_alert 收到的参数：loan_id / alert_date / source / status / user
     assert calls["dispose"][0][:4] == (101, "2026-08-05", "offline", "disposed")
-    # 审计：action=dispose / result=success / who=risk / ip 来自 client_address
+    # 审计：action=dispose / result=success / who=admin / ip 来自 client_address
     action, username, role, detail, result, ip = calls["audit"][0]
-    assert action == "dispose" and username == "risk" and result == "success"
+    assert action == "dispose" and username == "admin" and result == "success"
     assert ip == "203.0.113.7"
     assert json.loads(detail)["status"] == "disposed"
 
@@ -352,7 +349,7 @@ def test_handle_dispose_invalid_status_400(monkeypatch):
     monkeypatch.setattr(db, "dispose_alert", lambda *a, **k: pytest.fail("不应调用"))
     monkeypatch.setattr(db, "write_audit", lambda *a, **k: calls["audit"].append(a))
 
-    user = {"user": "risk", "role": "risk", "label": "风控策略经理"}
+    user = {"user": "admin", "role": "admin", "label": "内部管理(风控/分析/管理员)"}
     h = _Handler(
         {"loan_id": 101, "alert_date": "2026-08-05", "source": "offline", "status": "junk"}
     )

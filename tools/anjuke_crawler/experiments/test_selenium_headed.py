@@ -8,7 +8,6 @@
 """
 
 import time
-from urllib.parse import urlparse
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -51,12 +50,7 @@ try:
     print("[+] Current URL:", driver.current_url)
     print("[+] Page Title:", driver.title)
 
-    _host = urlparse(driver.current_url).netloc.split(":")[0].lower()
-    if (
-        "deny.do" in driver.current_url
-        or _host == "security.anjuke.com"
-        or _host.endswith(".security.anjuke.com")
-    ):
+    if "deny.do" in driver.current_url or "security.anjuke.com" in driver.current_url:
         print("[-] 触发 58 验证页。请在浏览器窗口手动完成验证。")
         time.sleep(10)
     else:

@@ -20,7 +20,12 @@ def business_date() -> str:
 
 
 def load_env() -> dict:
-    """读仓库根 .env（仅取 MYSQL_* 相关键，不写回）。"""
+    """读仓库根 .env（仅取 MYSQL_* 相关键，不写回）。
+
+    允许进程环境 os.environ 中的 MYSQL_* 覆盖 .env 的值——容器化 Airflow 通过
+    compose env_file 注入 MYSQL_HOST=host.docker.internal，使 ETL 脚本在桥接网络容器内
+    也能连到宿主 MySQL；宿主/采集栈（host 网络）进程无此变量，则回退 .env 的 127.0.0.1。
+    """
     env = {}
     path = os.path.join(REPO_ROOT, ".env")
     if os.path.exists(path):
@@ -31,6 +36,9 @@ def load_env() -> dict:
                     continue
                 k, _, v = line.partition("=")
                 env[k.strip()] = v.strip().strip('"').strip("'")
+    for k, v in os.environ.items():
+        if k.startswith("MYSQL_"):
+            env[k] = v
     return env
 
 
@@ -62,6 +70,183 @@ CITY_MAP = {
     "茂名": "mm",
     "湛江": "zj",
     "云浮": "yf",
+}
+
+# 区级限定词白名单：完整「××区」名（东莞/中山不设区，取其下辖街道）→ 城市码。
+# 用途唯一：P6 情景解析把「越秀区房价下跌 10%」这类区级情景归到具体城市，
+# 供 record 级地域闸门按抵押物地址里的区名筛选受冲击的贷款（p6_policy）。
+# 必须是白名单而非「××区」正则：泛词「核心区 / 城区 / 景区」会误伤
+# （「广州核心区房价下跌」是城市级情景，不是区级）；汕尾「城区」同名泛词不收。
+# 行政区清单与 seed 数据的地址口径一致（tools/seed 的 CITIES + 真实行政区划）。
+DISTRICT_MAP = {
+    # 广州
+    "越秀区": "gz",
+    "荔湾区": "gz",
+    "海珠区": "gz",
+    "天河区": "gz",
+    "白云区": "gz",
+    "黄埔区": "gz",
+    "番禺区": "gz",
+    "花都区": "gz",
+    "南沙区": "gz",
+    "增城区": "gz",
+    "从化区": "gz",
+    # 深圳
+    "罗湖区": "sz",
+    "福田区": "sz",
+    "南山区": "sz",
+    "宝安区": "sz",
+    "龙岗区": "sz",
+    "盐田区": "sz",
+    "龙华区": "sz",
+    "坪山区": "sz",
+    "光明区": "sz",
+    # 佛山
+    "禅城区": "fs",
+    "南海区": "fs",
+    "顺德区": "fs",
+    "三水区": "fs",
+    "高明区": "fs",
+    # 东莞 / 中山（不设区，街道为其下辖区划）
+    "莞城街道": "dg",
+    "南城街道": "dg",
+    "东城街道": "dg",
+    "万江街道": "dg",
+    "石岐街道": "zs",
+    "东区街道": "zs",
+    "西区街道": "zs",
+    # 珠海
+    "香洲区": "zh",
+    "斗门区": "zh",
+    "金湾区": "zh",
+    # 惠州
+    "惠城区": "hui",
+    "惠阳区": "hui",
+    # 江门
+    "蓬江区": "jm",
+    "江海区": "jm",
+    "新会区": "jm",
+    # 肇庆
+    "端州区": "zq",
+    "鼎湖区": "zq",
+    "高要区": "zq",
+    # 清远
+    "清城区": "qy",
+    "清新区": "qy",
+    # 韶关
+    "武江区": "sg",
+    "浈江区": "sg",
+    "曲江区": "sg",
+    # 汕头
+    "龙湖区": "st",
+    "金平区": "st",
+    "濠江区": "st",
+    "潮阳区": "st",
+    "潮南区": "st",
+    "澄海区": "st",
+    # 揭阳
+    "榕城区": "jy",
+    "揭东区": "jy",
+    # 潮州
+    "湘桥区": "cz",
+    "潮安区": "cz",
+    # 梅州
+    "梅江区": "mz",
+    "梅县区": "mz",
+    # 河源
+    "源城区": "hy",
+    "东源县": "hy",
+    # 阳江
+    "江城区": "yj",
+    "阳东区": "yj",
+    # 茂名
+    "茂南区": "mm",
+    "电白区": "mm",
+    # 湛江
+    "赤坎区": "zj",
+    "霞山区": "zj",
+    "坡头区": "zj",
+    "麻章区": "zj",
+    # 云浮
+    "云城区": "yf",
+    "云安区": "yf",
+}
+
+# 借款人行业枚举（customer.industry 的取值域）。国标 GB/T 4754 门类风格：
+# 剔除采矿业 B / 电力热力燃气及水 D / 水利环境公共设施 N / 国际组织 T 四个
+# 在个人按揭客群中占比极低的门类，其余 15 个门类全收。
+# 为什么 code 用 ASCII slug 而非中文：该值会原样落进策略表
+# ads_spatial_policy.scope_value、审计 JSON 与预览导出文件名
+# （policy_preview_<scope_value>_*.csv），ASCII 在三个场景都无编码风险；
+# 中文展示名经 INDUSTRY_CATEGORIES[code] 解析（与 CITY_MAP 的 code→名同构）。
+# 这是行业口径的**单点来源**：种子回填（seed/generate_seed.py）、P6 作用域
+# 校验（p6_policy._valid_scope）与前端下拉都从这里取，不允许第二份清单。
+INDUSTRY_CATEGORIES = {
+    "manufacturing": "制造业",
+    "construction": "建筑业",
+    "wholesale_retail": "批发和零售业",
+    "transport": "交通运输、仓储和邮政业",
+    "accommodation_food": "住宿和餐饮业",
+    "it_software": "信息传输、软件和信息技术服务业",
+    "finance": "金融业",
+    "real_estate": "房地产业",
+    "business_services": "租赁和商务服务业",
+    "sci_tech": "科学研究和技术服务业",
+    "education": "教育",
+    "health": "卫生和社会工作",
+    "culture": "文化、体育和娱乐业",
+    "agriculture": "农、林、牧、渔业",
+    "public_admin": "公共管理、社会保障和社会组织",
+}
+
+# 行业限定词白名单：口语说法/门类全名 → INDUSTRY_CATEGORIES 的 slug。
+# 用途：P6 情景解析把「制造业收入下降 15%」这类行业情景归到具体行业，
+# 供收入类情景逐笔路由（借款人行业匹配的 record 才参与压力）与叙事对象收窄。
+# 白名单而非正则：泛词误伤面大（「产业」「行业」到处都是）。完整门类名在前、
+# 口语别名在后，首个命中生效（「金融业」必须先于「金融」被匹配）。
+INDUSTRY_MAP = {
+    "农、林、牧、渔业": "agriculture",
+    "农林牧渔": "agriculture",
+    "农业": "agriculture",
+    "制造业": "manufacturing",
+    "建筑业": "construction",
+    "批发和零售业": "wholesale_retail",
+    "批发": "wholesale_retail",
+    "零售": "wholesale_retail",
+    "商贸": "wholesale_retail",
+    "交通运输、仓储和邮政业": "transport",
+    "交通": "transport",
+    "物流": "transport",
+    "运输": "transport",
+    "仓储": "transport",
+    "住宿和餐饮业": "accommodation_food",
+    "餐饮": "accommodation_food",
+    "住宿": "accommodation_food",
+    "酒店": "accommodation_food",
+    "信息传输、软件和信息技术服务业": "it_software",
+    "信息技术": "it_software",
+    "互联网": "it_software",
+    "软件": "it_software",
+    "金融业": "finance",
+    "金融": "finance",
+    "房地产业": "real_estate",
+    "地产": "real_estate",
+    "租赁和商务服务业": "business_services",
+    "商务服务": "business_services",
+    "租赁": "business_services",
+    "科学研究和技术服务业": "sci_tech",
+    "科研": "sci_tech",
+    "教育": "education",
+    "卫生和社会工作": "health",
+    "医疗": "health",
+    "卫生": "health",
+    "文化、体育和娱乐业": "culture",
+    "文化娱乐": "culture",
+    "娱乐": "culture",
+    "体育": "culture",
+    "公共管理、社会保障和社会组织": "public_admin",
+    "公务员": "public_admin",
+    "公共管理": "public_admin",
 }
 
 

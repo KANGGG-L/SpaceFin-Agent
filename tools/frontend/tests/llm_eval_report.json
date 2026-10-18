@@ -1,0 +1,566 @@
+{
+  "env": {
+    "has_LLM_KEY": true,
+    "base": "<redacted-llm-endpoint>",
+    "models": "deepseek-v4-flash-0731",
+    "max_chars": 200,
+    "read_timeout": 90,
+    "total_budget": 120,
+    "attempts": 2,
+    "dev_relax": false,
+    "langchain": false,
+    "zhconv": false
+  },
+  "cases_total": 23,
+  "cases_passed": 22,
+  "requests_total": 36,
+  "fallback_requests": 15,
+  "guard_blocked_requests": 5,
+  "metrics": {
+    "llm_fallback_rate_pct": 41.67,
+    "llm_guard_block_rate_pct": 13.89,
+    "llm_eval_case_pass_rate_pct": 95.65,
+    "llm_p95_latency_s": 40.71,
+    "llm_model_calls": 22
+  },
+  "per_case": [
+    {
+      "case_id": "E-S01",
+      "passed": true,
+      "trace": [
+        {
+          "chain": "nl_parse",
+          "nl_mode": "llm-ok-noop",
+          "degraded": null,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": false,
+          "llm_calls": 1,
+          "latency_ms": [14941]
+        }
+      ]
+    },
+    {
+      "case_id": "E-S02",
+      "passed": true,
+      "trace": [
+        {
+          "chain": "nl_parse",
+          "nl_mode": "llm-ok-noop",
+          "degraded": null,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": false,
+          "llm_calls": 1,
+          "latency_ms": [9507]
+        }
+      ]
+    },
+    {
+      "case_id": "E-S03",
+      "passed": true,
+      "trace": [
+        {
+          "chain": "decompose",
+          "nl_mode": "llm",
+          "degraded": false,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": false,
+          "llm_calls": 1,
+          "latency_ms": [29965]
+        }
+      ]
+    },
+    {
+      "case_id": "E-S04",
+      "passed": true,
+      "trace": [
+        {
+          "chain": "p10",
+          "nl_mode": "deterministic-fallback",
+          "degraded": null,
+          "fallback_kind": null,
+          "llm_error": "No module named 'langchain'",
+          "guard": false,
+          "fallback": true,
+          "llm_calls": 0,
+          "latency_ms": []
+        }
+      ]
+    },
+    {
+      "case_id": "E-E01",
+      "passed": true,
+      "trace": [
+        {
+          "chain": "nl_parse",
+          "nl_mode": "llm-ok-noop",
+          "degraded": null,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": false,
+          "llm_calls": 1,
+          "latency_ms": [3696]
+        },
+        {
+          "chain": "decompose",
+          "nl_mode": "llm",
+          "degraded": false,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": false,
+          "llm_calls": 1,
+          "latency_ms": [39649]
+        }
+      ]
+    },
+    {
+      "case_id": "E-E02",
+      "passed": true,
+      "trace": [
+        {
+          "chain": "decompose",
+          "nl_mode": "llm",
+          "degraded": false,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": false,
+          "llm_calls": 1,
+          "latency_ms": [40710]
+        }
+      ]
+    },
+    {
+      "case_id": "E-E03",
+      "passed": true,
+      "trace": [
+        {
+          "chain": "nl_parse",
+          "nl_mode": "llm-ok-noop",
+          "degraded": null,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": false,
+          "llm_calls": 1,
+          "latency_ms": [8096]
+        },
+        {
+          "chain": "decompose",
+          "nl_mode": "llm",
+          "degraded": false,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": false,
+          "llm_calls": 1,
+          "latency_ms": [37848]
+        }
+      ]
+    },
+    {
+      "case_id": "E-E04",
+      "passed": true,
+      "trace": [
+        {
+          "chain": "nl_parse",
+          "nl_mode": "llm-ok-noop",
+          "degraded": null,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": false,
+          "llm_calls": 1,
+          "latency_ms": [5417]
+        },
+        {
+          "chain": "decompose",
+          "nl_mode": "llm",
+          "degraded": false,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": false,
+          "llm_calls": 1,
+          "latency_ms": [7888]
+        }
+      ]
+    },
+    {
+      "case_id": "E-E05",
+      "passed": true,
+      "trace": [
+        {
+          "chain": "decompose",
+          "nl_mode": "llm",
+          "degraded": false,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": false,
+          "llm_calls": 1,
+          "latency_ms": [21563]
+        }
+      ]
+    },
+    {
+      "case_id": "E-E06",
+      "passed": true,
+      "trace": [
+        {
+          "chain": "decompose",
+          "nl_mode": "llm",
+          "degraded": false,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": false,
+          "llm_calls": 1,
+          "latency_ms": [12719]
+        }
+      ]
+    },
+    {
+      "case_id": "E-E07",
+      "passed": true,
+      "trace": [
+        {
+          "chain": "decompose",
+          "nl_mode": "llm",
+          "degraded": false,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": false,
+          "llm_calls": 1,
+          "latency_ms": [36034]
+        }
+      ]
+    },
+    {
+      "case_id": "E-I01",
+      "passed": true,
+      "trace": [
+        {
+          "chain": "nl_parse",
+          "nl_mode": "regex-fallback",
+          "degraded": null,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": true,
+          "fallback": true,
+          "llm_calls": 0,
+          "latency_ms": []
+        },
+        {
+          "chain": "decompose",
+          "nl_mode": "regex-fallback",
+          "degraded": true,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": true,
+          "fallback": true,
+          "llm_calls": 0,
+          "latency_ms": []
+        }
+      ]
+    },
+    {
+      "case_id": "E-I02",
+      "passed": true,
+      "trace": [
+        {
+          "chain": "nl_parse",
+          "nl_mode": "llm",
+          "degraded": null,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": false,
+          "llm_calls": 1,
+          "latency_ms": [8128]
+        },
+        {
+          "chain": "decompose",
+          "nl_mode": "llm",
+          "degraded": false,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": false,
+          "llm_calls": 1,
+          "latency_ms": [13997]
+        }
+      ]
+    },
+    {
+      "case_id": "E-I03",
+      "passed": true,
+      "trace": [
+        {
+          "chain": "nl_parse",
+          "nl_mode": "regex-injection-guard",
+          "degraded": null,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": true,
+          "fallback": true,
+          "llm_calls": 0,
+          "latency_ms": []
+        },
+        {
+          "chain": "decompose",
+          "nl_mode": "regex-injection-guard",
+          "degraded": true,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": true,
+          "fallback": true,
+          "llm_calls": 0,
+          "latency_ms": []
+        },
+        {
+          "chain": "p10",
+          "nl_mode": "deterministic-fallback",
+          "degraded": null,
+          "fallback_kind": null,
+          "llm_error": "injection-blocked",
+          "guard": true,
+          "fallback": true,
+          "llm_calls": 0,
+          "latency_ms": []
+        }
+      ]
+    },
+    {
+      "case_id": "E-I04",
+      "passed": true,
+      "trace": [
+        {
+          "chain": "nl_parse",
+          "nl_mode": "llm-ok-noop",
+          "degraded": null,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": false,
+          "llm_calls": 1,
+          "latency_ms": [1895]
+        },
+        {
+          "chain": "decompose",
+          "nl_mode": "regex-fallback",
+          "degraded": true,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": true,
+          "llm_calls": 1,
+          "latency_ms": [52743]
+        }
+      ]
+    },
+    {
+      "case_id": "E-I05",
+      "passed": true,
+      "trace": [
+        {
+          "chain": "nl_parse",
+          "nl_mode": "llm-ok-noop",
+          "degraded": null,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": false,
+          "llm_calls": 1,
+          "latency_ms": [7244]
+        },
+        {
+          "chain": "decompose",
+          "nl_mode": "llm",
+          "degraded": false,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": false,
+          "llm_calls": 1,
+          "latency_ms": [7800]
+        }
+      ]
+    },
+    {
+      "case_id": "E-I06",
+      "passed": false,
+      "trace": [
+        {
+          "chain": "nl_parse",
+          "nl_mode": "llm-ok-noop",
+          "degraded": null,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": false,
+          "llm_calls": 1,
+          "latency_ms": [4977]
+        },
+        {
+          "chain": "decompose",
+          "nl_mode": "llm",
+          "degraded": false,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": false,
+          "llm_calls": 1,
+          "latency_ms": [39432]
+        }
+      ]
+    },
+    {
+      "case_id": "E-I07",
+      "passed": true,
+      "trace": [
+        {
+          "chain": "decompose",
+          "nl_mode": "llm",
+          "degraded": false,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": false,
+          "llm_calls": 1,
+          "latency_ms": [9776]
+        }
+      ]
+    },
+    {
+      "case_id": "E-F01",
+      "passed": true,
+      "trace": [
+        {
+          "chain": "nl_parse",
+          "nl_mode": "regex-no-key",
+          "degraded": null,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": true,
+          "llm_calls": 0,
+          "latency_ms": []
+        },
+        {
+          "chain": "decompose",
+          "nl_mode": "regex-no-key",
+          "degraded": true,
+          "fallback_kind": "no-key",
+          "llm_error": null,
+          "guard": false,
+          "fallback": true,
+          "llm_calls": 0,
+          "latency_ms": []
+        },
+        {
+          "chain": "p10",
+          "nl_mode": "deterministic-fallback",
+          "degraded": null,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": true,
+          "llm_calls": 0,
+          "latency_ms": []
+        }
+      ]
+    },
+    {
+      "case_id": "E-F02",
+      "passed": true,
+      "trace": [
+        {
+          "chain": "nl_parse",
+          "nl_mode": "regex-fallback",
+          "degraded": null,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": true,
+          "llm_calls": 0,
+          "latency_ms": []
+        },
+        {
+          "chain": "decompose",
+          "nl_mode": "regex-fallback",
+          "degraded": true,
+          "fallback_kind": "rate-limited",
+          "llm_error": null,
+          "guard": false,
+          "fallback": true,
+          "llm_calls": 0,
+          "latency_ms": []
+        }
+      ]
+    },
+    {
+      "case_id": "E-F03",
+      "passed": true,
+      "trace": [
+        {
+          "chain": "decompose",
+          "nl_mode": "regex-fallback",
+          "degraded": true,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": true,
+          "llm_calls": 0,
+          "latency_ms": []
+        }
+      ]
+    },
+    {
+      "case_id": "E-F04",
+      "passed": true,
+      "trace": [
+        {
+          "chain": "decompose",
+          "nl_mode": "regex-fallback",
+          "degraded": true,
+          "fallback_kind": null,
+          "llm_error": null,
+          "guard": false,
+          "fallback": true,
+          "llm_calls": 0,
+          "latency_ms": []
+        }
+      ]
+    },
+    {
+      "case_id": "E-F05",
+      "passed": true,
+      "trace": [
+        {
+          "chain": "p10",
+          "nl_mode": "deterministic-fallback",
+          "degraded": null,
+          "fallback_kind": null,
+          "llm_error": "No module named 'langchain'",
+          "guard": false,
+          "fallback": true,
+          "llm_calls": 0,
+          "latency_ms": []
+        }
+      ]
+    }
+  ],
+  "latency_samples_ms": [
+    14941, 9507, 29965, 3696, 39649, 40710, 8096, 37848, 5417, 7888, 21563, 12719, 36034, 8128,
+    13997, 1895, 52743, 7244, 7800, 4977, 39432, 9776
+  ]
+}

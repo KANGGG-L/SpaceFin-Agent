@@ -43,11 +43,16 @@ def seed_prev_run(master, rdb):
     rdb.rpush(master.TASK_QUEUE, json.dumps({"city": "gz", "type": "fangyuan"}))
     for city, typ in (("gz", "sale"), ("sz", "fangyuan")):
         rdb.set(f"{master.IP_USED_PREFIX}{city}:{typ}", 91)
-    # 必须存活的两类 key
+    # 必须存活的三类 key
     rdb.set("spacefin:crawl_progress:gz:sale", 57)
     rdb.set("spacefin:crawl_progress:sz:fangyuan", 12)
     rdb.sadd("spacefin:crawled_urls:gz:sale", "u1", "u2", "u3")
     rdb.sadd("spacefin:crawled_urls:sz:fangyuan", "r1")
+    rdb.hset(
+        f"{master.WAVE_LOG_PREFIX}{PREV}",
+        "gz:sale",
+        json.dumps({"floor": {"wave": "floor", "new": 500, "pages_done": 53}}),
+    )
 
 
 def test_bootstrap_resets_run_state(master, rdb):
@@ -56,7 +61,7 @@ def test_bootstrap_resets_run_state(master, rdb):
 
     assert rdb.get(master.STOP_KEY) is None
     assert rdb.get(master.EMPTY_CYCLES_KEY) is None
-    assert rdb.get(master.PHASE_KEY) == "sale"
+    assert rdb.get(master.PHASE_KEY) == "city-interleave"
     assert rdb.get(master.QG_CONSUMED_KEY) is None
     assert rdb.llen(master.TASK_QUEUE) == 0
     assert rdb.get(master.RUN_CURRENT_KEY) == NEW
@@ -94,6 +99,20 @@ def test_bootstrap_preserves_progress_and_url_sets(master, rdb):
     ]
 
 
+def test_bootstrap_keeps_previous_run_wave_log(master, rdb):
+    """上一轮的波次快照必须活过新 run：它是「昨夜各波次实际爬了多少」的唯一记录，
+    也是 census（观测完备性账本）的输入。旧版用全局单键 + bootstrap delete，每晚清零。
+    """
+    seed_prev_run(master, rdb)
+    prev_key = f"{master.WAVE_LOG_PREFIX}{PREV}"
+    assert rdb.hget(prev_key, "gz:sale") is not None  # 前置条件
+
+    master._bootstrap_run(rdb)
+
+    assert json.loads(rdb.hget(prev_key, "gz:sale"))["floor"]["new"] == 500
+    assert not rdb.exists(master._wave_log_key())  # 新 run 从空快照起，不继承上一轮
+
+
 def test_same_run_id_is_idempotent(master, rdb):
     seed_prev_run(master, rdb)
     assert master._bootstrap_run(rdb) is True
@@ -123,7 +142,7 @@ def test_first_boot_with_empty_redis(master, rdb):
     """首次启动（无任何状态）：也算新 run，不得因 task hash 不存在而报错。"""
     assert master._bootstrap_run(rdb) is True
     assert rdb.get(master.RUN_CURRENT_KEY) == NEW
-    assert rdb.get(master.PHASE_KEY) == "sale"
+    assert rdb.get(master.PHASE_KEY) == "city-interleave"
     # task hash 不存在的由 init_tasks 创建，此处只需保证预算表已落盘
-    assert int(rdb.get(f"{master.IP_BUDGET_PREFIX}gz:sale")) == 91
-    assert int(rdb.get(f"{master.IP_BUDGET_PREFIX}yf:fangyuan")) == 14
+    assert int(rdb.get(f"{master.IP_BUDGET_PREFIX}gz:sale")) == 60
+    assert int(rdb.get(f"{master.IP_BUDGET_PREFIX}yf:fangyuan")) == 20

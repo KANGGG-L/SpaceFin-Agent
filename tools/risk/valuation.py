@@ -97,12 +97,79 @@ def valuation_from_avm(model, collateral: dict, city_map: dict) -> float | None:
             community=_community_from_addr(addr),
             area_sqm=float(area),
             building_age=collateral.get("age"),
-            bedrooms=None,
+            # 户型/楼层/朝向/车位特征：若抵押物 collateral 携带则透传真实值，
+            # 否则传 None。estimate_total_price 在缺失这些特征时会显式抛错，
+            # 由本层 except 捕获后回退 DWD / true_market_price（而非容忍错位估值）。
+            bedrooms=collateral.get("bedrooms"),
+            hall=collateral.get("hall"),
+            bath=collateral.get("bath"),
+            floor_level=collateral.get("floor_level"),
+            floor_total=collateral.get("floor_total"),
+            direction=collateral.get("direction"),
+            parking=collateral.get("parking"),
             latitude=collateral.get("lat"),
             longitude=collateral.get("lng"),
         )
     except Exception:
         return None
+
+
+def valuations_from_avm(model, collaterals: dict, city_map: dict) -> dict:
+    """批量 AVM 估值：对全部抵押物一次性算完，返回 {collateral_id: 总价(float) | None}。
+
+    性能修复（对应 tools/avm/predict.batch_estimate_total_price）：风险引擎全量批跑时
+    若逐笔调用 valuation_from_avm，每行都触发一次 HistGBR 的 model.predict（其内部
+    OneHotEncoder/ColumnTransformer 预处理 + 逐树推理开销极大），5000 笔会放大到 10+
+    分钟被 kill。本函数把整批抵押物一次性喂入模型，predict 只调用一次。
+
+    语义与逐笔 valuation_from_avm 完全等价：
+        - 模型缺失 / 城市码解析不出 / 面积缺失或 <=0 / 9 维必填特征缺失 → 该笔 None，
+          由调用方继续走 DWD → true_market_price 回退链（与逐笔路径回退结果一致）。
+        - 单批推理异常 → 全批兜底 None（AVM 是可选增强项，绝不让整批风险计算失败）。
+    线程安全：模型 artifact 只读、批量过程只构造局部数组，无共享可变状态，幂等。
+    """
+    if model is None or not collaterals:
+        return {cid: None for cid in collaterals}
+    mod = _avm_module()
+    if mod is None:
+        return {cid: None for cid in collaterals}
+
+    specs: list[dict] = []
+    ids: list = []
+    for cid, col in collaterals.items():
+        addr = (col.get("property_addr") or "").strip()
+        code = _city_code_from_addr(addr, city_map)
+        area = col.get("area")
+        if not code or not area or float(area) <= 0:
+            continue  # 与 valuation_from_avm 的 preconditions 一致 → 该笔回退
+        specs.append(
+            dict(
+                city_code=code,
+                community=_community_from_addr(addr),
+                area_sqm=float(area),
+                building_age=col.get("age"),
+                bedrooms=col.get("bedrooms"),
+                hall=col.get("hall"),
+                bath=col.get("bath"),
+                floor_level=col.get("floor_level"),
+                floor_total=col.get("floor_total"),
+                direction=col.get("direction"),
+                parking=col.get("parking"),
+                latitude=col.get("lat"),
+                longitude=col.get("lng"),
+            )
+        )
+        ids.append(cid)
+
+    out = {cid: None for cid in collaterals}
+    if not specs:
+        return out
+    try:
+        vals = mod.batch_estimate_total_price(model, specs)
+    except Exception:
+        vals = [None] * len(specs)
+    out.update({cid: (vals[i] if i < len(vals) else None) for i, cid in enumerate(ids)})
+    return out
 
 
 def load_dwd_unit_prices(conn) -> dict:

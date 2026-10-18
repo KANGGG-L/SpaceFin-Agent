@@ -8,6 +8,14 @@
 - 关联文档：
 - 关联阶段 / 任务：
 
+## 可追溯性（Traceability）
+
+<!-- 变更须可追溯：见 docs/TRACEABILITY.md。无则填「无」。 -->
+- 决策记录（ADR，路径或编号）：无
+- 证据条目（`docs/evidence/registry.json` 的 `metric_id`，多条逗号分隔）：无
+- 是否影响阈值 / 规则 / 模型 / Prompt：否
+- 回滚方式（如何退回上一已知良好状态）：
+
 ## 提交规范自查
 
 - [ ] 提交信息符合 Conventional Commits（feat/fix/docs/...）

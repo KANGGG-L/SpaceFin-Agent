@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""7 天演示回填验收（docs/demo/acceptance.md 的 A/C 组 SQL 检查）。
+"""7 天演示回填验收（演示验收标准 A/C 组 SQL 检查）。
 
 用法：
     tools/orchestrator/.venv/bin/python tools/dev/verify.py

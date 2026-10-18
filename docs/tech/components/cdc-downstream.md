@@ -22,6 +22,8 @@ MySQL binlog ──tools/cdc/main.py──▶ ODS ──tools/cdc/consumer.py─
                                     data_lake/cdc/ods/
 ```
 
+> **库归属提示**：架构图中的 `ods_cdc_log`（ODS 事件/水位表）与下游 `ads_ltv_alerts`、`ads_risk_class` 等 `ads_` 前缀表，实际都建在 **`spacefin_crawler`** 库（`tools/cdc/main.py` 的 `out_dbname="spacefin_crawler"`），并非独立 ADS 库——`ads_` 仅为表名前缀，易误读。
+
 | 环节 | 载体 | 职责 |
 |---|---|---|
 | 采集变更 | `tools/cdc/main.py`，systemd `spacefin-cdc` | binlog → ODS，**贴源不解释**（before/after 全量 JSON） |
@@ -89,6 +91,7 @@ systemctl --user daemon-reload && systemctl --user enable --now spacefin-cdc-con
 ```
 
 轮询间隔默认 20s，可在 `~/.config/spacefin/cdc.env` 里设 `SPACEFIN_CDC_CONSUMER_INTERVAL`。
+现已由 `consumer.py` 读取并映射到 `--interval`（默认 20s）。
 
 ### 5.2 批处理（Airflow / 手动）
 
@@ -121,9 +124,9 @@ tools/orchestrator/.venv/bin/python tools/pipeline/run_pipeline.py --dry-run
 
 | 项 | 结果 |
 |---|---|
-| 改一笔 loan → ODS 可见 | **3s**（验收线 ≤10s 秒级；`ods_cdc_log` + `data_lake/cdc/ods/loan/dt=*/`） |
+| 改一笔 loan → ODS 可见 | **3s**（本文档记录的实测值；同一条验收线的另一次独立实测见 AC-01 正式验收记录 `docs/product/05/AC-01-验收记录.md` = **0.32s**。两处均为 wall-clock「单笔变更 → ODS 可见」，均 ≤10s 验收线；口径差异源于单次测量波动，引用时以 AC-01 正式验收记录为准） |
 | 改一笔 loan → DWS/ADS 同步（常驻服务全自动） | **20s**（属下游 ETL，非 AC-01 验收线） |
-| 是否全量重算 | 否，`recalc_loans=1`（全库 200 笔） |
+| 是否全量重算 | 否，`recalc_loans=1`（全库 5000 笔） |
 | 增量与全量结果互证 | 一致（均为 2 条预警、`total_balance` 相同） |
 
 实测样例：`loan 30001` 余额 `1219.41 → 6800.00`，LTV `0.1740 → 0.9701`，越过红线 0.85 自动进入
@@ -138,7 +141,7 @@ tools/orchestrator/.venv/bin/python tools/pipeline/run_pipeline.py --dry-run
 - **DWD 真实命中仍为 0（诚实记录）**：`valuation._district_from_addr` 对「XX市XX区…」
   地址提取到的是含城市前缀的整串（如「广州市天河区」），而 `crawl_housing_sale.community`
   存的是小区/板块名（如「次新小区」「珠江新城」），两者精确匹配不上，故 DWD 路径没吃到。
-  当前 `risk_report.json` 口径：`avm_hits=200`、`dwd_hits=0`、`fallback_true_market=0`——
+  当前 `risk_report.json` 口径：`avm_hits=5000`、`dwd_hits=0`、`fallback_true_market=0`——
   所有抵押物都命中 AVM，无一笔需要回退（含 DWD）。若要真实 DWD 命中，需在估值匹配层把
   「行政区」与 DWD community 解耦（不在本组件范围）。
 - **AVM 指标**：sale DWD 上 MAPE 16.63%（基线 22.57%，较初版 19.49% 再降；title 回填小区 +
@@ -159,9 +162,9 @@ DAG `guangdong_daily_crawl` 已加载 9 任务（含 `cdc_consume` / `risk_recal
 | 任务 | 命令 | 结果 |
 |---|---|---|
 | cdc_consume | `airflow tasks test guangdong_daily_crawl cdc_consume <exec_date>` | 退出码 0，`events=0, offset=7`（无积压） |
-| risk_recalc | `airflow tasks test guangdong_daily_crawl risk_recalc <exec_date>` | 退出码 0，全量 200 笔重算并写库 |
+| risk_recalc | `airflow tasks test guangdong_daily_crawl risk_recalc <exec_date>` | 退出码 0，全量 5000 笔重算并写库 |
 
 冒烟后种子对齐广东并重灌：`cdc_consume` 等价命令 `consumer.py --once --batch 2000`
 确认积压清零（offset 追上 ods_cdc_log 最新 id），`risk_recalc` 等价命令
-`risk/main.py --date <业务日> --write-db` 输出 avm_hits=200、LTV 五级分布
-正常 127 / 关注 47 / 次级 10 / 可疑 10 / 损失 6，无外键孤儿。
+`risk/main.py --date <业务日> --write-db` 输出 avm_hits=5000、LTV 五级分布
+正常 3777 / 关注 947 / 次级 128 / 可疑 81 / 损失 67，无外键孤儿。

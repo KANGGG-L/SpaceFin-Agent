@@ -1,0 +1,31 @@
+{
+  "kind": "poc-artifact-manifest",
+  "generated_at": "2026-10-18",
+  "note": "固定随机种子的 PoC 产物指纹；用于校验『脚本 ↔ 产物』血缘，无需分发大文件。",
+  "files": [
+    {
+      "path": "mvp_prototype.py",
+      "sha256": "dbc91e5502e1850ec293c8cb0ff57402722a876b0001a2d6d639a0c1815cb128"
+    },
+    {
+      "path": "ods_loans.csv",
+      "sha256": "412bb510f0daaa91b652c7b617663668dbdad82a58252d7bf60f6be4f654bd67"
+    },
+    {
+      "path": "dwd_enriched.csv",
+      "sha256": "d13ce4cd0614759ebbedc8fa08f7366c547967bd5b3832b41d38a940c25821b9"
+    },
+    {
+      "path": "dws_risk_class.csv",
+      "sha256": "ac1361b872225a0b4cf3a5c20cdaccce0b0cf09286fdfff9556bb4f4f045b655"
+    },
+    {
+      "path": "ads_1104_g11.csv",
+      "sha256": "acc75655ba11967d79a34a7109eb43bc9eefa64d81b949f1ef1d98003bbd6d86"
+    },
+    {
+      "path": "ads_ltv_alerts.csv",
+      "sha256": "afec37b07eb40fe9a577e42d697d328706bcb91456678ac5959babc624503155"
+    }
+  ]
+}

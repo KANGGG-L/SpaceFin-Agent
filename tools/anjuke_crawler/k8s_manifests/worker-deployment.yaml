@@ -25,7 +25,7 @@ spec:
         - |
           pip install curl_cffi lxml redis &&
           cd /app/tools &&
-          python -m anjuke_crawler.k8s.worker
+          python -m anjuke_crawler.distributed.worker
         env:
         - name: REDIS_HOST
           value: "redis-service"
@@ -43,5 +43,5 @@ spec:
       - name: app-code
         hostPath:
           # 必须改为本仓库在 k8s 节点上的绝对路径，否则 Pod 内 /app 为空、worker 启动失败
-          path: /home/kang/GitHub/SpaceFin-Agent  # TODO: 替换为目标节点真实路径后方可 kubectl apply
+          path: /path/to/SpaceFin-Agent  # TODO: 替换为目标节点真实路径后方可 kubectl apply
           type: Directory

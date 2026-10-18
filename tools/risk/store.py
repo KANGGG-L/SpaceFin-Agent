@@ -17,13 +17,14 @@ from __future__ import annotations
 
 import config
 import risk_engine
+import valuation
 
 DWS_INSERT_SQL = (
     "INSERT INTO dws_risk_class "
     "(loan_id, customer_id, collateral_id, balance, interest_rate, market_valuation, "
     " ltv, risk_class, low_confidence, is_high_risk_zone, alert, alert_level, "
-    " valuation_deviation_pct, abnormal_valuation, model_version) "
-    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+    " valuation_deviation_pct, abnormal_valuation, model_version, is_rejected) "
+    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
     "ON DUPLICATE KEY UPDATE "
     " customer_id=VALUES(customer_id), collateral_id=VALUES(collateral_id), "
     " balance=VALUES(balance), interest_rate=VALUES(interest_rate), "
@@ -34,6 +35,7 @@ DWS_INSERT_SQL = (
     " valuation_deviation_pct=VALUES(valuation_deviation_pct), "
     " abnormal_valuation=VALUES(abnormal_valuation), "
     " model_version=VALUES(model_version), "
+    " is_rejected=VALUES(is_rejected), "
     " etl_ts=CURRENT_TIMESTAMP"
 )
 
@@ -77,7 +79,8 @@ def load_collaterals(conn, collateral_ids: list | None = None) -> dict:
     """读抵押物主档，返回 {collateral_id: row}。"""
     sql = (
         "SELECT collateral_id, property_addr, lat, lng, area, age, true_market_price, "
-        "poi_density, commute_min, is_high_risk_zone, spatial_feat_missing_pct FROM collateral"
+        "poi_density, commute_min, is_high_risk_zone, spatial_feat_missing_pct, "
+        "hall, bath, bedrooms, floor_level, floor_total, direction, parking FROM collateral"
     )
     params: list = []
     if collateral_ids is not None:
@@ -98,12 +101,16 @@ def load_collaterals(conn, collateral_ids: list | None = None) -> dict:
         if r.get("spatial_feat_missing_pct") is not None:
             v = float(r["spatial_feat_missing_pct"])
             r["spatial_feat_missing_pct"] = v * 100.0 if v <= 1.0 else v
+        # AVM 推理所需的户型/楼层/朝向/车位特征（collateral 主档持久化）。
+        for _k in ("hall", "bath", "bedrooms", "floor_level", "floor_total", "parking"):
+            if r.get(_k) is not None:
+                r[_k] = int(r[_k])
     return {r["collateral_id"]: r for r in rows}
 
 
 def load_customers(conn, customer_ids: list | None = None) -> dict:
-    """读客户主档，返回 {customer_id: row}。"""
-    sql = "SELECT customer_id, credit_score, income_monthly, debt_ratio FROM customer"
+    """读客户主档，返回 {customer_id: row}。industry 供行业作用域策略规则匹配（P6 US-01）。"""
+    sql = "SELECT customer_id, credit_score, income_monthly, debt_ratio, industry FROM customer"
     params: list = []
     if customer_ids is not None:
         if not customer_ids:
@@ -131,7 +138,7 @@ def loans_by_collateral(conn, collateral_ids: list) -> list[int]:
 
 
 def loans_by_customer(conn, customer_ids: list) -> list[int]:
-    """客户变更 → 受影响贷款（当前风险口径未直接用客户特征，仍重算以保持视图新鲜）。"""
+    """客户变更 → 受影响贷款（客户的行业直接参与策略规则匹配，必须重算）。"""
     if not customer_ids:
         return []
     frag, params = _in_clause(customer_ids)
@@ -145,13 +152,15 @@ def loans_by_customer(conn, customer_ids: list) -> list[int]:
 # ---------------------------------------------------------------- 计算
 
 
-def load_spatial(conn) -> tuple[dict, dict]:
+def load_spatial(conn) -> tuple[dict, dict, dict]:
     """从 L2 空间表加载抵押物空间特征（S3，tools/spatial）。
 
-    返回 (spatial_map, zone_risk_map)：
+    返回 (spatial_map, zone_risk_map, policy_map)：
     - spatial_map: {collateral_id: {poi_density, commute_min, zone_id, spatial_feat_missing_pct}}
       取 build_date 最新一版（每天重建全量，快照语义）。
     - zone_risk_map: {zone_id: is_high_risk_zone}，用于把 zone 归属推导为高危区标记。
+    - policy_map: {(scope_type, scope_value): action}，来自已启用的 ads_spatial_policy
+      （P6 空间惩罚项，A1 城市粒度）。zone 粒度在 A1 中加载但被引擎忽略。
 
     空间表可能还没建（S3 模块未跑）——按空表处理，调用方自然回退到 collateral 占位字段。
     """
@@ -173,12 +182,31 @@ def load_spatial(conn) -> tuple[dict, dict]:
                 "zone_id": zone,
                 "spatial_feat_missing_pct": float(missing) if missing is not None else 100.0,
             }
-        cur.execute("SELECT zone_id, is_high_risk_zone FROM ads_spatial_zone")
-        zone_risk = {z: int(r or 0) for z, r in cur.fetchall()}
-        return spatial, zone_risk
+        cur.execute(
+            "SELECT zone_id, is_high_risk_zone, center_lat, center_lng FROM ads_spatial_zone"
+        )
+        zone_risk = {}
+        zone_center_map = {}
+        for z, r, clat, clng in cur.fetchall():
+            zone_risk[z] = int(r or 0)
+            zone_center_map[z] = (
+                (float(clat), float(clng)) if clat is not None and clng is not None else None
+            )
+        # P6 空间惩罚项（A2）：只取已启用规则，载入为新结构
+        # {(scope_type, scope_value): {"action","ltv_cap","center"}}。
+        # zone 规则的 center 取自 zone_center_map（city 规则为 None）。
+        cur.execute(
+            "SELECT scope_type, scope_value, action, ltv_cap FROM ads_spatial_policy WHERE enabled = 1"
+        )
+        policy_map = {}
+        for st, sv, action, ltv_cap in cur.fetchall():
+            cap = float(ltv_cap) if ltv_cap is not None else None
+            center = zone_center_map.get(sv) if st == "zone" else None
+            policy_map[(st, sv)] = {"action": action, "ltv_cap": cap, "center": center}
+        return spatial, zone_risk, policy_map
     except Exception:
         # 空间表不存在（S3 未跑）→ 空映射，风险引擎维持 collateral 占位空间特征。
-        return {}, {}
+        return {}, {}, {}
     finally:
         cur.close()
 
@@ -224,14 +252,26 @@ def compute_rows(
     dwd_unit: dict,
     avm_model=None,
     spatial=None,
+    policy_map=None,
 ) -> list:
     """对一批贷款做打宽（估值 → LTV → 五级 → 预警）。增量与全量走同一函数。
 
     avm_model 为 None 时跳过 AVM 估值（无模型环境与合成地址场景兼容）。
-    spatial 为 (spatial_map, zone_risk_map) 时先做空间特征覆盖（S3 接入）。
+    spatial 为 (spatial_map, zone_risk_map, policy_map) 时先做空间特征覆盖（S3 接入）。
+    policy_map 来自 ads_spatial_policy（P6 空间惩罚项，A1 城市粒度），驱动分类提级。
     """
     if spatial:
         apply_spatial(collaterals, spatial[0], spatial[1])
+    # policy_map 未显式传入时，从 spatial 三元组的第 3 项自动取用（main/consumer 已显式传，此处兜底）。
+    if policy_map is None and spatial and len(spatial) > 2:
+        policy_map = spatial[2]
+    # 性能修复：AVM 整批一次性估值（predict 只调用一次），避免逐笔 predict 放大到 10+ 分钟。
+    # avm_model 为 None（无模型环境）时跳过批算，enrich_loan 各自回退 DWD/兜底价。
+    avm_cache = (
+        valuation.valuations_from_avm(avm_model, collaterals, config.CITY_MAP)
+        if avm_model is not None
+        else {}
+    )
     return [
         risk_engine.enrich_loan(
             ln,
@@ -240,6 +280,8 @@ def compute_rows(
             dwd_unit,
             config.CITY_MAP,
             avm_model=avm_model,
+            avm_value=avm_cache.get(ln["collateral_id"]),
+            policy_map=policy_map,
         )
         for ln in loans
     ]
@@ -297,6 +339,7 @@ def ensure_ads_tables(conn) -> None:
             ("valuation_deviation_pct", "DECIMAL(8,4) DEFAULT NULL"),
             ("abnormal_valuation", "TINYINT DEFAULT NULL"),
             ("model_version", "VARCHAR(32) DEFAULT NULL"),
+            ("is_rejected", "TINYINT DEFAULT 0"),
         ],
     )
     cur.execute(
@@ -359,6 +402,7 @@ def _dws_tuple(r: dict) -> tuple:
         r.get("valuation_deviation_pct"),
         int(bool(r.get("abnormal_valuation"))),
         r.get("model_version") or "unknown",
+        int(bool(r.get("is_rejected"))),
     )
 
 

@@ -35,7 +35,7 @@ services:
     volumes:
       # 数据与配置持久化到宿主，容器重建不丢桶与对象
       - /srv/spacefin-lake/minio/data:/data
-    mem_limit: 1g
+    mem_limit: 512m
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
       interval: 10s
@@ -52,12 +52,19 @@ services:
     restart: unless-stopped
     network_mode: host
     hostname: doris-fe
+    # 仓库挂载到 /opt/spacefin：lake_sync 任务通过 `docker exec spacefin-doris-fe`
+    # 在本容器内执行 tools/lake/sync.py（与 Doris/MinIO 同 host 网络，127.0.0.1 可达），
+    # 同时共享 data_lake 快照（etl_finalize 在 airflow 容器内写到同一宿主仓库目录）。
     environment:
       # 单 FE 自举：自身即 master（FE_ID=1 对应 FE_SERVERS 里第一个地址）
       FE_SERVERS: "fe1:127.0.0.1:9010"
       FE_ID: "1"
       TZ: Asia/Shanghai
     volumes:
+      # 仓库挂载（lake_sync 经 docker exec 在本容器内执行 sync.py）
+      # 注意：本 compose 位于 deploy/doris-minio/，相对路径需用 ../.. 才指向仓库根
+      #（SPACEFIN_REPO_ROOT 未设置时回落 ../..；airflow/.env 里它指向绝对仓库根）。
+      - ${SPACEFIN_REPO_ROOT:-../..}:/opt/spacefin:ro
       # 元数据目录必须单独持久化：meta_dir 默认 ${DORIS_HOME}/doris-meta
       - /srv/spacefin-lake/doris/fe-meta:/opt/apache-doris/fe/doris-meta
       - /srv/spacefin-lake/doris/logs/fe:/opt/apache-doris/fe/log
@@ -91,6 +98,6 @@ services:
       # storage_root_path 默认 ${DORIS_HOME}/storage，需持久化否则数据随容器消失
       - /srv/spacefin-lake/doris/be-storage:/opt/apache-doris/be/storage
       - /srv/spacefin-lake/doris/logs/be:/opt/apache-doris/be/log
-      # 覆盖默认 be.conf：把 mem_limit 从默认 80% 宿主内存压到 4G（见 conf/be.conf 注释）
+      # 覆盖默认 be.conf：把 mem_limit 从默认 80% 宿主内存压到 2G（见 conf/be.conf 注释）
       - ./conf/be.conf:/opt/apache-doris/be/conf/be.conf
-    mem_limit: 4g
+    mem_limit: 2.5g

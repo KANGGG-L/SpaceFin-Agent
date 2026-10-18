@@ -1,17 +1,16 @@
 #!/usr/bin/env python
 """P1 · 数据底座接入配置（设计评审 R-EVT-01 / 阶段2 L0，面向数据工程师）。
 
-这一页回答三个问题：**接了哪些源、每一层数据新不新鲜、CDC 通不通**。
+这一页回答两个问题：**接了哪些源（登记）、CDC 通不通**。
 
-为什么把「数据源登记」和「链路健康度」放在同一页：登记表是静态声明（我们说接了什么），
-健康度是运行时事实（实际还在不在流）。两者分开看毫无意义——只有并排放，才能发现
+核心内容是 R-EVT-01 三项：数据源登记（业务库/日志/空间API）、CDC 开关、分类分级标签。
+登记表是静态声明（我们说接了什么），CDC 状态是运行时事实（实际在不在流）——并排放才能发现
 「登记里写着 CDC 开启，但 ODS 已经 40 分钟没有新事件」这种声明与现实的背离。
 
 数据来源全部是真实运行态，无任何 mock：
   - 登记表 ads_datasource_registry（本页自建，root DDL + INSERT IGNORE 预置真实在用的源）
-  - 分层健康度：直接对 ODS/DWD/DWS/ADS 各主表取 COUNT(*) 与 MAX(时间列)
   - CDC 状态：ods_cdc_position（binlog 位点）/ ods_cdc_consumer_offset（消费水位）/
-    ods_cdc_log（事件流水）/ ads_cdc_alert（断流告警）
+    ods_cdc_log（事件流水）
 
 时区口径（踩过的坑，必须遵守）：宿主是 UTC、MySQL 容器是 +08:00。
 所有「距今多久」一律用 SQL 侧 TIMESTAMPDIFF(..., NOW()) 计算，
@@ -36,6 +35,8 @@ SOURCE_TYPES = ["业务库", "爬虫", "空间API", "日志"]
 
 # 预置行 = 当前项目**真实在用**的数据源（对照 README「已接入组件」与运行中的容器/服务）。
 # 用 INSERT IGNORE 灌入：重启不覆盖运维在页面上做过的开关调整。
+# 登记面向评审展示：endpoint / service_unit 只写自然语言（接入方式、管控单元），
+# 不出现连接串、host:port、容器/服务单元名等内部信息——那些属于密管与部署细节。
 # 字段顺序：source_id, name, source_type, endpoint, cdc_enabled, data_level, owner, enabled,
 #          target_table, service_unit, remark
 PRESET_SOURCES = [
@@ -43,79 +44,79 @@ PRESET_SOURCES = [
         "biz_mysql",
         "信贷业务源库 spacefin",
         "业务库",
-        "mysql://127.0.0.1:3306/spacefin (customer/collateral/loan)",
+        "直连信贷业务主库，覆盖客户/押品/贷款三张业务表",
         1,
         "PII",
         "数据工程",
         1,
         None,
-        "spacefin-mysql (docker)",
+        "业务主库（Docker 部署）",
         "客户征信分/月收入/负债率属个人金融信息，仅供风险计算，导出须脱敏",
     ),
     (
         "binlog_cdc",
         "MySQL binlog 变更捕获",
         "日志",
-        "binlog(server_id=1002) -> spacefin_crawler.ods_cdc_log",
+        "订阅业务主库 binlog，实时捕获行级变更",
         1,
         "敏感",
         "数据工程",
         1,
         "ods_cdc_log",
-        "spacefin-cdc.service",
-        "贴源不解释：before/after 全量 JSON，内容等同源库，按源库同级管控",
+        "CDC 实时采集服务",
+        "变更前后的完整记录原样留存，内容等同源库，按源库同级管控",
     ),
     (
         "kafka_cdc_topic",
         "Kafka 事件总线 spacefin.cdc.log",
         "日志",
-        "kafka://127.0.0.1:9092/spacefin.cdc.log",
+        "CDC 事件经 Kafka 事件总线对外分发",
         1,
         "敏感",
         "数据工程",
         1,
         "ods_cdc_consumer_offset",
-        "spacefin-stream-producer.service",
-        "水位复用 ods_cdc_consumer_offset(consumer=kafka_stream_producer)，至少一次语义",
+        "流式事件生产服务",
+        "消费进度实时对账，至少一次送达，事件不丢失",
     ),
     (
         "anjuke_sale",
         "安居客二手房挂牌采集（广东 21 城）",
         "爬虫",
-        "orchestrator + Redis 队列 + 代理池 -> crawl_housing_sale",
+        "分布式批量采集：调度中心 + Redis 队列 + 代理池",
         0,
         "公开",
         "数据工程",
         1,
         "crawl_housing_sale",
-        "Airflow DAG guangdong_daily_crawl (00:30)",
-        "公开挂牌信息，按 url_key 跨日去重；批采集不走 CDC",
+        "每日 00:30 定时采集调度",
+        "公开挂牌信息，同一房源跨日自动去重；批量采集不适用实时链路",
     ),
     (
         "anjuke_rent",
         "安居客租房挂牌采集",
         "爬虫",
-        "宿主 Chrome 渲染 + 代理池 -> crawl_housing_rent",
+        "宿主浏览器渲染采集，经代理池出网",
         0,
         "公开",
         "数据工程",
         1,
         "crawl_housing_rent",
-        "spacefin-host-render.service",
-        "渲染依赖宿主 Chrome；容器 Chrome 已被反爬按指纹拦截",
+        "宿主浏览器渲染服务",
+        "页面需真实浏览器渲染；容器内渲染已被对方反爬识别，改走宿主",
     ),
     (
         "tencent_geocode",
         "腾讯位置服务 · 地理编码",
         "空间API",
-        "https://apis.map.qq.com/ws/geocoder/v1",
+        "腾讯位置服务地理编码开放接口",
         0,
         "内部",
         "算法/数据工程",
         1,
         "community_coords",
-        "geocode 异步回填（ETL 收尾任务）",
-        "调用配额有限，结果落 community_coords 复用；签名须用参数原始值拼串",
+        "ETL 收尾异步回填任务",
+        "调用配额有限，结果本地落库复用，避免重复消耗配额",
     ),
 ]
 
@@ -169,6 +170,15 @@ def _ensure_registry():
                 "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 PRESET_SOURCES,
             )
+            # 登记文案校正：endpoint/service_unit/remark 的口径在代码侧修订过（如去内部
+            # 信息、改自然语言）时，同步到已入库的旧行——INSERT IGNORE 不会碰已存在行，
+            # 而这三个字段页面不可改，代码即权威口径（cdc_enabled/enabled 仍以页面为准）。
+            cur.executemany(
+                f"UPDATE {REGISTRY_TABLE} SET endpoint=%s, service_unit=%s, remark=%s "
+                "WHERE source_id=%s AND (endpoint<>%s OR NOT (service_unit<=>%s) "
+                "OR NOT (remark<=>%s))",
+                [(s[3], s[9], s[10], s[0], s[3], s[9], s[10]) for s in PRESET_SOURCES],
+            )
             conn.commit()
             cur.close()
             _ready = True
@@ -176,90 +186,7 @@ def _ensure_registry():
             conn.close()
 
 
-# ---------------- 链路健康度 ----------------
-
-# 分层清单：(表名, 时间列, 中文说明)。表名/列名是本文件写死的白名单，
-# 不接受任何外部输入，故下面可以安全地做 f-string 拼 SQL（无注入面）。
-LAYERS = [
-    (
-        "ODS",
-        "贴源层 · 原始变更与采集落地",
-        [
-            ("ods_cdc_log", "cdc_ts", "业务库 binlog 变更事件（loan/collateral/customer）"),
-            ("ods_cdc_position", "updated_at", "binlog 位点持久化（断点续跑）"),
-            ("ods_cdc_consumer_offset", "updated_at", "下游消费水位（离线 + Kafka）"),
-        ],
-    ),
-    (
-        "DWD",
-        "明细层 · 清洗去重后的可用明细",
-        [
-            ("crawl_housing_sale", "etl_ts", "二手房挂牌明细（广东 21 城）"),
-            ("crawl_housing_rent", "etl_ts", "租房挂牌明细"),
-            ("community_coords", "updated_at", "小区坐标字典（地理编码回填）"),
-        ],
-    ),
-    (
-        "DWS",
-        "汇总层 · 主题宽表",
-        [
-            ("dws_risk_class", "etl_ts", "贷款级 LTV / 五级分类明细"),
-            ("dws_spatial_feature", "etl_ts", "空间特征（POI 密度 / 通勤 / 高危区）"),
-        ],
-    ),
-    (
-        "ADS",
-        "应用层 · 直接支撑页面与报送",
-        [
-            ("ads_risk_class", "etl_ts", "五级分类汇总（T+1 报送口径）"),
-            ("ads_1104_g11", "etl_ts", "1104 G11 报表"),
-            ("ads_ltv_alerts", "etl_ts", "离线 LTV 预警"),
-            ("ads_stream_ltv_alerts", "received_ts", "实时 LTV 预警（Flink 产出）"),
-            ("ads_spatial_zone", "etl_ts", "高危区画像"),
-            ("ads_alert_inbox", "received_ts", "预警推送收件箱"),
-            ("ads_cdc_alert", "alert_ts", "CDC 断流告警"),
-        ],
-    ),
-]
-
-# 每层的新鲜度阈值（秒）：(warn, bad)。
-# ODS 用 5min/30min——R-EVT-01 要求「CDC 秒级入 ODS」，30min 与 tools/cdc/main.py 的
-# LAG_ALERT_WINDOW_SECONDS 对齐，保证页面判定与后台告警是同一把尺子。
-# DWD/DWS/ADS 是 T+1 批（Airflow 00:30 触发），26h 才算晚点——留 2h 给跑批耗时，
-# 否则每天凌晨都会误报一次。
-LAYER_THRESHOLD = {
-    "ODS": (300, 1800),
-    "DWD": (26 * 3600, 48 * 3600),
-    "DWS": (26 * 3600, 48 * 3600),
-    "ADS": (26 * 3600, 48 * 3600),
-}
-
 CONSUMERS = ["risk_downstream", "kafka_stream_producer"]
-
-
-def _table_health(cur, table, ts_col):
-    """单表新鲜度：行数 + 最后更新时间 + 距今秒数（秒数在 SQL 侧算，见模块 docstring 的时区说明）。"""
-    cur.execute(
-        f"SELECT COUNT(*), MAX({ts_col}), TIMESTAMPDIFF(SECOND, MAX({ts_col}), NOW()) FROM {table}"
-    )
-    rows, last, age = cur.fetchone()
-    return int(rows), (str(last) if last else None), (int(age) if age is not None else None)
-
-
-def _grade(layer, rows, age):
-    """把「距今秒数」翻译成状态色。
-
-    空表单独给 empty 而不是红色：0 行是「还没产出」，不是「断流」，
-    两者的处置动作完全不同（前者查跑批有没有跑，后者查链路断在哪）。
-    """
-    if rows == 0 or age is None:
-        return "empty"
-    warn, bad = LAYER_THRESHOLD[layer]
-    if age >= bad:
-        return "bad"
-    if age >= warn:
-        return "warn"
-    return "ok"
 
 
 def _cdc_state(crawl_cur):
@@ -280,7 +207,7 @@ def _cdc_state(crawl_cur):
             "log_file": row[0],
             "log_pos": int(row[1]),
             "updated_at": str(row[2]),
-            "stale_seconds": int(row[3]),
+            "stale_seconds": (int(row[3]) if row[3] is not None else None),
         }
 
     # 消费水位：lag 用 id 差而非时间差——同秒多事件下时间戳会漏算（与 consumer.py 同口径）。
@@ -294,7 +221,7 @@ def _cdc_state(crawl_cur):
             "consumer": r[0],
             "last_id": int(r[1]),
             "updated_at": str(r[2]),
-            "idle_seconds": int(r[3]),
+            "idle_seconds": (int(r[3]) if r[3] is not None else None),
             "lag": max(0, max_id - int(r[1])),
         }
     # 按固定顺序输出已知消费者，未登记过水位的补一行占位，避免页面上「少了一个消费者」看不出来。
@@ -456,56 +383,7 @@ def get_datasource(ctx):
             ),
         }
 
-        # 分层健康度。
-        layers = []
-        for layer, desc, tables in LAYERS:
-            items = []
-            for table, ts_col, note in tables:
-                rows, last, age = _table_health(cur, table, ts_col)
-                status = _grade(layer, rows, age)
-                # ODS 静默降级：链路无积压时，「没有新事件」是业务库没写入，不是数据断了。
-                if layer == "ODS" and status in ("warn", "bad") and cdc["verdict"]["idle"]:
-                    status = "idle"
-                items.append(
-                    {
-                        "table": table,
-                        "ts_col": ts_col,
-                        "note": note,
-                        "rows": rows,
-                        "last_update": last,
-                        "age_seconds": age,
-                        "status": status,
-                    }
-                )
-            warn_s, bad_s = LAYER_THRESHOLD[layer]
-            layers.append(
-                {
-                    "layer": layer,
-                    "desc": desc,
-                    "warn_seconds": warn_s,
-                    "bad_seconds": bad_s,
-                    "tables": items,
-                    # 层级状态取最差的一张表：一层里只要有一张表烂了，这层就不能算健康。
-                    "status": _worst([i["status"] for i in items]),
-                }
-            )
-
         trend = _event_trend(cur)
-
-        cur.execute(
-            "SELECT id, alert_type, detail, alert_ts, TIMESTAMPDIFF(SECOND, alert_ts, NOW()) "
-            "FROM ads_cdc_alert ORDER BY id DESC LIMIT 10"
-        )
-        alerts = [
-            {
-                "id": r[0],
-                "alert_type": r[1],
-                "detail": r[2],
-                "alert_ts": str(r[3]),
-                "age_seconds": int(r[4]),
-            }
-            for r in cur.fetchall()
-        ]
 
         cur.execute("SELECT NOW()")
         server_now = str(cur.fetchone()[0])
@@ -515,41 +393,13 @@ def get_datasource(ctx):
             "sources": sources,
             "levels": DATA_LEVELS,
             "types": SOURCE_TYPES,
-            "layers": layers,
             "cdc": cdc,
             "trend": trend,
-            "alerts": alerts,
             "server_now": server_now,
             "can_edit": ctx.user["role"] == "admin",
-            # 必须在页面上说清楚：这里改的是登记状态，不是进程状态。
-            "switch_note": (
-                "cdc_enabled 是数据源的登记配置位，用于声明「该源是否纳入变更捕获」；"
-                "真实的采集/消费进程由 systemd 管控（spacefin-cdc / spacefin-cdc-consumer / "
-                "spacefin-stream-producer），本页不启停任何进程。改完开关后仍需在主机上操作对应 unit。"
-            ),
         }
     finally:
         conn.close()
-
-
-def _worst(statuses):
-    """层级状态 = 该层最差的一张表。
-
-    empty 不参与「拉低层级」：空表可能是本来就该空的（如 ads_cdc_alert 无告警 = 好事），
-    只有整层都空才说明这层没产出。判定顺序写死成 if 链而不是打分排序——
-    「空表算好还是算坏」是业务判断，排序表达不出来。
-    """
-    if not statuses:
-        return "empty"
-    if "bad" in statuses:
-        return "bad"
-    if "warn" in statuses:
-        return "warn"
-    if all(s == "empty" for s in statuses):
-        return "empty"
-    if "idle" in statuses:
-        return "idle"
-    return "ok"
 
 
 def toggle_datasource(ctx):
@@ -596,7 +446,11 @@ def toggle_datasource(ctx):
         finally:
             conn.close()
         if not exists:
-            return 404, {"error": f"数据源不存在：{source_id}"}
+            return 404, {
+                "error": f"数据源不存在：{source_id}",
+                "error_key": "数据源不存在：{source_id}",
+                "error_params": {"source_id": source_id},
+            }
 
     # 配置变更留痕，与导出/确认走同一张 ads_export_audit（TC-06 口径）。
     # ip 由框架经 RouteCtx 下发（R-UNW-02：变更须可追溯到来源）。
@@ -618,10 +472,10 @@ def toggle_datasource(ctx):
 
 PAGE = {
     "id": "datasource",
-    "label": "数据接入健康度",
-    # DE/管理员视角：风控与贷后不需要看底座配置（设计评审 P1 目标用户 = 数据工程师）。
-    "roles": {"admin", "da"},
-    "order": 10,
+    "label": "数据底座接入配置",
+    # 仅 admin 可配置数据底座（目标用户 = 数据工程师；历史 da 角色已移除）。
+    "roles": {"admin"},
+    "order": 20,
     "js": "p1_datasource.js",
     "routes": {
         ("GET", "/api/datasource"): get_datasource,

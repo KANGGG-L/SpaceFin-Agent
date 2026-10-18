@@ -3,8 +3,7 @@
 
 页面回答三个问题：
 1. **模型现在什么水平**——训练产物 output/avm/avm_report.json 的真实指标，
-   与 AC-07 目标（MAPE ≤ 10%）并排展示。当前 15.508% 未达标，页面直接标红：
-   作品集里把差距连同归因一起摆出来，比藏起来更有说服力。
+   与 AC-07 目标（MAPE ≤ 10%）并排展示，差距连同归因一起呈现，而非隐藏。
 2. **哪些估值不可信**——R-UNW-03：|AVM 估值 − true_market_price| / true_market_price > 30%
    标记异常，200 笔里 76 笔（38%）中招。列表 + 明细支持逐笔人工核查。
 3. **偏差从哪来**——按城市/五级分类拆异常率，并额外算「有符号偏差」（abs 偏差看不出
@@ -349,15 +348,16 @@ def _source_tier(dev, mv, book):
 
     DWS 没落 avm_hit/dwd_hit 标志位，只能反推——依据是风险引擎的口径约定：
     偏差仅在 AVM 命中时计算（非空 ⇒ AVM）；其余情况若估值与业务库基准价相等，
-    说明走到了最后一级兜底，否则是 DWD 行情。反推口径写在这里，页面上也注明。
+    说明走到了最后一级兜底，否则是行情参照。反推口径写在这里，页面上也注明。
+    返回值直接展示在界面上，用业务语言（不泄漏表名/字段名）。
     """
     if dev is not None:
         return "AVM 模型"
     if mv is None:
         return "无估值"
     if book is not None and abs(mv - book) < 0.01:
-        return "true_market_price 兜底"
-    return "DWD 行情"
+        return "登记价兜底"
+    return "行情参照"
 
 
 def _pct_bucket(dev):
@@ -819,7 +819,7 @@ def _attribution_payload(rows, report):
         "baseline": _baseline_self_check(seed),
         "city_contrast": _fallback_city_contrast(rows, report, seed),
         "attribution": _attribution_mix(abnormal_cnt),
-        # 页面上逐块标注数据来自实时库还是离线产物——作品集里这点必须诚实
+        # 页面上逐块标注数据来自实时库还是离线产物——这点必须诚实
         "sources": {
             "live": "spacefin_crawler.dws_risk_class × spacefin.collateral（每次请求现算）",
             "diag": "output/avm/bias_diag/rows.json",
@@ -852,6 +852,23 @@ def _attribution_payload(rows, report):
 
 
 # ---------------- 路由 handler ----------------
+
+
+def _alert_queue_total():
+    """人工核查队列落库笔数（ads_risk_valuation_alerts 全表 COUNT）。
+
+    与 /api/avm/alerts 的 total 同源，给概览 KPI 第 4/5 卡用。表还没建（首次部署
+    未跑采集管线）→ 0 降级，只读计数不让概览接口 500。
+    """
+    crawl = db.crawl_conn()
+    try:
+        cur = crawl.cursor()
+        cur.execute("SELECT COUNT(*) FROM ads_risk_valuation_alerts")
+        return int(cur.fetchone()[0])
+    except Exception:  # noqa: BLE001 —— 表缺失/权限等一律降级为 0，页面显示 0 而非报错
+        return 0
+    finally:
+        crawl.close()
 
 
 def overview(ctx):
@@ -909,6 +926,8 @@ def overview(ctx):
             "median_signed_dev": round(statistics.median(signed), 4) if signed else None,
             "source_tiers": tiers,
             "versions": versions,
+            # 人工核查队列落库笔数：KPI 行「认账 → 解释 → 行动」闭环的行动数。
+            "alert_total": _alert_queue_total(),
         },
         "dev_hist": dev_hist,
         "by_city": _dimension_stats(rows, lambda r: r["city"], "city"),
@@ -1055,9 +1074,9 @@ def attribution(ctx):
 
 PAGE = {
     "id": "avm",
-    "label": "估值精度看板",
-    "roles": {"admin", "risk", "da"},
-    "order": 70,
+    "label": "AVM 估值管理",
+    "roles": {"admin"},
+    "order": 30,
     "js": "p7_avm.js",
     "routes": {
         ("GET", "/api/avm"): overview,

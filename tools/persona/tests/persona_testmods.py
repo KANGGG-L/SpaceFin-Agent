@@ -30,8 +30,9 @@ def _load():
     import benchmark as _benchmark
     import critic as _critic
     import generator as _generator
+    import main as _main
 
-    return _benchmark, _generator, _critic
+    return _benchmark, _generator, _critic, _main
 
 
-benchmark, generator, critic = _load()
+benchmark, generator, critic, main = _load()

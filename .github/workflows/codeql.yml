@@ -38,3 +38,7 @@ jobs:
         uses: github/codeql-action/analyze@v3
         with:
           category: "/language:${{ matrix.language }}"
+          # 私有仓库未启用 code scanning（需 Advanced Security）时 SARIF 上传会直接报错
+          # 「Code scanning is not enabled」→ 整个 job 失败。先关闭上传，仅做静态分析；
+          # 若仓库转公开或在 Settings → Code security 开启 code scanning，可改回 true。
+          upload: false

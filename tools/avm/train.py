@@ -16,7 +16,7 @@
 明确退出（exit 3 + 「样本不足，降级人工」提示），不再因 train_test_split 崩溃。
 
 数据口径：
-    - 训练集：spacefin_crawler.crawl_housing_sale（sale DWD，44,369 行）
+    - 训练集：spacefin_crawler.crawl_housing_sale（sale DWD，行数随 DWD 库存变化，当前 r2 口径快照见 avm.md §2：36,652 行；44,369 为 r11 历史值，请勿写死）
     - 目标变量：log(unit_price_yuan)。选 log 单价而非总价的原因：
         1) 单价是"位置/品质"的直接度量，小区/邻域编码承载的正是单价水平；
            总价 = 单价 × 面积，面积是模型显式特征，让模型直接学"单价水平"

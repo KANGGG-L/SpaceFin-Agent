@@ -26,10 +26,25 @@ AVM 估值 / LTV 预警 / 1104 报送提供可 SQL 直查的分析底座。
 （沿用官方 quick-start：Linux 下单 FE 以 `FE_SERVERS=fe1:127.0.0.1:9010` 自举、
 只绑定 127.0.0.1，BE 以 `BE_ADDR=127.0.0.1:9050` 注册，跨容器互通无桥接 IP 问题）。
 
-| 服务 | 镜像 | 容器名 | 端口 | 数据目录 |
-|------|------|--------|------|---------|
-| MinIO | `minio/minio:latest` | `spacefin-minio` | 9000(S3 API) / 9001(控制台) | `/srv/spacefin-lake/minio/data` |
-| Doris FE | `apache/doris:fe-2.1.9` | `spacefin-doris-fe` | 8030(HTTP UI) / 9010(edit log) / 9020(rpc) / 9030(MySQL 协议) | `/srv/spacefin-lake/doris/fe-meta` |
+> **WSL2 + Docker Desktop 网络隔离（2026-08-23）**：`network_mode: host` 在 Docker Desktop +
+> WSL2 下只绑在 **Docker Desktop VM 的 127.0.0.1**，与 WSL VM 里跑的 airflow 容器不在同一网络，
+> 经 `host.docker.internal` 也连不到 9030/9000。因此 `guangdong_daily_crawl` 的 `lake_sync`
+> 任务改为**在 `spacefin-doris-fe` 容器内 `docker exec` 执行 `tools/lake/sync.py`**（doris-fe
+> 与 Doris/MinIO 同 host 网络，`127.0.0.1` 可达）。为此 `doris-fe` 服务挂载了仓库只读卷：
+> `${SPACEFIN_REPO_ROOT:-../..}:/opt/spacefin:ro`（注意相对路径用 `../..`，因为本 compose
+> 位于 `deploy/doris-minio/`）。doris-fe 容器内默认无 `pip`，`lake_sync` 命令已带
+> `python3 -m pip install -q pymysql requests` 自愈。
+>
+> **7.7G 内存争用预案（2026-08-23，事实 10）**：本机仅 7.7G，Airflow 的 `spatial_features`
+> 重计算任务与常驻 Doris（fe ~1.5G + be ~0.6G）争内存时会被 OOM kill（exit -9）。验证过的临时绕过：
+> `docker stop spacefin-doris-fe spacefin-doris-be` 释放 ~2.2G 给 `spatial_features` 跑完，再
+> `docker start spacefin-doris-fe`（fe healthy 后 9030 OPEN）供 `lake_sync`。这是**临时预案**，根因是
+> lake_sync 依赖的 Doris+MinIO 在本机未稳定置备（建议单独立项解决，不要当作常态固化）。
+
+| 服务     | 镜像                    | 容器名              | 端口                                                                    | 数据目录                              |
+| -------- | ----------------------- | ------------------- | ----------------------------------------------------------------------- | ------------------------------------- |
+| MinIO    | `minio/minio:latest`    | `spacefin-minio`    | 9000(S3 API) / 9001(控制台)                                             | `/srv/spacefin-lake/minio/data`       |
+| Doris FE | `apache/doris:fe-2.1.9` | `spacefin-doris-fe` | 8030(HTTP UI) / 9010(edit log) / 9020(rpc) / 9030(MySQL 协议)           | `/srv/spacefin-lake/doris/fe-meta`    |
 | Doris BE | `apache/doris:be-2.1.9` | `spacefin-doris-be` | 8040(BE HTTP/Stream Load) / 9050(heartbeat) / 9060(thrift) / 8060(brpc) | `/srv/spacefin-lake/doris/be-storage` |
 
 端口与既有组件零冲突（MySQL 3306、Redis 6379、Airflow 8080、CDC 无端口）。
@@ -39,11 +54,15 @@ AVM 估值 / LTV 预警 / 1104 报送提供可 SQL 直查的分析底座。
 宿主仅 15G 内存，逐容器设 `mem_limit` 上限，防止 Doris 默认配置（FE 堆 8G、
 BE mem_limit = 宿主 80%）把整机打 OOM：
 
-| 容器 | mem_limit | 关键配置 | 实测占用 |
-|------|-----------|---------|---------|
-| minio | 1g | 默认 | ~96 MB |
-| doris-fe | 3g | `conf/fe.conf` JVM `-Xmx2048m -Xms1024m`（镜像 JDK8 走 `JAVA_OPTS`） | ~1.1 GB |
-| doris-be | 5g | `conf/be.conf` `mem_limit = 4G` | ~1.3 GB |
+| 容器     | mem_limit | 关键配置                                                             | 实测占用 |
+| -------- | --------- | -------------------------------------------------------------------- | -------- |
+| minio    | 512m      | 默认                                                                 | ~96 MB   |
+| doris-fe | 2.5g      | `conf/fe.conf` JVM `-Xmx2048m -Xms1024m`（镜像 JDK8 走 `JAVA_OPTS`） | ~1.1 GB  |
+| doris-be | 2.5g      | `conf/be.conf` `mem_limit = 2G`                                      | ~1.3 GB  |
+
+> **环境注意（本开发机实际内存）**：本文档内存预算按「宿主 15G」设计，但当前开发机
+> 实际可用内存约 **7.7G**。上表即为 7.7G 机上应套用的收紧配置（汇总 mem_limit 约 5.5G、
+> 实测占用约 2.5G），**部署前先停掉采集栈等非必要容器**腾出内存，再 `up -d` 拉起 Doris/MinIO。
 
 数据目录放在仓库外 `/srv/spacefin-lake`（107G 可用磁盘），避免数据文件进入 git 扫描范围。
 
@@ -52,28 +71,30 @@ BE mem_limit = 宿主 80%）把整机打 OOM：
 `tools/lake/schema.py` 定义，Doris 单副本（`replication_num=1`）、DUPLICATE KEY 模型、
 按首列 HASH 分桶。共 **24 张表**：
 
-| 层 | 库 | 表 | 行数 | 说明 |
-|----|----|----|------|------|
-| ODS | ods | ods_loan / ods_collateral / ods_customer | 200×3 | spacefin 业务库贴源 |
-| ODS | ods | ods_housing_sale / ods_housing_rent | 44369 / 4244 | 房产库贴源（sale 与 MySQL 对账一致） |
-| ODS | ods | ods_dws_risk_class / ods_dws_spatial_feature | 200 / 17439 | 上游 DWS 结果贴源 |
-| ODS | ods | ods_community_coords / ods_cdc_log / ods_cdc_consumer_offset | 13255 / 2210 / 2 | 坐标、CDC 变更日志贴源 |
-| ODS | ods | ods_ads_risk_class / ods_ads_1104_g11 / ods_ads_alert_dispatch / ods_ads_alert_inbox / ods_ads_ltv_alerts / ods_ads_spatial_zone | 5 / 6 / 16 / 16 / 18 / 132 | 上游 ADS 结果贴源 |
-| ODS | ods | **ods_housing_sale_lake** | 23270 | 湖 Parquet（2026-08-04 快照）物化落仓 |
-| DWD | dwd | dwd_housing_sale | 44349 | 去重（url_key 取最新）+ 剔无效报价/面积 + 补算楼龄 |
-| DWD | dwd | dwd_loan_detail | 200 | loan+customer+collateral 三表宽表 |
-| DWS | dws | dws_city_price_stats | 21 | 城市级均价/中位价/挂牌量聚合 |
-| DWS | dws | dws_risk_class | 200 | 风险五级分类宽表（源自 ods） |
-| ADS | ads | ads_risk_class | 5 | 五级分类占比（stat_date=2026-08-05） |
-| ADS | ads | ads_city_avg_price | 21 | 城市均价应用表（供驾驶舱） |
-| ADS | ads | ads_1104_g11 | 6 | G11 报送口径汇总 |
+| 层  | 库  | 表                                                                                                                               | 行数                        | 说明                                                                                                                                        |
+| --- | --- | -------------------------------------------------------------------------------------------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| ODS | ods | ods_loan / ods_collateral / ods_customer                                                                                         | 5000×3                      | spacefin 业务库贴源                                                                                                                         |
+| ODS | ods | ods_housing_sale / ods_housing_rent                                                                                              | 59081 / 4244                | 房产库贴源（sale 与 MySQL 对账一致；sale 2026-08-31 取自 `output/guangdong/etl_report.json` 的 `stock.sale_total`，与实库 `COUNT(*)` 一致） |
+| ODS | ods | ods_dws_risk_class / ods_dws_spatial_feature                                                                                     | 5000 / 71297                | 上游 DWS 结果贴源                                                                                                                           |
+| ODS | ods | ods_community_coords / ods_cdc_log / ods_cdc_consumer_offset                                                                     | 13255 / 2210 / 2            | 坐标、CDC 变更日志贴源                                                                                                                      |
+| ODS | ods | ods_ads_risk_class / ods_ads_1104_g11 / ods_ads_alert_dispatch / ods_ads_alert_inbox / ods_ads_ltv_alerts / ods_ads_spatial_zone | 5 / 6 / 16 / 16 / 267 / 527 | 上游 ADS 结果贴源                                                                                                                           |
+| ODS | ods | **ods_housing_sale_lake**                                                                                                        | 23270                       | 湖 Parquet 物化落仓（2026-08-04 快照，保留；当前 stock.sale_total 已更新为 59081）                                                          |
+| DWD | dwd | dwd_housing_sale                                                                                                                 | 59030                       | 去重（url_key 取最新）+ 剔无效报价/面积 + 补算楼龄；2026-08-31 实库计 59081→59030（url_key 去重剔 51；无效报价/面积当前 0 条）              |
+| DWD | dwd | dwd_loan_detail                                                                                                                  | 5000                        | loan+customer+collateral 三表宽表                                                                                                           |
+| DWS | dws | dws_city_price_stats                                                                                                             | 21                          | 城市级均价/中位价/挂牌量聚合                                                                                                                |
+| DWS | dws | dws_risk_class                                                                                                                   | 5000                        | 风险五级分类宽表（源自 ods）                                                                                                                |
+| ADS | ads | ads_risk_class                                                                                                                   | 5                           | 五级分类占比（stat_date=2026-08-05）                                                                                                        |
+| ADS | ads | ads_city_avg_price                                                                                                               | 21                          | 城市均价应用表（供驾驶舱）                                                                                                                  |
+| ADS | ads | ads_1104_g11                                                                                                                     | 6                           | G11 报送口径汇总                                                                                                                            |
 
 **DWD 清洗口径**（`DWD_FILL_SQL`，重跑幂等）：
+
 - 同一 `url_key` 只保留 `last_seen_date` 最新一条（安居客同一房源多次更新）；
-- 剔除 `unit_price_yuan <= 0` 或 `area_sqm <= 0` 的无效报价（源数据 20 条）；
+- 剔除 `unit_price_yuan <= 0` 或 `area_sqm <= 0` 的无效报价（2026-08-05 快照实测 20 条，其中剔无效 20；2026-08-31 实库重新统计为 0 条）；
 - `building_age` 缺失时按 `first_seen_date.year - building_year` 推算。
 
 **类型映射注意点**（踩坑记录）：
+
 - Doris `VARCHAR(n)` 的 n 按**字节**计（UTF-8 中文 3 字节/字）。`dws_spatial_feature.entity_id`
   存「城市码|中文房源标题」，最长 94 字节，`VARCHAR(64)` 会整批过滤，需 `VARCHAR(128)`。
 - Doris 不允许 STRING 类型作为 key 列，key 列必须定长 VARCHAR。
@@ -107,6 +128,7 @@ SELECT COUNT(*) FROM s3(
   's3.path.style.access' = 'true'
 );
 ```
+> 上面示例的 `s3.access_key` / `s3.secret_key` 为**开发默认值**（与 `tools/lake/config.py` 保持一致），生产环境须改为经环境变量 / 密钥管理注入。
 
 物化落仓：`INSERT INTO ods.ods_housing_sale_lake SELECT ..., '<date>' AS snapshot_dt FROM s3(...)`。
 
@@ -114,14 +136,14 @@ SELECT COUNT(*) FROM s3(
 
 `tools/lake/sync.py` 内置对账，MISMATCH/CHECK 时退出码非 0。关键证据：
 
-| 验证项 | 结果 |
-|--------|------|
-| 16 张 ODS 表与 MySQL 行数对账 | 全部一致（如 ods_housing_sale 44369=44369、ods_cdc_log 2210=2210） |
-| 湖上联邦查询（MinIO Parquet 直查） | `sale/*.parquet` 23270 行 / 21 城，秒级返回 |
-| 湖→仓物化 | ods_housing_sale_lake 23270 行，与联邦查询一致 |
-| DWD 清洗 | dwd_housing_sale 44369 → 44349（剔 20 条无效报价） |
-| DWS 城市聚合 vs MySQL | sw/hui/mz/st/fs Top5 城市挂牌量与均价逐城一致 |
-| ADS 应用层 | ads_risk_class 5、ads_city_avg_price 21、ads_1104_g11 6 行 |
+| 验证项                             | 结果                                                                                                                     |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| 16 张 ODS 表与 MySQL 行数对账      | 全部一致（2026-08-05：如 ods_housing_sale 44369=44369；2026-08-31 更新为 59081=59081）                                   |
+| 湖上联邦查询（MinIO Parquet 直查） | `sale/*.parquet` 23270 行 / 21 城，秒级返回                                                                              |
+| 湖→仓物化                          | ods_housing_sale_lake 23270 行，与联邦查询一致                                                                           |
+| DWD 清洗                           | dwd_housing_sale 59081 → 59030（2026-08-31：url_key 去重剔 51，无效报价当前 0 条；历史 2026-08-05 为 44369→44349 剔 20） |
+| DWS 城市聚合 vs MySQL              | sw/hui/mz/st/fs Top5 城市挂牌量与均价逐城一致                                                                            |
+| ADS 应用层                         | ads_risk_class 5、ads_city_avg_price 21、ads_1104_g11 6 行                                                               |
 
 ## 6. 常用命令
 
@@ -140,8 +162,8 @@ python sync.py --verify-only
 
 - **单机单副本**：单 FE + 单 BE、`replication_num=1`，无高可用；容器重建需数据目录
   （`/srv/spacefin-lake`）完好，数据在宿主磁盘上而非容器内。
-- **内存受限**：FE 堆压到 2G、BE mem_limit 4G；当前 4.4 万行量级绰绰有余，若后续接入
-  真实亿级数据需扩容内存或改为多 BE 分布式。
+- **内存受限**：FE 堆压到 2G（compose `-Xmx2048m`）、BE mem_limit 2G；当前约 5.9 万行量级
+  绰绰有余（合计约 5.5G 内存即可跑起），若后续接入真实亿级数据需扩容内存或改为多 BE 分布式。
 - **全量同步**：sync.py 为 TRUNCATE + 全量重灌，适合开发/日批；未做增量 CDC 消费进 Doris。
 - **CDC 追加表对账口径**：ods_cdc_log 等由常驻服务持续追加，对账以**同步时刻**的行数为准
   （`expected` 参数），避免对账时点晚于同步时点造成的假 MISMATCH。

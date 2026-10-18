@@ -17,7 +17,7 @@ SpaceFin Agent · 合成信贷 seed 数据生成器（Sprint 0，广东对齐版
   第一次真正走到 AVM/DWD。
 
 **本版（对准 DWD 实有键 + 演示回填，2026-08-06）**：
-  在「DWD 实有键」策略基础上为 7 天演示剧本（docs/demo/script_7d.md）扩展：
+  在「DWD 实有键」策略基础上为 7 天演示剧本扩展：
   1. **城市加权**：广州占比提升到 ≈25%（1250/5000），其余 20 城按爬取分布铺满
      ——演示事件城市是广州，剧本的「广州 LTV 上穿」需要足够样本支撑；
      原「21 城轮序」在 n=200 时代每城均分，剧本演进后改为加权。
@@ -48,13 +48,31 @@ SpaceFin Agent · 合成信贷 seed 数据生成器（Sprint 0，广东对齐版
   python3 seed/generate_seed.py               # 默认每表 200 条（仅 SQL）
   python3 seed/generate_seed.py 5000          # 5000 笔，仅生成 SQL
   python3 seed/generate_seed.py 5000 --write-db   # 生成并直接灌入 MySQL 业务库
+  python3 seed/generate_seed.py --backfill-industry   # 存量库加行业列 + 确定性回填
+  python3 seed/generate_seed.py 5000 --avm    # 贷款额改用 AVM 估值（需 sklearn/joblib）
   或：make seed-gen
+
+贷款估值口径（重要）：
+  默认**不启用 AVM**，balance = 目标LTV × 抵押物挂牌价（true_market_price）。
+  加 --avm 才走 tools/risk 的 AVM 模型估值。两者贷款金额不同（AVM 版更接近
+  引擎重算 LTV 的口径），但默认口径不依赖运行环境，任何机器重跑都得到同一份
+  SQL——提交进仓库的种子必须是可复现的。见 _avm_env 与 main 里的口径横幅。
 """
 
 import os
 import random
 import sys
 from datetime import date, timedelta
+
+# 行业枚举与业务库连接参数的单点来源在 tools/risk/config（纯标准库模块）。
+# 种子生成与 --backfill-industry 回填必须共用同一份行业清单，否则「种子生成的
+# 行业」与「存量库回填的行业」会各说各话，故在模块级直接挂路径导入。
+_RISK_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools", "risk"
+)
+if _RISK_DIR not in sys.path:
+    sys.path.insert(0, _RISK_DIR)
+import config as _risk_config  # noqa: E402
 
 # 固定基准日：保证生成的放款日期不随"今天"漂移，输出可复现。
 REFERENCE_DATE = date(2024, 1, 1)
@@ -367,6 +385,51 @@ def _avm_env():
         return None, None, None
 
 
+# ---------------------------------------------------------------------------
+# 借款人行业分布（GB/T 4754 门类风格，枚举单点来源 tools/risk/config）
+# 权重模拟广东按揭客群的行业结构：制造业/批发零售/建筑业靠前，其余铺平。
+# 取值域与 tools/risk/config.INDUSTRY_CATEGORIES 完全一致（同一份枚举）。
+# ---------------------------------------------------------------------------
+INDUSTRY_WEIGHTS = {
+    "manufacturing": 22,
+    "wholesale_retail": 15,
+    "construction": 10,
+    "it_software": 8,
+    "business_services": 8,
+    "finance": 6,
+    "education": 6,
+    "transport": 5,
+    "accommodation_food": 5,
+    "real_estate": 4,
+    "health": 4,
+    "sci_tech": 3,
+    "culture": 2,
+    "public_admin": 1,
+    "agriculture": 1,
+}
+
+# 权重键必须与 config 行业枚举完全一致：漏配 → 某行业永远生成不出来；
+# 多配 → 生成出枚举外的行业码，P6 作用域校验会拒收。漂移在此立即暴露。
+assert set(INDUSTRY_WEIGHTS) == set(_risk_config.INDUSTRY_CATEGORIES)
+
+# 行业推导的 RNG 基数：与主种子（1/2/3）、户型特征种子（7 + i）都错开。
+_INDUSTRY_SEED_BASE = 20260901
+
+
+def industry_of_customer(customer_id: int) -> str:
+    """按 customer_id 确定性推导行业码（GB/T 4754 门类风格 slug）。
+
+    只看 ID 不看行序，同一个 ID 永远得到同一个行业：种子生成与
+    --backfill-industry 存量回填因此天然一致，后续单独新增的客户也能推导。
+    用独立 `random.Random(_INDUSTRY_SEED_BASE + customer_id)`，不触碰任何
+    主生成序列——往 gen_customers 里加行业这一列，不会扰动其它字段的取值。
+    """
+    codes = list(INDUSTRY_WEIGHTS)
+    weights = [INDUSTRY_WEIGHTS[c] for c in codes]
+    rng = random.Random(_INDUSTRY_SEED_BASE + int(customer_id))
+    return rng.choices(codes, weights=weights, k=1)[0]
+
+
 def gen_customers(n, seed=1):
     rng = random.Random(seed)
     rows = []
@@ -377,6 +440,8 @@ def gen_customers(n, seed=1):
                 "credit_score": int(round(rng.gauss(680, 60))),
                 "income_monthly": round(rng.uniform(4000, 25000), 2),
                 "debt_ratio": round(rng.uniform(0.1, 0.8), 2),
+                # 行业由独立 RNG 按 ID 派生（见 industry_of_customer），不走主 rng。
+                "industry": industry_of_customer(10000 + i),
             }
         )
     return rows
@@ -429,6 +494,20 @@ def gen_collaterals(n, seed=2):
         else:
             missing_pct = rng.uniform(0.75, 0.98)
 
+        # 户型/楼层/朝向/车位特征（AVM 推理所需，原未落库 → 现合成并持久化）。
+        # 用独立 Random 实例（与 i 绑定），不扰动主 rng 序列，保证 true_market_price
+        # / spatial_feat_missing_pct 等既有字段在重新生成 seed 时完全不变。
+        # floor 口径与 AVM 训练/推理一致（tools/avm/attribution.py）：floor_level=
+        # 层段（低/中/高 → 0/1/2），floor_total=总层数；爬虫「高层(共32层)」即此语义。
+        attr = random.Random(7 + i)
+        hall_n = attr.choice([1, 1, 2])
+        bath_n = attr.choice([1, 1, 2, 3])
+        bedrooms_n = max(1, min(5, round(area / 35) + attr.choice([-1, 0, 0, 1])))
+        floor_total_n = attr.randint(6, 33)
+        floor_level_n = attr.choice([0, 1, 2])  # 层段，对齐 AVM 训练特征空间
+        direction_n = attr.choice(["南", "北", "东", "西", "东南", "西南", "东北", "西北"])
+        parking_n = attr.choice([0, 1, 1])
+
         rows.append(
             {
                 "collateral_id": 20000 + i,
@@ -442,6 +521,13 @@ def gen_collaterals(n, seed=2):
                 "commute_min": rng.uniform(10, 90),
                 "is_high_risk_zone": 1 if rng.random() < 0.15 else 0,
                 "spatial_feat_missing_pct": round(missing_pct, 2),
+                "hall": hall_n,
+                "bath": bath_n,
+                "bedrooms": bedrooms_n,
+                "floor_level": floor_level_n,
+                "floor_total": floor_total_n,
+                "direction": direction_n,
+                "parking": parking_n,
             }
         )
     return rows
@@ -517,7 +603,7 @@ def gen_loans(customers, collaterals, seed=3, avm_env=None):
         # 放款额 = 余额 / 未还比例（70%-98%），即大部分贷款仍处于本金高位。
         loan_amount = round(balance / rng.uniform(0.70, 0.98), 2)
 
-        # 申报五级分类（仅主档展示口径，引擎按 LTV 实时重算覆盖，见 docs/demo/script_7d.md）
+        # 申报五级分类（仅主档展示口径，引擎按 LTV 实时重算覆盖，见 7 天演示剧本）
         if target_ltv <= 0.60:
             risk_class = "正常"
         elif target_ltv <= 0.75:
@@ -584,14 +670,19 @@ def _batched_insert(table, columns, value_rows, batch=50):
 def to_sql(customers, collaterals, loans):
     parts = [HEADER.format(n=len(loans)), ""]
 
-    cust_vals = [
-        "({customer_id}, {credit_score}, {income_monthly:.2f}, {debt_ratio:.2f})".format(**c)
-        for c in customers
-    ]
+    cust_vals = []
+    for c in customers:
+        row = dict(c)
+        row["industry"] = _sql_str(c["industry"])
+        cust_vals.append(
+            "({customer_id}, {credit_score}, {income_monthly:.2f}, {debt_ratio:.2f}, {industry})".format(
+                **row
+            )
+        )
     parts.append(
         _batched_insert(
             "customer",
-            ["customer_id", "credit_score", "income_monthly", "debt_ratio"],
+            ["customer_id", "credit_score", "income_monthly", "debt_ratio", "industry"],
             cust_vals,
         )
     )
@@ -600,8 +691,9 @@ def to_sql(customers, collaterals, loans):
         (
             "({collateral_id}, {addr}, {lat:.6f}, {lng:.6f}, {area:.6f}, {age:.6f}, "
             "{true_market_price:.2f}, {poi_density:.6f}, {commute_min:.6f}, "
-            "{is_high_risk_zone}, {spatial_feat_missing_pct:.2f})"
-        ).format(addr=_sql_str(c["property_addr"]), **c)
+            "{is_high_risk_zone}, {spatial_feat_missing_pct:.2f}, {hall}, {bath}, "
+            "{bedrooms}, {floor_level}, {floor_total}, {direction_sql}, {parking})"
+        ).format(addr=_sql_str(c["property_addr"]), direction_sql=_sql_str(c["direction"]), **c)
         for c in collaterals
     ]
     parts.append(
@@ -619,6 +711,13 @@ def to_sql(customers, collaterals, loans):
                 "commute_min",
                 "is_high_risk_zone",
                 "spatial_feat_missing_pct",
+                "hall",
+                "bath",
+                "bedrooms",
+                "floor_level",
+                "floor_total",
+                "direction",
+                "parking",
             ],
             coll_vals,
         )
@@ -656,12 +755,30 @@ def to_sql(customers, collaterals, loans):
 
 
 def main():
+    if "--backfill-industry" in sys.argv:
+        _backfill_industry()
+        return
     n = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 200
     write_db = "--write-db" in sys.argv
 
     customers = gen_customers(n, seed=1)
     collaterals = gen_collaterals(n, seed=2)
-    avm_env = _avm_env()
+    # 估值口径默认不启用 AVM：让「同一份代码」在任何机器上生成同一份 SQL。
+    # 曾经的写法是无条件 _avm_env()，于是 sklearn/joblib 装没装会直接决定 5000 行
+    # 贷款金额——同一个仓库、两个环境，02_seed.sql 完全对不上，且差异不报任何错。
+    # 需要 AVM 口径时显式加 --avm；--no-avm 保留为显式声明（与默认同义）。
+    use_avm = "--avm" in sys.argv and "--no-avm" not in sys.argv
+    avm_env = _avm_env() if use_avm else None
+    print(
+        "[贷款估值口径] "
+        + (
+            "AVM 模型估值（--avm，与风险引擎重算 LTV 同口径，依赖 sklearn/joblib）"
+            if avm_env and avm_env[2] is not None
+            else "抵押物挂牌价（默认，不依赖运行环境；--avm 可切换）"
+        )
+    )
+    if use_avm and not (avm_env and avm_env[2] is not None):
+        print("  [warn] 指定 --avm 但模型未加载成功，已回退挂牌价口径（见 _avm_env）")
     loans = gen_loans(customers, collaterals, seed=3, avm_env=avm_env)
 
     out_dir = os.path.dirname(os.path.abspath(__file__))
@@ -701,7 +818,7 @@ def main():
     print(f"  城市覆盖   : {len(city_counts)} 城 (gz={city_counts.get('gz', 0)})")
     print("  申报五级   : " + " / ".join(f"{rc} {dist[rc]}" for rc in RISK_CLASSES))
     print(
-        f"  AVM 估值   : {'启用(引擎重算 LTV=目标 LTV)' if avm_env[2] else '未启用(回退 true_market_price)'}"
+        f"  AVM 估值   : {'启用(引擎重算 LTV=目标 LTV)' if avm_env and avm_env[2] else '未启用(回退 true_market_price)'}"
     )
     print(f"  输出文件   : {out_path}")
     print(f"  --write-db : {'已灌入 MySQL spacefin 业务库' if write_db else '否'}")
@@ -730,17 +847,25 @@ def _load_to_mysql(customers, collaterals, loans):
             cur.execute(f"TRUNCATE TABLE {t}")
         cur.execute("SET FOREIGN_KEY_CHECKS=1")
         cur.executemany(
-            "INSERT INTO customer (customer_id, credit_score, income_monthly, debt_ratio) "
-            "VALUES (%s,%s,%s,%s)",
+            "INSERT INTO customer (customer_id, credit_score, income_monthly, debt_ratio, industry) "
+            "VALUES (%s,%s,%s,%s,%s)",
             [
-                (c["customer_id"], c["credit_score"], c["income_monthly"], c["debt_ratio"])
+                (
+                    c["customer_id"],
+                    c["credit_score"],
+                    c["income_monthly"],
+                    c["debt_ratio"],
+                    c["industry"],
+                )
                 for c in customers
             ],
         )
         cur.executemany(
             "INSERT INTO collateral (collateral_id, property_addr, lat, lng, area, age, "
-            " true_market_price, poi_density, commute_min, is_high_risk_zone, spatial_feat_missing_pct) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            " true_market_price, poi_density, commute_min, is_high_risk_zone, "
+            " spatial_feat_missing_pct, hall, bath, bedrooms, floor_level, floor_total, "
+            " direction, parking) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             [
                 (
                     c["collateral_id"],
@@ -754,6 +879,13 @@ def _load_to_mysql(customers, collaterals, loans):
                     c["commute_min"],
                     c["is_high_risk_zone"],
                     c["spatial_feat_missing_pct"],
+                    c["hall"],
+                    c["bath"],
+                    c["bedrooms"],
+                    c["floor_level"],
+                    c["floor_total"],
+                    c["direction"],
+                    c["parking"],
                 )
                 for c in collaterals
             ],
@@ -779,6 +911,52 @@ def _load_to_mysql(customers, collaterals, loans):
         cur.close()
     finally:
         conn.close()
+
+
+def _backfill_industry():
+    """对存量运行库回填 customer.industry（幂等，可重跑）。
+
+    为什么单独一个模式：现网库由旧版种子生成（无行业列），重新生成种子会丢掉
+    已落库的告警历史与处置状态（用户明确选择 ALTER + 回填，不重灌种子）。
+    回填口径与种子生成完全同源——逐行按 industry_of_customer(customer_id) 计算，
+    值与新版种子会生成的行业一致，未来 --write-db 全量重建也不会漂移。
+
+    DDL 需 root（同 store.ensure_ads_tables 的口径）；加列幂等先查
+    information_schema——MySQL 8 没有 ADD COLUMN IF NOT EXISTS，
+    与 tools/risk/store._ensure_columns 同一手法。
+    """
+    import pymysql  # 与 --write-db 一样，仅灌库/回填模式依赖 PyMySQL
+
+    env = _risk_config.load_env()
+    conn = pymysql.connect(**_risk_config.business_params(env), charset="utf8mb4")
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='customer' AND COLUMN_NAME='industry'"
+        )
+        if not cur.fetchall():
+            cur.execute(
+                "ALTER TABLE customer ADD COLUMN industry VARCHAR(32) NULL "
+                "COMMENT '借款人行业(合成, GB/T 4754 门类风格)'"
+            )
+        cur.execute("SELECT customer_id FROM customer")
+        ids = [int(r[0]) for r in cur.fetchall()]
+        cur.executemany(
+            "UPDATE customer SET industry=%s WHERE customer_id=%s",
+            [(industry_of_customer(cid), cid) for cid in ids],
+        )
+        conn.commit()
+        cur.execute(
+            "SELECT industry, COUNT(*) FROM customer GROUP BY industry ORDER BY COUNT(*) DESC"
+        )
+        dist = cur.fetchall()
+        cur.close()
+    finally:
+        conn.close()
+    print(f"[backfill-industry] customer 表已加 industry 列并回填 {len(ids)} 行：")
+    for ind, cnt in dist:
+        print(f"  {_risk_config.INDUSTRY_CATEGORIES.get(ind, ind)} : {cnt}")
 
 
 if __name__ == "__main__":

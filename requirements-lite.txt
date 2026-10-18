@@ -1,16 +1,15 @@
-# 轻量版依赖：仅用于跑通现有 PoC，跳过重型 Spark 技术栈（PySpark / Hadoop / Hive / Spark）
+# 轻量版依赖：跑通仓库的轻量组件，跳过重型 Spark 技术栈（PySpark / Hadoop / Hive / Spark）
 #
 # 覆盖：
-#   - docs/poc/* 两个 PoC（零依赖，其实无需安装）
-#   - tools/anjuke_gd_poc.py            （异步爬虫，需 aiohttp + beautifulsoup4）
-#   - tools/anjuke_gd_selenium_poc.py  （需 selenium + 本机 Chrome/Chromium）
-#   - 提交前/提交信息钩子（pre-commit）、阶段 5 计划的 pytest 单测
+#   - docs/poc/ 下的 PoC 脚本（core-prototype/mvp_prototype.py、data-foundation/avm_poc.py，零依赖，无需安装）
+#   - tools/anjuke_crawler/ 采集器与 experiments/ 反爬实验（需 selenium + 本机 Chrome/Chromium）
+#   - 提交前与提交信息钩子（pre-commit）、pytest 单测
 #
-# 安装（任选其一）：
+# 安装（目标 Python 3.10；仓库不随 git 分发 .venv，见 README / CONTRIBUTING）：
 #   pip install -r requirements-lite.txt
-#   或：conda activate spark && pip install -r requirements-lite.txt
 #
 # 注意：不含 PySpark；需要 L2/L3 真实 Sedona/PySpark 时请用 environment.yml。
+# 下列 aiohttp / beautifulsoup4 为早期爬虫遗留依赖，当前采集实现不依赖它们（详见 docs/tech/环境搭建.md）。
 
 aiohttp
 beautifulsoup4

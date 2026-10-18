@@ -42,6 +42,138 @@ def _p_stats(p):
     }
 
 
+# R2-12：校准证据区「具体案例 · 修正前 vs 修正后」的案例数量上限。
+# naive 与 calibrated 是同一 seed 同一索引对齐的逐客户数组，案例只是挑代表索引导出，
+# 不导出全量逐客户明细（N=1000 会膨胀报告体积，违背"只给代表案例"的意图）。
+MAX_EXAMPLE_CASES = 5
+
+
+def _select_example_indices(naive_dp, cal_dp, bench_dp, n):
+    """确定性选择算法（固定 seed 可复现）：5 条判据 → 去重 → 不足 3 条补足 → 上限 5。
+
+    delta[i] = calibrated_dp[i] - naive_dp[i]（数组同索引）。
+    规则（按序、去重、并列取最小 index）：
+      ① max-delta        : argmax_i delta[i]                              # 美化最重、修正最猛
+      ② min-delta        : argmin_i delta[i]                              # 美化影响最小的边界
+      ③ median-delta     : argmin_i |delta[i] - median(delta)|            # 典型修正幅度
+      ④ calib≈基准中位   : argmin_i |calibrated_dp[i] - median(bench_dp)| # 修正后最像"真实同类"
+      ⑤ naive≈naive中位 : argmin_i |naive_dp[i] - median(naive_dp)|      # 修正前最典型的被美化者
+    去重：按 ①→⑤ 顺序取；命中已选 index 时顺延取该判据次接近者（|判据差| 升序、再 index 升序）。
+    兜底：去重后不足 3 条（全退化场景）时按 index 升序补足 3 条。
+    """
+    delta = cal_dp - naive_dp
+    criteria = (
+        -delta,  # ① 最小化 -delta == 最大化 delta
+        delta,  # ② 最小化 delta
+        np.abs(delta - np.median(delta)),  # ③
+        np.abs(cal_dp - np.median(bench_dp)),  # ④
+        np.abs(naive_dp - np.median(naive_dp)),  # ⑤
+    )
+    idx = np.arange(n)
+    selected = []
+    for s in criteria:
+        order = np.lexsort((idx, s))  # 判据值升序、并列取最小 index
+        for i in order:
+            i = int(i)
+            if i not in selected:
+                selected.append(i)
+                break
+    if len(selected) < 3:  # 兜底：全退化场景按 index 升序补足 3 条
+        for i in range(n):
+            if i not in selected:
+                selected.append(i)
+            if len(selected) >= 3:
+                break
+    selected = selected[:MAX_EXAMPLE_CASES]
+    selected.sort(key=lambda i: -float(delta[i]))  # 输出按 delta 降序（修正幅度大的在前）
+    return selected
+
+
+# 校准案例卡的文案：单点来源是带 {name} 占位符的模板句（与 p6_policy.py 的
+# _threshold_basis 同一套路）。zh-CN 展示文案由 key.format(**params) 生成，
+# 同时把 key + params 原样下发，前端按同 key 注册 en/zh-HK 译文后 t(key, params)
+# 渲染。后端不接 lang：多语言展示由前端完成；中文原句保留给离线报告与后端消费方
+# （persona_report.json 是产物，且测试对它做文本断言）兜底，语义不漂移。
+_EXAMPLE_CASE_LABEL = "案例 {letter}"
+_EXAMPLE_REASON_UNDERSTATED = (
+    "修正前被“造”得过于乐观（月收入虚高、负债率偏低），违约率被低估（约 {naive}%）；"
+    "修正后回升到 {cal}%（{delta}pp），回到与真实同类客户一致的水平。"
+)
+_EXAMPLE_REASON_REGRESSED = (
+    "修正前违约率（约 {naive}%）已贴近甚至略高于真实同类（基准约 {bench}%）；"
+    "修正后回归中位（{cal}%，{delta}pp）。"
+)
+
+
+def _example_case_reason(default_prob_naive, default_prob_calibrated, benchmark_mean):
+    """返回 (中文原句, 模板 key, 参数 dict)。
+
+    delta=calibrated-naive 决定方向文案（被低估→回升 / 已偏高→回归中位）。
+    数字一律在 params 里格式化好，保证中英繁三语共用同一份数值字符串。
+    """
+    delta_pp = (default_prob_calibrated - default_prob_naive) * 100
+    if default_prob_calibrated >= default_prob_naive:
+        # 违约被低估、修正后回升
+        key = _EXAMPLE_REASON_UNDERSTATED
+        params = {
+            "naive": f"{default_prob_naive * 100:.1f}",
+            "cal": f"{default_prob_calibrated * 100:.1f}",
+            "delta": f"{delta_pp:+.1f}",
+        }
+    else:
+        # 修正前已贴近甚至略高于真实同类、修正后回归中位
+        key = _EXAMPLE_REASON_REGRESSED
+        params = {
+            "naive": f"{default_prob_naive * 100:.1f}",
+            "bench": f"{benchmark_mean * 100:.1f}",
+            "cal": f"{default_prob_calibrated * 100:.1f}",
+            "delta": f"{delta_pp:+.1f}",
+        }
+    return key.format(**params), key, params
+
+
+def _build_example_cases(bench, naive_personas, calibrated_personas, n):
+    """组装顶层 example_cases（n<3 时为 []，否则 3~5 条确定性代表案例）。
+
+    案例只用 label/index 标识（合成数据、非客户标识、不含 PII）；违约率一律由
+    benchmark.derive_default_prob 从特征重算（Personas.default_prob），不人为改动。
+    """
+    if n < 3:
+        return []
+    naive_dp = np.asarray(naive_personas.default_prob, dtype=float)
+    cal_dp = np.asarray(calibrated_personas.default_prob, dtype=float)
+    bench_dp = np.asarray(bench.default_prob, dtype=float)
+    benchmark_mean = float(bench_dp.mean())
+    cases = []
+    for pos, i in enumerate(_select_example_indices(naive_dp, cal_dp, bench_dp, n)):
+        nai = float(naive_dp[i])
+        cal = float(cal_dp[i])
+        reason, reason_key, reason_params = _example_case_reason(nai, cal, benchmark_mean)
+        label_params = {"letter": chr(ord("A") + pos)}
+        cases.append(
+            {
+                "label": _EXAMPLE_CASE_LABEL.format(**label_params),
+                "label_key": _EXAMPLE_CASE_LABEL,
+                "label_params": label_params,
+                "index": int(i),
+                "default_prob_naive": nai,
+                "default_prob_calibrated": cal,
+                "delta": cal - nai,
+                "features_naive": {
+                    k: float(naive_personas.features[k][i]) for k in benchmark.FEATURE_KEYS
+                },
+                "features_calibrated": {
+                    k: float(calibrated_personas.features[k][i]) for k in benchmark.FEATURE_KEYS
+                },
+                "benchmark_mean": benchmark_mean,
+                "reason": reason,
+                "reason_key": reason_key,
+                "reason_params": reason_params,
+            }
+        )
+    return cases
+
+
 def build_report(bench, naive_personas, calibrated_personas, trajectory, seed, n):
     naive_rep = critic.ks_report(bench, naive_personas)
     cal_rep = critic.ks_report(bench, calibrated_personas)
@@ -85,6 +217,9 @@ def build_report(bench, naive_personas, calibrated_personas, trajectory, seed, n
             "naive": _p_stats(naive_personas.default_prob),
             "calibrated": _p_stats(calibrated_personas.default_prob),
         },
+        # R2-12：校准证据区「具体案例 · 修正前 vs 修正后」——只给代表案例（3~5 条），
+        # 不出全量逐客户明细。案例仅用 label/index 标识（合成数据、不含 PII）。
+        "example_cases": _build_example_cases(bench, naive_personas, calibrated_personas, n),
         "uncalibrated_flag": {
             "semantics": "PRD R-OPT-01：输出若未经 Critic 严格模式对照真实基准校准，必须携带「未校准」标记，不得直接用于决策",
             "demo": {
@@ -94,7 +229,7 @@ def build_report(bench, naive_personas, calibrated_personas, trajectory, seed, n
         },
         "honest_declaration": {
             "benchmark_source": "基准 = 合成种子客户分布（spacefin.customer seed 数据 200 行），非真实普查/银行数据",
-            "real_benchmark": "真实普查/银行数据属商用部署前置（见仓库 README「作品集范围说明」）；本原型以合成种子作真实基准，演示完整机制（生成 → 批评 → 校准 → KS≤0.05）",
+            "real_benchmark": "真实普查/银行数据属商用部署前置（见仓库 README「项目性质与范围说明」）；本原型以合成种子作真实基准，演示完整机制（生成 → 批评 → 校准 → KS≤0.05）",
             "not_for_credit_decision": "合成行为仿真仅用于策略推演与产品设计验证，不作为任何个体授信决策依据",
         },
     }

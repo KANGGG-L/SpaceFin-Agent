@@ -2,21 +2,21 @@
 # manage.sh —— SpaceFin 资源管家：容器 + systemd 服务 + 内存水位监控
 #
 # 为什么做这个脚本：
-#   主机只有 15G/4 核，但 Doris/Kafka/Flink/前端/CDC 全常驻会吃紧；
+#   主机只有 15G/4 核，但 Doris/前端/CDC 全常驻会吃紧；
 #   之前服务用 nohup 裸跑，会话退出即丢，已发生前端掉线。
 #   本脚本把「容器 + 用户级 systemd 服务 + 内存」收口到一个命令，
-#   内存吃紧时可以一键停掉可降级层（t1，约释放 4.7G），避免 OOM。
+#   内存吃紧时可以一键停掉可降级层（t1，约释放 5.5G（cgroup 上限，实测约 2.5G）），避免 OOM。
 #
 # 三级运行策略：
 #   T0 恒驻   —— 链路命脉，停机=业务中断：MySQL/Redis/CDC/Consumer/Airflow/前端
-#   T1 可降级 —— 计算/队列，可整层停：Doris/Minio/Kafka/Flink/stream-producer（约 4.7G）
+#   T1 可降级 —— 分析/存储层，可整层停：Doris/Minio（精简版已移除 Kafka/Flink 实时层与 stream-producer）
 #   T2 按需   —— 任务型组件（爬虫/离线渲染），用完即弃，脚本不管理
 #
 # 组件清单：
 #   t0: 容器 spacefin-mysql spacefin-redis
 #       服务 spacefin-cdc spacefin-cdc-consumer airflow-scheduler airflow-webserver spacefin-frontend
-#   t1: 容器 spacefin-doris-fe spacefin-doris-be spacefin-minio spacefin-kafka flink-jobmanager flink-taskmanager
-#       服务 spacefin-stream-producer
+#   t1: 容器 spacefin-doris-fe spacefin-doris-be spacefin-minio
+#       （精简版已移除 spacefin-kafka / flink-* / spacefin-stream-producer 实时层）
 #
 # 依赖约定：所有容器 restart policy 已统一为 unless-stopped（宿主重启自动拉起）；
 #           服务均托管为用户级 systemd unit（enable + linger 常驻）。
@@ -33,7 +33,7 @@ WARN_AVAIL_MB=2560
 tier_containers() {
     case "$1" in
         t0) echo "spacefin-mysql spacefin-redis" ;;
-        t1) echo "spacefin-doris-fe spacefin-doris-be spacefin-minio spacefin-kafka flink-jobmanager flink-taskmanager" ;;
+        t1) echo "spacefin-doris-fe spacefin-doris-be spacefin-minio" ;;
         *) return 1 ;;
     esac
 }
@@ -42,7 +42,7 @@ tier_containers() {
 tier_services() {
     case "$1" in
         t0) echo "spacefin-cdc spacefin-cdc-consumer airflow-scheduler airflow-webserver spacefin-frontend" ;;
-        t1) echo "spacefin-stream-producer" ;;
+        t1) echo "" ;;
         *) return 1 ;;
     esac
 }
@@ -119,12 +119,12 @@ tier_action() {
     else
         echo "[manage] systemctl --user stop ${tier}: $services"
         # shellcheck disable=SC2086
-        systemctl --user stop $services
+        systemctl --user stop $services || true
         echo "[manage] docker stop ${tier}: $containers"
         # shellcheck disable=SC2086
         docker stop $containers
         if [ "$tier" = t1 ]; then
-            echo "[manage] t1 已停：释放约 4.7G 内存"
+            echo "[manage] t1 已停：释放约 5.5G（cgroup 上限，实测约 2.5G）内存"
         fi
     fi
 }
@@ -139,7 +139,7 @@ cmd_watch() {
         avail=$(mem_avail_mb)
         printf '[%s] available=%dMiB\n' "$(date '+%F %T')" "$avail"
         if (( avail < WARN_AVAIL_MB )); then
-            echo "[告警] 可用内存 < ${WARN_AVAIL_MB}MiB，建议执行: $0 stop t1（释放约 4.7G）" >&2
+            echo "[告警] 可用内存 < ${WARN_AVAIL_MB}MiB，建议执行: $0 stop t1（释放约 5.5G（cgroup 上限，实测约 2.5G）内存）" >&2
         fi
         sleep "$interval"
     done
@@ -151,8 +151,8 @@ cmd_watch() {
 cmd_health() {
     local host="${SPF_HOST:-127.0.0.1}"
     local port="${SPF_PORT:-8500}"
-    local user="${SPF_USER:-risk}"
-    local pass="${SPF_PASS:-risk20020309}"
+    local user="${SPF_USER:-admin}"
+    local pass="${SPF_PASS:-admin}"
     local base="http://${host}:${port}"
 
     # 1) 登录拿 token（HttpOnly cookie，curl 用 -c 存到临时文件）。
@@ -187,7 +187,7 @@ SpaceFin 资源管家 manage.sh 用法:
 
   manage.sh status                查看容器 + systemd 服务状态 + 内存水位
   manage.sh start <tier>          启动整个 tier（t0 恒驻层 / t1 可降级层，含前置检查）
-  manage.sh stop  <tier>          停止整个 tier（stop t1 一键释放约 4.7G）
+  manage.sh stop  <tier>          停止整个 tier（stop t1 一键释放约 5.5G（cgroup 上限，实测约 2.5G））
   manage.sh watch [seconds]       每 N 秒(默认30)监控内存，available<2.5G 时告警
   manage.sh health                探测前端 /api/metrics 健康度（需前端已启动+登录态 token）
   manage.sh help                  显示本帮助
@@ -195,13 +195,13 @@ SpaceFin 资源管家 manage.sh 用法:
 Tier 组件清单:
   t0 恒驻  : 容器 spacefin-mysql spacefin-redis
              服务 spacefin-cdc spacefin-cdc-consumer airflow-scheduler airflow-webserver spacefin-frontend
-  t1 可降级: 容器 spacefin-doris-fe spacefin-doris-be spacefin-minio spacefin-kafka flink-jobmanager flink-taskmanager
-             服务 spacefin-stream-producer
+  t1 可降级: 容器 spacefin-doris-fe spacefin-doris-be spacefin-minio
+             （精简版已移除 spacefin-kafka / flink-* / spacefin-stream-producer 实时层）
   t2 按需  : 爬虫/离线渲染等任务型组件，用完即弃，本脚本不管理
 
 示例:
   ./manage.sh status
-  ./manage.sh stop t1     # 内存吃紧时一键降级，释放 ~4.7G
+  ./manage.sh stop t1     # 内存吃紧时一键降级，释放 ~5.5G（cgroup 上限，实测约 2.5G）
   ./manage.sh start t1    # 需要跑批/实时链路时恢复
   ./manage.sh watch 30    # 挂监控，自动告警
 EOF

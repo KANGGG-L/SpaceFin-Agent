@@ -4,8 +4,8 @@
 为什么用 stdlib http.server 而不是 Streamlit/FastAPI：
 1. 全仓唯一 Python 环境（tools/orchestrator/.venv = conda spark 3.10）已含 PyMySQL，
    装 Web 框架会往共享 conda 环境塞十几到几十个包，污染其他流水线（spark/调度依赖同一环境）；
-2. 页面只有 3 张、数据 200 行级，ThreadingHTTPServer + 每请求短连接足够，
-   不值得引入进程常驻的 ASGI 服务 + 构建链；
+2. 页面与数据体量小（内置 3 页 + 6 个插件页，合计 9 页；数据量级有限），
+   ThreadingHTTPServer + 每请求短连接足够，不值得引入进程常驻的 ASGI 服务 + 构建链；
 3. RBAC/会话在服务端强制校验（每个 API 先查角色再放行），前端仅做展示，
    与「前端隐藏页面」是两层防御，后者只是 UX 裁剪。
 
@@ -13,19 +13,40 @@
     nohup tools/orchestrator/.venv/bin/python tools/frontend/app.py \
         --port 8500 >> output/frontend/app.log 2>&1 &
 
+开发热重载（前端大规模改版时启用；仅本机）：设置 SF_HOTRELOAD=1 后，
+前端每 1s 轮询版本令牌，静态文件（js/css/html）改动即自动刷新，
+Python（app.py / pages/*.py）改动由服务端原地重启重载：
+    SF_HOTRELOAD=1 nohup tools/orchestrator/.venv/bin/python tools/frontend/app.py \
+        --port 8500 >> output/frontend/app.log 2>&1 &
+
 默认监听 127.0.0.1（仅本机）；--host 0.0.0.0 可暴露局域网，README 有说明。
+生产环境不设置 SF_HOTRELOAD 即完全无热重载副作用。
 """
 
 import argparse
 import json
 import os
+import re
 import secrets
+import subprocess
 import sys
 import threading
 import time
 from datetime import date, datetime
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+class FrontendHTTPServer(ThreadingHTTPServer):
+    """提高连接队列：首屏会瞬间并发 20+ 请求（静态资源 + 全部插件页 js + api），
+    ThreadingHTTPServer 默认 request_queue_size=5，浏览器首开/服务重启瞬间
+    backlog 打满 → TCP 层丢连接 → 首发请求偶发 "Failed to fetch"（首拉竞态根因）。
+    加大队列让排队由内核吸收，而不是让浏览器侧靠重试兜底。"""
+
+    request_queue_size = 128
+    daemon_threads = True
+
+
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -33,6 +54,56 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db  # noqa: E402
 import pages as page_registry  # noqa: E402
 from data_classification import level_of, mask_value  # noqa: E402  # G2 导出分级脱敏
+
+# ---- 热重载（零依赖；仅 SF_HOTRELOAD=1 时启用 Python 自动重启）----
+# 原理：客户端每 1s 轮询 /api/reload-version 取版本令牌（启动时间戳:最大文件 mtime）。
+# · 静态文件（js/css/html）改动 → mtime 变 → 令牌变 → 浏览器刷新（服务端按磁盘直读，无需重启）。
+# · Python（app.py / pages/*.py）改动 → 该端点原地 os.execv 重启重载；重启后启动时间戳变 →
+#   令牌变 → 浏览器刷新命中新进程。生产环境不设置 SF_HOTRELOAD 即完全无副作用。
+BOOT_TS = time.time()
+
+
+def _hotreload_watch_paths():
+    base = os.path.dirname(os.path.abspath(__file__))
+    paths = [os.path.abspath(__file__)]
+    for root, _, files in os.walk(os.path.join(base, "pages")):
+        for f in files:
+            if f.endswith(".py"):
+                paths.append(os.path.join(root, f))
+    for root, _, files in os.walk(os.path.join(base, "static")):
+        for f in files:
+            if f.endswith((".js", ".css", ".html")):
+                paths.append(os.path.join(root, f))
+    return paths
+
+
+_HOTRELOAD_PATHS = _hotreload_watch_paths()
+
+
+def _hotreload_max_mtime():
+    m = 0.0
+    for p in _HOTRELOAD_PATHS:
+        try:
+            m = max(m, os.path.getmtime(p))
+        except OSError:
+            pass
+    return m
+
+
+def _hotreload_py_changed():
+    # 0.5s 去抖：避免编辑器「临时文件 + 改名」写一半就触发重启。
+    now = time.time()
+    for p in _HOTRELOAD_PATHS:
+        if not p.endswith(".py"):
+            continue
+        try:
+            mt = os.path.getmtime(p)
+        except OSError:
+            continue
+        if mt > BOOT_TS and (now - mt) > 0.5:
+            return True
+    return False
+
 
 # ---------------- 用户与 RBAC ----------------
 # 仅开发环境内置账号；凭据写死在代码里并标注 dev-only，上线前必须接统一认证。
@@ -43,10 +114,10 @@ from data_classification import level_of, mask_value  # noqa: E402  # G2 导出�
 # 随机生成强口令（持久化到 output/frontend/credentials.json，重启保持稳定，
 # 避免公网暴露固定弱凭据，也避免每次重启口令漂移）。
 
+# RBAC（精简版）：原 admin/risk/da 三角色权限完全一致，已融合为单一内部管理角色 `admin`；
+# 仅保留 `postloan`（贷后资产保全）作为受限角色——按 PRD §7.3 不可见 1104 报送页。
 _ROLE_LABELS = {
-    "admin": "系统管理员",
-    "risk": "风控策略经理",
-    "da": "数据分析师",
+    "admin": "内部管理(风控/分析/管理员)",
     "postloan": "贷后资产保全",
 }
 
@@ -71,15 +142,7 @@ def _resolve_passwords() -> dict:
     env_pwds = dict(_ENV_PWDS)
     # 2) dev 模式回退弱口令
     if os.environ.get("SF_DEV_MODE") == "1":
-        return {
-            r: {
-                "admin": "admin20020309",
-                "risk": "risk20020309",
-                "da": "da20020309",
-                "postloan": "postloan20020309",
-            }[r]
-            for r in _ROLE_LABELS
-        }
+        return {r: r for r in _ROLE_LABELS}  # dev-only 弱口令：密码 = 账号名
     # 3) 读持久化文件（若存在且含全部角色）
     loaded = {}
     if os.path.exists(_CRED_FILE):
@@ -120,32 +183,79 @@ if os.environ.get("SF_DEV_MODE") != "1" and not _ENV_PWDS:
         "设置 SF_PWD_<ROLE> 环境变量可固定口令。\n"
     )
 
-# 页面可见性：role -> pages。
+# 调试阶段取消 RBAC（仅本地开发）：
+#   - 由 SF_DEV_MODE=1（dev.sh / dev_server.py 已置 1）或显式 SF_NO_RBAC=1 触发；
+#   - 触发后免登录、所有请求按内部管理角色 admin 处理，跳过 401/403 与页面可见性限制；
+#   - 生产环境不设置这些变量，仍走完整鉴权，不影响线上安全。
+DEV_DISABLE_RBAC = os.environ.get("SF_DEV_MODE") == "1" or os.environ.get("SF_NO_RBAC") == "1"
+if DEV_DISABLE_RBAC:
+    sys.stderr.write(
+        "[frontend] ⚠️ RBAC 已关闭（调试模式）：免登录、所有操作视为 admin，仅限本地开发。\n"
+    )
+
+_DEV_USER = {
+    "user": "dev",
+    "role": "admin",
+    "label": "内部管理(风控/分析/管理员) [DEV-RBAC-OFF]",
+}
+
+# 页面可见性：role -> pages。admin 已融合原 risk/da，三者权限一致。
+# 导航顺序：order 即数据链路主线的全局序号（驾驶舱 → 数据底座 → 估值 → 空间风险
+# → 分类迁徙 → 触发预警 → 策略推演 → 出监管报表 → 全程留痕），分组只是视觉分区，
+# 归属见 pages/__init__.py 的 _PAGE_GROUP、组的先后见 static/app.js 的 renderNav。
 PAGE_VISIBILITY = {
     "admin": [
-        {"id": "dashboard", "label": "资产质量驾驶舱"},
-        {"id": "alerts", "label": "LTV 预警列表"},
-        {"id": "report", "label": "1104 报送"},
-    ],
-    "risk": [
-        {"id": "dashboard", "label": "资产质量驾驶舱"},
-        {"id": "alerts", "label": "LTV 预警列表"},
-        {"id": "report", "label": "1104 报送"},
-    ],
-    "da": [
-        {"id": "dashboard", "label": "资产质量驾驶舱"},
-        {"id": "alerts", "label": "LTV 预警列表"},
-        {"id": "report", "label": "1104 报送"},
+        {"id": "dashboard", "label": "资产质量驾驶舱", "group": "overview", "order": 10},
+        {"id": "alerts", "label": "LTV 爆仓预警列表", "group": "monitoring", "order": 60},
+        {"id": "report", "label": "1104 G11 资产质量报送", "group": "governance", "order": 80},
     ],
     "postloan": [
-        {"id": "dashboard", "label": "资产质量驾驶舱"},
-        {"id": "alerts", "label": "LTV 预警列表"},
+        {"id": "dashboard", "label": "资产质量驾驶舱", "group": "overview", "order": 10},
+        {"id": "alerts", "label": "LTV 爆仓预警列表", "group": "monitoring", "order": 60},
     ],
 }
 
-# 操作级权限：仅这些角色可用。
-CAN_CONFIRM = {"admin", "risk"}
-CAN_EXPORT = {"admin", "risk", "da"}
+# 操作级权限：仅内部管理角色 admin 可用（已融合原 risk/da）。
+CAN_CONFIRM = {"admin"}
+
+
+def _resolve_persona_python():
+    """挑一个能 import scipy 的解释器来跑 persona 脚本（结果缓存）。
+
+    persona_report.json 由 tools/persona/main.py 生成，依赖 scipy；服务进程自身
+    解释器（orchestrator venv）不带 scipy。优先用自身解释器（若已带 scipy），
+    否则在已知路径里找一个带 scipy 的（本项目测试解释器为 miniconda，见
+    project-windows-wsl-runtime 记忆）；找不到就退回自身解释器并让脚本报错——
+    那种情况下审计会记 failure，页面也看得到错误，不会静默。
+    """
+    if getattr(_resolve_persona_python, "_cached", None):
+        return _resolve_persona_python._cached
+
+    def _has_scipy(py):
+        try:
+            return (
+                subprocess.run(
+                    [py, "-c", "import scipy"], capture_output=True, timeout=20
+                ).returncode
+                == 0
+            )
+        except OSError:
+            return False
+
+    # 已知候选：自身解释器 → 环境变量指定的解释器（如宿主 conda，可在 .env/SF 环境中
+    # 配置 SPACEFIN_PERSONA_PYTHON）→ PATH 上的 python3。空值候选自动剔除。
+    candidates = [
+        c for c in (sys.executable, os.environ.get("SPACEFIN_PERSONA_PYTHON"), "python3") if c
+    ]
+    for cand in candidates:
+        if _has_scipy(cand):
+            _resolve_persona_python._cached = cand
+            return cand
+    _resolve_persona_python._cached = sys.executable
+    return sys.executable
+
+
+CAN_EXPORT = {"admin"}
 # 页面级可见性（PRD §7.3：贷后不可见报送页）。与 PAGE_VISIBILITY 联动，
 # 服务端必须再次校验，不能只依赖前端隐藏导航。
 CAN_VIEW_REPORT = {
@@ -168,16 +278,19 @@ MIME = {
     ".js": "application/javascript; charset=utf-8",
     ".css": "text/css; charset=utf-8",
     ".ico": "image/x-icon",
+    ".png": "image/png",
 }
 
 
 def _nav_for(role):
-    """导航 = 内置三页（dashboard/alerts/report）+ pages/ 插件页，按 order 排序。
+    """导航 = 内置三页（dashboard/alerts/report）+ pages/ 插件页，按 order 全局排序。
 
+    必须排在这里而不是让两组各自有序：拼接序会让内置页永远抢占所属组的首位，
+    order 就退化成「只在插件之间生效」，无法把预警排到识别类页面之后。
     内置页无 js 字段（渲染逻辑在 app.js 里），插件页带 js 供前端动态加载。
     """
     builtin = [dict(p, js=None) for p in PAGE_VISIBILITY.get(role, [])]
-    return builtin + page_registry.nav_for(role)
+    return sorted(builtin + page_registry.nav_for(role), key=lambda p: p["order"])
 
 
 class RouteCtx:
@@ -241,7 +354,12 @@ class SpaceFinApp(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def _send_json(self, code, data, extra=None):
-        self._send(code, _json(data), extra=extra)
+        # API 响应禁用浏览器缓存：资产/风险类数据必须每次请求都拿到最新库态，
+        # 否则页面看起来永远是"固定值"，与当前状态脱节。
+        merged = {"Cache-Control": "no-store"}
+        if extra:
+            merged.update(extra)
+        self._send(code, _json(data), extra=merged)
 
     def _send_error(self, code, msg):
         self._send_json(code, {"error": msg})
@@ -267,6 +385,8 @@ class SpaceFinApp(BaseHTTPRequestHandler):
 
     def _current_user(self):
         """返回 session 里的用户信息；过期/未登录返回 None。"""
+        if DEV_DISABLE_RBAC:
+            return _DEV_USER
         token = self._session_token()
         if not token:
             return None
@@ -280,7 +400,12 @@ class SpaceFinApp(BaseHTTPRequestHandler):
             return sess
 
     def _require(self, roles=None):
-        """RBAC 统一入口：未登录 401，角色不符 403。roles=None 表示仅需登录。"""
+        """RBAC 统一入口：未登录 401，角色不符 403。roles=None 表示仅需登录。
+
+        调试模式（DEV_DISABLE_RBAC）下直接放行，按 admin 处理，跳过全部鉴权。
+        """
+        if DEV_DISABLE_RBAC:
+            return _DEV_USER
         user = self._current_user()
         if not user:
             self._send_error(401, "未登录或会话已过期")
@@ -297,13 +422,16 @@ class SpaceFinApp(BaseHTTPRequestHandler):
         path = parsed.path
         if path == "/" or path == "/index.html":
             self._serve_static("index.html")
-        elif path in ("/style.css", "/app.js"):
+        elif path in ("/style.css", "/app.js", "/i18n.js"):
             self._serve_static(path.lstrip("/"))
         elif path.startswith("/pages/") and path.endswith(".js"):
             # 插件页面的前端模块；_serve_static 已做目录穿越防护。
             self._serve_static(path.lstrip("/"))
         elif path.startswith("/vendor/"):
             # 第三方前端库（本地自托管，如 Leaflet）；_serve_static 已做目录穿越防护。
+            self._serve_static(path.lstrip("/"))
+        elif path.startswith("/tiles/") and path.endswith(".png"):
+            # 本地预下载的离线瓦片（download_tiles.py 生成）；同源提供，浏览器无需外网。
             self._serve_static(path.lstrip("/"))
         elif path == "/api/me":
             self._handle_me()
@@ -339,6 +467,14 @@ class SpaceFinApp(BaseHTTPRequestHandler):
         elif path == "/healthz":
             # 匿名存活探针（供 Caddy / 外部探活），不暴露任何内部信息。
             self._send_json(200, {"status": "ok"})
+        elif path == "/api/reload-version":
+            # 热重载探针：返回版本令牌（启动时间戳:最大文件 mtime）。
+            # 仅当 SF_HOTRELOAD=1 且检测到 Python 文件改动时，原地重启本进程以重载模块。
+            if os.environ.get("SF_HOTRELOAD") == "1" and _hotreload_py_changed():
+                sys.stdout.flush()
+                sys.stderr.flush()
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            self._send_json(200, {"version": f"{BOOT_TS}:{_hotreload_max_mtime()}"})
         elif not self._dispatch_plugin("GET", parsed):
             self._send_error(404, "not found")
 
@@ -368,6 +504,21 @@ class SpaceFinApp(BaseHTTPRequestHandler):
             user = self._require(CAN_CONFIRM)
             if user:
                 self._handle_rebuild(user)
+        elif path == "/api/report/submit":
+            # 1104 报送确认（写状态）：与重建同权限，admin / risk。
+            user = self._require(CAN_CONFIRM)
+            if user:
+                self._handle_submit(user)
+        elif path == "/api/avm/attribution/refresh":
+            # 幂等重建 P7 归因产物体（写 output/avm/bias_diag/）——与确认同权限（admin）。
+            user = self._require(CAN_CONFIRM)
+            if user:
+                self._handle_avm_attr_refresh(user)
+        elif path == "/api/persona/refresh":
+            # 重建 P10 校准报告（写 output/persona/persona_report.json）——与确认同权限（admin）。
+            user = self._require(CAN_CONFIRM)
+            if user:
+                self._handle_persona_refresh(user)
         elif not self._dispatch_plugin("POST", parsed):
             self._send_error(404, "not found")
 
@@ -398,7 +549,24 @@ class SpaceFinApp(BaseHTTPRequestHandler):
             self._send_error(500, "internal error")
             return True
         code, data = result if isinstance(result, tuple) else (200, result)
-        self._send_json(code, data)
+        # 约定：若 data 是 dict 且带 "__html__" 键 → 按 HTML 直接响应（用于 iframe 嵌入页）。
+        # "__html__" 是保留键：handler 用它表达「本响应是整页 HTML」，其余一律按 JSON 回
+        # （与现状逐字一致，不影响既有 API）。
+        if isinstance(data, dict) and "__html__" in data:
+            html = data["__html__"]
+            if not isinstance(html, (str, bytes, bytearray)):
+                # 不校验的话 bytes(123) 会静默产出一串 NUL 字节，比报错更难查。
+                self._send_error(500, "internal error")
+                return True
+            body = html.encode("utf-8") if isinstance(html, str) else bytes(html)
+            self._send(
+                code,
+                body,
+                ctype="text/html; charset=utf-8",
+                extra={"Cache-Control": "no-store"},
+            )
+        else:
+            self._send_json(code, data)
         return True
 
     # ---------- 静态与页面 ----------
@@ -416,7 +584,13 @@ class SpaceFinApp(BaseHTTPRequestHandler):
             self._send_error(404, "not found")
             return
         ext = os.path.splitext(name)[1]
-        self._send(200, body, ctype=MIME.get(ext, "application/octet-stream"))
+        # no-store：保证热重载时浏览器总是按磁盘直读新文件，不被 HTTP 缓存挡住。
+        self._send(
+            200,
+            body,
+            ctype=MIME.get(ext, "application/octet-stream"),
+            extra={"Cache-Control": "no-store"},
+        )
 
     # ---------- API 实现 ----------
 
@@ -497,6 +671,7 @@ class SpaceFinApp(BaseHTTPRequestHandler):
             source=first("source"),
             city=first("city"),
             keyword=first("q"),
+            zone=first("zone"),
             page=max(1, page),
             page_size=20,
         )
@@ -569,7 +744,10 @@ class SpaceFinApp(BaseHTTPRequestHandler):
                     cell = "" if raw is None else str(raw)
                 row_vals.append(cell)
             lines.append(",".join(row_vals))
-        body = ("\n".join(lines) + "\n").encode("utf-8")
+        # 加 UTF-8 BOM（utf-8-sig 自动前置 \ufeff）：Excel 双击打开 .csv 时
+        # 不读 HTTP 头、按系统本地编码(GBK)解析，无 BOM 会把中文 UTF-8 字节
+        # 误读成 GBK 导致乱码；BOM 是让 Excel 正确识别 UTF-8 的标准做法。
+        body = ("\n".join(lines) + "\n").encode("utf-8-sig")
         # TC-06：导出留痕（who/role/when/what=筛选参数/result/ip），CSV 返回后写审计。
         db.write_audit(
             "export",
@@ -689,7 +867,10 @@ class SpaceFinApp(BaseHTTPRequestHandler):
                 "report_rebuild",
                 user["user"],
                 user["role"],
-                f"重建 G11 快照 {date} 参数不合法",
+                json.dumps(
+                    {"kind": "rebuild", "date": date, "result": "bad_date"},
+                    ensure_ascii=False,
+                ),
                 "failure",
                 ip,
             )
@@ -703,17 +884,294 @@ class SpaceFinApp(BaseHTTPRequestHandler):
                 "report_rebuild",
                 user["user"],
                 user["role"],
-                f"重建 G11 快照 {date} 失败: {exc}",
+                json.dumps(
+                    {
+                        "kind": "rebuild",
+                        "date": date,
+                        "result": "value_error",
+                        "reason": str(exc),
+                    },
+                    ensure_ascii=False,
+                ),
                 "failure",
                 ip,
             )
             self._send_error(400, str(exc))
             return
+        # 快照被重建 → 之前那次「已报送」对应的是旧快照，报送态必须回退 pending。
+        # 落点刻意放在 handler 而非 db.report_rebuild 内：rebuild 是单事务
+        # DELETE+INSERT，测试断言 conn.committed == 1，往里塞第二次写会破坏该契约。
+        db.reset_report_submission(result["date"])
         db.write_audit(
             "report_rebuild",
             user["user"],
             user["role"],
-            f"重建 G11 快照 {result['date']} {result['rebuilt_rows']} 行",
+            json.dumps(
+                {
+                    "kind": "rebuild",
+                    "date": result["date"],
+                    "result": "ok",
+                    "rows": result["rebuilt_rows"],
+                },
+                ensure_ascii=False,
+            ),
+            "success",
+            ip,
+        )
+        self._send_json(200, result)
+
+    def _handle_avm_attr_refresh(self, user):
+        """幂等重建 P7 归因产物体（写 output/avm/bias_diag/）。
+
+        触发 tools/avm/gen_attribution.py：AVM 模型指纹未变且产物齐全 → 跳过
+        （返回 regenerated=False）；否则依次重建 rows.json + attribution.json
+        （regenerated=True）。与确认/处置同权限（admin/risk）。同步执行——该脚本是
+        毫秒级 IO + 小规模计算，请求内跑完即可，无需引入异步任务。
+        """
+        body = self._parse_body()
+        force = bool((body.get("force") or "").strip())
+        ip = self.client_address[0]
+        script = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "avm",
+            "gen_attribution.py",
+        )
+        if not os.path.exists(script):
+            db.write_audit(
+                "avm_attr_refresh",
+                user["user"],
+                user["role"],
+                json.dumps(
+                    {
+                        "kind": "attr_refresh",
+                        "result": "missing_script",
+                        "path": script,
+                    },
+                    ensure_ascii=False,
+                ),
+                "failure",
+                ip,
+            )
+            self._send_error(500, f"缺少归因生成脚本: {script}")
+            return
+        cmd = [sys.executable, script]
+        if force:
+            cmd.append("--force")
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        except subprocess.SubprocessError as exc:
+            db.write_audit(
+                "avm_attr_refresh",
+                user["user"],
+                user["role"],
+                json.dumps(
+                    {
+                        "kind": "attr_refresh",
+                        "result": "exec_error",
+                        "error": str(exc),
+                    },
+                    ensure_ascii=False,
+                ),
+                "failure",
+                ip,
+            )
+            self._send_error(500, f"归因重建执行失败: {exc}")
+            return
+        out = (proc.stdout or "").strip()
+        err = (proc.stderr or "").strip()
+        # 取末条「有意义」行作摘要：跳过纯分隔符横幅与空行（同 _handle_persona_refresh）。
+        _sep = re.compile(r"^[\s=#*\-_·]+$")
+        meaningful = [
+            ln.strip()
+            for ln in (out or "").splitlines()
+            if ln.strip() and not _sep.match(ln.strip())
+        ]
+        ok = proc.returncode == 0
+        summary = (
+            meaningful[-1]
+            if meaningful
+            else (err.splitlines()[-1].strip() if err.strip() else f"exit={proc.returncode}")
+        )
+        db.write_audit(
+            "avm_attr_refresh",
+            user["user"],
+            user["role"],
+            json.dumps(
+                {
+                    "kind": "attr_refresh",
+                    "mode": "force" if force else "fingerprint",
+                    "result": "ok" if ok else "script_failed",
+                    "summary": summary,
+                    "stderr": err or None,
+                },
+                ensure_ascii=False,
+            ),
+            "success" if ok else "failure",
+            ip,
+        )
+        if not ok:
+            self._send_error(500, f"归因重建失败: {err or out or proc.returncode}")
+            return
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "force": force,
+                "regenerated": "完成" in out,
+                "detail": out,
+                "stderr": err,
+            },
+        )
+
+    def _handle_persona_refresh(self, user):
+        """重建 P10 校准报告（写 output/persona/persona_report.json）。
+
+        照 _handle_avm_attr_refresh 的骨架（同步 subprocess + 全量审计），
+        唯一区别是**显式选解释器**：persona 脚本依赖 scipy，而服务进程自身
+        解释器（orchestrator venv）不带 scipy——直接 subprocess(sys.executable)
+        会 ModuleNotFoundError。R2-6 前端按钮不能留下一个必 500 的入口，
+        故按 _resolve_persona_python() 选一个能 import scipy 的解释器。
+        """
+        _body = self._parse_body()  # 仅为让非法请求体在此抛错，内容本身不用
+        ip = self.client_address[0]
+        script = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "persona",
+            "main.py",
+        )
+        if not os.path.exists(script):
+            db.write_audit(
+                "persona_refresh",
+                user["user"],
+                user["role"],
+                json.dumps(
+                    {
+                        "kind": "persona_refresh",
+                        "result": "missing_script",
+                        "path": script,
+                    },
+                    ensure_ascii=False,
+                ),
+                "failure",
+                ip,
+            )
+            self._send_error(500, f"缺少校准报告生成脚本: {script}")
+            return
+        cmd = [_resolve_persona_python(), script]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        except subprocess.SubprocessError as exc:
+            db.write_audit(
+                "persona_refresh",
+                user["user"],
+                user["role"],
+                json.dumps(
+                    {
+                        "kind": "persona_refresh",
+                        "result": "exec_error",
+                        "error": str(exc),
+                    },
+                    ensure_ascii=False,
+                ),
+                "failure",
+                ip,
+            )
+            self._send_error(500, f"校准报告重建执行失败: {exc}")
+            return
+        out = (proc.stdout or "").strip()
+        err = (proc.stderr or "").strip()
+        # 取末条「有意义」行作摘要：跳过纯分隔符横幅（==== / #### / ****）与空行，
+        # 避免把脚本打印的装饰横幅存进审计明细（详情列原样展示会带 ==== 噪声）。
+        _sep = re.compile(r"^[\s=#*\-_·]+$")
+        meaningful = [
+            ln.strip()
+            for ln in (out or "").splitlines()
+            if ln.strip() and not _sep.match(ln.strip())
+        ]
+        ok = proc.returncode == 0
+        summary = (
+            meaningful[-1]
+            if meaningful
+            else (err.splitlines()[-1].strip() if err.strip() else f"exit={proc.returncode}")
+        )
+        db.write_audit(
+            "persona_refresh",
+            user["user"],
+            user["role"],
+            json.dumps(
+                {
+                    "kind": "persona_refresh",
+                    "result": "ok" if ok else "script_failed",
+                    "summary": summary,
+                    "stderr": err or None,
+                },
+                ensure_ascii=False,
+            ),
+            "success" if ok else "failure",
+            ip,
+        )
+        if not ok:
+            self._send_error(500, f"校准报告重建失败: {err or out or proc.returncode}")
+            return
+        self._send_json(200, {"ok": True, "detail": out, "stderr": err})
+
+    def _handle_submit(self, user):
+        """1104 报送确认：服务端自复算口径，一致才落「已报送」。
+
+        与重建同权限（admin/risk）。口径不一致 → 409（响应体带 error 字段，前端 api()
+        统一读 data.error 展示）且不写任何状态；成功/阻断均留审计（TC-06）。
+        """
+        body = self._parse_body()
+        date = (body.get("date") or "").strip() or None
+        ip = self.client_address[0]
+        if date and not _valid_stat_date(date):
+            db.write_audit(
+                "report_submit",
+                user["user"],
+                user["role"],
+                json.dumps(
+                    {"kind": "submit", "date": date, "result": "bad_date"},
+                    ensure_ascii=False,
+                ),
+                "failure",
+                ip,
+            )
+            self._send_error(400, "date 参数不合法，应为 YYYY-MM-DD")
+            return
+        result = db.report_submit(date, user["user"])
+        if not result.get("ok"):
+            db.write_audit(
+                "report_submit",
+                user["user"],
+                user["role"],
+                json.dumps(
+                    {
+                        "kind": "submit",
+                        "date": result.get("date"),
+                        "result": "blocked",
+                        "reason": result.get("reason"),
+                    },
+                    ensure_ascii=False,
+                ),
+                "blocked",
+                ip,
+            )
+            # 409 Conflict：状态冲突（快照与明细口径不一致 / 尚无快照）。
+            self._send_json(409, {**result, "error": result.get("reason") or "报送被阻断"})
+            return
+        db.write_audit(
+            "report_submit",
+            user["user"],
+            user["role"],
+            json.dumps(
+                {
+                    "kind": "submit",
+                    "date": result["date"],
+                    "result": "ok",
+                    "snapshot": True,
+                },
+                ensure_ascii=False,
+            ),
             "success",
             ip,
         )
@@ -737,6 +1195,16 @@ class SpaceFinApp(BaseHTTPRequestHandler):
         if result is None:
             self._send_error(404, "未找到该预警")
             return
+        # AC-06 口径：read 接口同样对 PII 列脱敏，与导出 CSV 一致，禁止明文回传客户标识。
+        # 仅 customer_id / customer_name 属 PII 级（与 data_classification.PII_COLUMNS 一致），
+        # 其余字段（loan_id / collateral_id / 地址等）保持明文以便业务核对。
+        # customer_id 位于 result["alert"] 子字典内（与 db.alert_detail 返回结构一致）。
+        alert = result.get("alert")
+        if isinstance(alert, dict):
+            for pii_col in ("customer_id", "customer_name"):
+                if alert.get(pii_col) is not None:
+                    lvl = level_of("customer", pii_col)
+                    alert[pii_col] = mask_value(lvl, alert[pii_col])
         self._send_json(200, result)
 
     # ---------------- G8 健康度 ----------------
@@ -818,10 +1286,26 @@ def main():
     args = ap.parse_args()
 
     # 启动时幂等建确认表/审计表，避免首个「确认」/「导出」请求报表不存在。
-    db.ensure_alert_confirm_table()
-    db.ensure_export_audit_table()
+    # 调试阶段（DEV_DISABLE_RBAC）若 MySQL 暂不可用（如 Docker 未起），仅告警不阻断启动，
+    # 便于前端 UI / RBAC / 热重载先跑起来；生产环境仍按原样失败退出。
+    if DEV_DISABLE_RBAC:
+        for _fn in (
+            db.ensure_alert_confirm_table,
+            db.ensure_export_audit_table,
+            db.ensure_report_submission_table,
+            db.ensure_spatial_schema,
+        ):
+            try:
+                _fn()
+            except Exception as exc:  # noqa: BLE001
+                sys.stderr.write(f"[frontend] WARN: 启动建表跳过（{_fn.__name__}）：{exc}\n")
+    else:
+        db.ensure_alert_confirm_table()
+        db.ensure_export_audit_table()
+        db.ensure_report_submission_table()
+        db.ensure_spatial_schema()  # 空间库表结构自愈：建表+补列+补索引（旧库 schema 漂移防护）
 
-    server = ThreadingHTTPServer((args.host, args.port), SpaceFinApp)
+    server = FrontendHTTPServer((args.host, args.port), SpaceFinApp)
     print(f"[frontend] S5 驾驶舱启动 http://{args.host}:{args.port} (dev-only 账号见 README)")
     try:
         server.serve_forever()

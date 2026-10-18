@@ -223,6 +223,7 @@ body.loading::before {
 
 .sidebar {
   width: 220px;
+  flex-shrink: 0;
   background: #111827;
   color: #e5e7eb;
   display: flex;
@@ -243,15 +244,18 @@ body.loading::before {
 .nav {
   flex: 1;
   margin-top: 14px;
+  /* .sidebar 是 100vh 的定高列且不带 overflow，导航一超出就只能被裁掉。
+     组名常显后中文刚好不滚，英文标签换行仍会超出，这条滚动是兜底不是可选项。 */
+  overflow-y: auto;
 }
 .nav a {
   display: block;
-  padding: 10px 12px;
+  padding: 9px 12px;
   border-radius: 8px;
   color: #d1d5db;
   text-decoration: none;
   cursor: pointer;
-  margin-bottom: 4px;
+  margin-bottom: 2px;
 }
 .nav a:hover {
   background: #1f2937;
@@ -260,6 +264,23 @@ body.loading::before {
 .nav a.active {
   background: var(--primary);
   color: #fff;
+}
+
+/* 导航分组：组名是常显的分区标签，不可点、不折叠。
+   组间距比折叠版紧：折叠时留出的富余高度现在被 5 个常显组名占用，
+   分组分隔感改由组名的小字号 + 字距承担，不再靠大 margin。 */
+.nav-group {
+  margin-top: 6px;
+}
+.nav-group:first-child {
+  margin-top: 0;
+}
+.nav-group-title {
+  padding: 0 12px 3px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: #6b7280;
 }
 
 .side-user {
@@ -272,8 +293,30 @@ body.loading::before {
   margin-bottom: 8px;
 }
 
+/* 语言切换器：登录卡与侧栏共用，深色侧栏 / 浅色登录卡都保持可读。 */
+.lang-switcher {
+  font-size: 12px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--border, #d1d5db);
+  background: var(--card, #fff);
+  color: var(--text, #1f2937);
+  cursor: pointer;
+  max-width: 132px;
+}
+.side-user .lang-switcher {
+  border-color: #374151;
+  background: #1f2937;
+  color: #d1d5db;
+  margin-bottom: 8px;
+}
+.login-lang .lang-switcher {
+  margin: 0 0 16px;
+}
+
 .main {
   flex: 1;
+  min-width: 0;
   padding: 24px 28px;
   max-width: 1280px;
 }
@@ -283,6 +326,58 @@ body.loading::before {
   margin-bottom: 18px;
 }
 
+/* ---------- 侧栏窄屏折叠（≤960px 抽屉式） ----------
+   宽屏行为完全不变：汉堡按钮与遮罩隐藏，.sidebar 仍是 sticky 常驻栏。 */
+.sidebar-toggle,
+.sidebar-mask {
+  display: none;
+}
+
+@media (max-width: 960px) {
+  .sidebar-toggle {
+    display: block;
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    z-index: 1002;
+    width: 38px;
+    height: 38px;
+    padding: 0;
+    font-size: 18px;
+    line-height: 1;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--card);
+    color: var(--text);
+    box-shadow: var(--shadow);
+    cursor: pointer;
+  }
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 1001;
+    transform: translateX(-100%);
+    transition: transform 0.22s ease;
+  }
+  .sidebar.open {
+    transform: translateX(0);
+    box-shadow: 4px 0 18px rgba(15, 23, 42, 0.22);
+  }
+  /* 抽屉打开时点击遮罩收起，避免只能盲点按钮 */
+  .sidebar-mask.open {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    background: rgba(15, 23, 42, 0.35);
+  }
+  /* 侧栏脱离文档流后主内容占满，顶部给汉堡按钮留位 */
+  .main {
+    padding: 60px 16px 24px;
+  }
+}
+
 /* ---------- 卡片 ---------- */
 .card {
   background: var(--card);
@@ -290,6 +385,8 @@ body.loading::before {
   border-radius: 12px;
   padding: 16px 18px;
   box-shadow: var(--shadow);
+  min-width: 0;
+  overflow-x: auto;
 }
 
 .card-title {
@@ -306,25 +403,25 @@ body.loading::before {
 
 .grid-2 {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
   margin-top: 16px;
 }
 
 @media (max-width: 960px) {
   .grid-2 {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
 .kpi-row {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 12px;
 }
 @media (max-width: 960px) {
   .kpi-row {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -421,17 +518,22 @@ body.loading::before {
   font-size: 14px;
   margin-bottom: 8px;
 }
+/* 标签列必须按最长标签自适应：en 的 Substandard 约 78px，中文两字标签仅 26px，
+ * 写死 60px 时英文标签会溢出轨道并被后半行的柱条背景盖住（显示成 Substand…）。
+ * 这里把整组行摊平成一张 grid（行用 display:contents），标签列取 max-content，
+ * 既能按语言自动撑开，又能保证各行柱条左端对齐；轨道用 minmax(0,1fr) 可在窄屏压到 0。 */
 .alert-bars {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 6px 8px;
+  font-size: 13px;
 }
 .alert-bar-row {
-  display: grid;
-  grid-template-columns: 60px 1fr 70px;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
+  display: contents;
+}
+.alert-bar-row > span:first-child {
+  white-space: nowrap;
 }
 .alert-bar-track {
   background: #eef2f7;
@@ -475,6 +577,15 @@ body.loading::before {
   font-size: 13px;
   min-width: 110px;
 }
+/* P6 拟议规则栏：控件下方常驻说明行使各列不等高，底部对齐会把下拉框错开十几个像素，
+   看着一行、点不到同一行；全局 .filter-bar 由驾驶舱 / 预警 / 报送共用，只在 #page-policy 覆写。 */
+#page-policy .filter-bar {
+  align-items: flex-start;
+}
+#page-policy #p6-scope-type,
+#page-policy #p6-enabled {
+  min-width: 130px;
+}
 .filter-total {
   align-self: center;
   color: var(--muted);
@@ -515,12 +626,125 @@ body.loading::before {
 .btn-danger {
   background: var(--danger);
 }
+.btn-primary {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
+}
+.btn-primary:hover {
+  background: var(--primary-dark);
+}
 .btn-sm {
   padding: 5px 10px;
   font-size: 12px;
 }
+.btn-xs {
+  padding: 2px 8px;
+  font-size: 11px;
+}
 .btn-block {
   width: 100%;
+}
+/* 禁用态必须一眼可见（D-07）：灰底 + 灰字 + not-allowed，且 hover 不再变色。 */
+.btn:disabled,
+.btn[disabled] {
+  background: #e5e7eb;
+  color: #9ca3af;
+  border-color: #e5e7eb;
+  cursor: not-allowed;
+}
+.btn:disabled:hover,
+.btn[disabled]:hover {
+  background: #e5e7eb;
+}
+
+/* ---------- 报送提示 / 导出脱敏提示 ---------- */
+.submit-hint,
+.export-hint {
+  align-self: center;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.submit-hint.ok {
+  color: var(--ok);
+}
+.submit-hint.bad {
+  color: var(--danger);
+}
+.export-hint {
+  padding: 2px 8px;
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  cursor: help;
+}
+
+/* ---------- 「更多」折叠（把低频/危险动作收进抽屉） ---------- */
+.more-actions {
+  position: relative;
+}
+.more-actions > summary {
+  list-style: none;
+  cursor: pointer;
+}
+.more-actions > summary::-webkit-details-marker {
+  display: none;
+}
+.more-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 20;
+  width: 260px;
+  padding: 10px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+}
+.more-note {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+  white-space: normal;
+}
+
+/* ---------- 处置建议区（左侧色条按 level 变色） ---------- */
+.sg-box {
+  padding: 10px 12px;
+  border-left: 3px solid var(--muted);
+  border-radius: 0 8px 8px 0;
+  background: #f8fafc;
+}
+.sg-box.sg-bad {
+  border-left-color: var(--danger);
+}
+.sg-box.sg-warn {
+  border-left-color: var(--warn);
+}
+.sg-box.sg-info {
+  border-left-color: var(--primary);
+}
+.sg-box.sg-ok {
+  border-left-color: var(--ok);
+}
+.sg-headline {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+.sg-actions {
+  margin: 6px 0 0;
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--text);
+}
+.sg-basis {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted);
 }
 
 /* ---------- 表格 ---------- */
@@ -544,6 +768,82 @@ body.loading::before {
 }
 .table tr:hover td {
   background: #fafbfd;
+}
+
+/* ---------- P6 情景沙盘分组表滑动面板 ----------
+   组数全量返回（不再截前 5）：行数可能超出面板高度，容器内滚动、表头吸顶——
+   滑到第 10 个城市也能对上「存量笔数 / 越红线增量」的列头。表头用 inset 阴影
+   画底边（border-collapse: collapse 下 sticky th 的 border 会随内容滚走）。 */
+.p6-group-scroll {
+  max-height: 280px;
+  overflow-y: auto;
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.p6-group-scroll .table {
+  margin-top: 0;
+}
+.p6-group-scroll .table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  box-shadow: inset 0 -1px 0 var(--border);
+}
+
+/* ---------- 数值单元格工具类 ----------
+   金额/比例/LTV/计数列右对齐 + 等宽数字，便于逐位对齐比大小。
+   刻意不改全局 .table td——文字列右对齐会破坏可读性，只给数值列显式加类。
+   .table th 有 text-align:left，需同等特异性覆盖，故写成 .table th.num。 */
+.num,
+.table td.num,
+.table th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 高危网格表：卡片仅约 552px 宽，坐标列较长易把末列「样本」挤出可视区
+   （被 overflow-x:auto 横向滚动藏起来）。改为固定列宽——首列城市、末列
+   样本锁宽，中间列（含较长的网格坐标）自动换行共享剩余宽度，样本列永远可见。 */
+#p5-hr-table {
+  table-layout: fixed;
+}
+#p5-hr-table th,
+#p5-hr-table td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+#p5-hr-table th:first-child,
+#p5-hr-table td:first-child {
+  width: 12%;
+}
+#p5-hr-table th:last-child,
+#p5-hr-table td:last-child {
+  width: 9%;
+}
+
+/* AVM 分城市 / 分五级分类表（dimTable）：同处窄卡片，末列「中位有符号偏差」
+   （-11.90% under / +18.70% over）易被横向溢出遮挡。固定列宽——首列（城市/
+   分类）与末列锁宽，异常率列含进度条需留足宽度，其余列共享剩余并允许表头换行。 */
+.dim-table {
+  table-layout: fixed;
+}
+.dim-table th,
+.dim-table td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.dim-table th:first-child,
+.dim-table td:first-child {
+  width: 16%;
+}
+.dim-table th:nth-child(4),
+.dim-table td:nth-child(4) {
+  width: 22%;
+}
+.dim-table th:last-child,
+.dim-table td:last-child {
+  width: 22%;
 }
 
 .badge {
@@ -570,6 +870,34 @@ body.loading::before {
   color: var(--muted);
 }
 
+/* ---------- 1104 报送五态徽标（颜色 + 图标 + 文字三重编码） ----------
+   五色互斥：待报送=灰 / 校验中=橙 / 口径一致=绿 / 已报送=蓝 / 已阻断=红。
+   consistent 与 submitted 曾同为绿色，只靠文字区分易误读，这里拆成绿/蓝。 */
+.badge .badge-icon {
+  margin-right: 4px;
+  font-weight: 400;
+}
+.badge.status-pending {
+  background: #e5e7eb;
+  color: #4b5563;
+}
+.badge.status-checking {
+  background: #fef3c7;
+  color: var(--warn);
+}
+.badge.status-consistent {
+  background: #dcfce7;
+  color: var(--ok);
+}
+.badge.status-submitted {
+  background: #dbeafe;
+  color: var(--primary-dark);
+}
+.badge.status-blocked {
+  background: #fee2e2;
+  color: var(--danger);
+}
+
 .pager {
   display: flex;
   align-items: center;
@@ -593,6 +921,62 @@ body.loading::before {
   color: var(--danger);
   margin: 4px 0;
 }
+/* 口径校验对照矩阵：行=分类×指标，列=双方取值与差值（快照−明细）。 */
+.mismatch-table {
+  margin-top: 8px;
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  /* 固定布局：5 列均分卡内宽度，杜绝 auto 布局在窄卡里把末列（差）挤出可视区。
+     th 允许换行 + 单元格 overflow-wrap，长表头/长数字都不撑破表格。 */
+  table-layout: fixed;
+}
+.mismatch-table th,
+.mismatch-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.mismatch-table th {
+  color: var(--muted);
+  font-weight: 500;
+  white-space: normal;
+}
+.mismatch-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.mismatch-diff {
+  color: var(--danger);
+  font-weight: 600;
+}
+.check-bad {
+  color: var(--danger);
+}
+.mismatch-hint {
+  margin-top: 10px;
+}
+/* 告警时间线顶部的「本次校验」条目（与落库历史区分）。 */
+.alert-now {
+  color: var(--danger);
+}
+.tag-now {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 11px;
+  line-height: 18px;
+  vertical-align: 1px;
+}
+.alert-ts {
+  margin-left: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
 .check-line {
   font-size: 13px;
   color: var(--muted);
@@ -604,16 +988,16 @@ body.loading::before {
   text-align: center;
 }
 
-/* ---------- 数据底座信任卡（爬取规模 / 新鲜度 / 解析成功率 / 模型版本） ---------- */
+/* ---------- 数据底座信任卡（数据规模 / 新鲜度 / 解析质量） ---------- */
 .trust-row {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
   margin-top: 12px;
 }
 @media (max-width: 960px) {
   .trust-row {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 .trust-card {
@@ -663,6 +1047,11 @@ body.loading::before {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.tf-fresh-line .trust-dim {
+  margin-left: auto;
+  color: var(--muted);
+  white-space: nowrap;
+}
 
 /* ---------- 预警处置闭环漏斗 ---------- */
 .funnel-card {
@@ -670,13 +1059,13 @@ body.loading::before {
 }
 .funnel-row {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
   align-items: end;
 }
 @media (max-width: 960px) {
   .funnel-row {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 .funnel-stage {
@@ -775,7 +1164,7 @@ body.loading::before {
 }
 .detail-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px 24px;
   padding: 14px 18px;
   border-left: 3px solid var(--primary);
@@ -783,7 +1172,7 @@ body.loading::before {
 }
 @media (max-width: 960px) {
   .detail-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 .detail-item {
@@ -803,17 +1192,239 @@ body.loading::before {
   word-break: break-all;
 }
 
-/* 全站演示模式标识（固定顶部，所有页面可见，与 dashboard 底部诚实声明互补） */
-.demo-banner {
-  position: sticky;
-  top: 0;
-  z-index: 30;
-  background: #fff7e6;
-  border-bottom: 1px solid #ffe0a3;
-  color: #9a6700;
+/* ---------------- 详情面板增强 ---------------- */
+.detail-panel {
+  padding: 16px 18px;
+}
+.detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #e5e7eb;
+}
+.detail-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.detail-lv-badge,
+.detail-risk-badge {
   font-size: 12px;
-  line-height: 1.5;
-  padding: 6px 18px;
-  text-align: center;
-  letter-spacing: 0.2px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.detail-loan-id {
+  font-size: 13px;
+  color: var(--muted);
+}
+.detail-header-right {
+  text-align: right;
+}
+.detail-ltv-big {
+  display: block;
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--text);
+}
+.detail-ltv-label {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+/* LTV 进度条 */
+.ltv-gauge-wrap {
+  margin-bottom: 14px;
+}
+.ltv-gauge-track {
+  position: relative;
+  height: 10px;
+  background: #e5e7eb;
+  border-radius: 5px;
+  overflow: visible;
+  margin-bottom: 4px;
+}
+.ltv-gauge-fill {
+  height: 100%;
+  border-radius: 5px;
+  transition: width 0.3s ease;
+}
+.ltv-threshold {
+  position: absolute;
+  top: -4px;
+  width: 2px;
+  height: 18px;
+  background: #6b7280;
+  border-radius: 1px;
+  z-index: 1;
+}
+.ltv-threshold:nth-child(2) { top: -3px; height: 16px; }
+.ltv-threshold:nth-child(3) { top: -5px; height: 20px; background: #b45309; }
+.ltv-threshold:nth-child(4) { top: -5px; height: 20px; background: #b91c1c; }
+.ltv-gauge-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--muted);
+}
+/* section */
+.detail-section {
+  margin-bottom: 14px;
+}
+.section-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 6px;
+}
+.detail-grid-2 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+@media (max-width: 960px) {
+  .detail-grid-2 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+/* 风险因子卡片 */
+.rf-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.rf-card {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-left: 3px solid #6b7280;
+  background: #f3f4f6;
+  border-radius: 0 4px 4px 0;
+  font-size: 12px;
+  color: #374151;
+}
+.rf-label {
+  white-space: nowrap;
+}
+/* 缺口 tag */
+.gap-tag {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  margin-left: 4px;
+  font-weight: 500;
+}
+.gap-tag-bad {
+  background: #fee2e2;
+  color: #991b1b;
+}
+.gap-tag-ok {
+  background: #dcfce7;
+  color: #166534;
+}
+/* 操作按钮行 */
+.detail-actions {
+  display: flex;
+  gap: 8px;
+  padding: 10px 0;
+  border-top: 1px solid #e5e7eb;
+  border-bottom: 1px solid #e5e7eb;
+  margin-bottom: 10px;
+}
+/* 导航行 */
+.detail-nav {
+  display: flex;
+  justify-content: space-between;
+  padding-top: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.detail-nav-btn {
+  font-size: 12px;
+}
+
+/* ---------- Tab 导航（P9 合规审计等插件页使用） ---------- */
+.tab-bar {
+  display: flex;
+  gap: 0;
+  border-bottom: 2px solid var(--border);
+  margin-bottom: 16px;
+}
+.tab-btn {
+  padding: 10px 20px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  transition: color 0.15s, border-color 0.15s;
+  font-family: inherit;
+}
+.tab-btn:hover {
+  color: var(--text);
+}
+.tab-btn.active {
+  color: var(--primary);
+  border-bottom-color: var(--primary);
+  font-weight: 600;
+}
+.tab-content {
+  min-height: 200px;
+}
+
+/* 日期输入本地化包装：text display 显示当前语言格式，type=date picker 透明覆盖其上提供日历弹窗。 */
+.date-input-wrap {
+  position: relative;
+  display: inline-block;
+  width: 118px;
+  height: 32px;
+  vertical-align: middle;
+}
+.date-input-wrap input.date-display {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  pointer-events: none;
+  z-index: 1;
+}
+.date-input-wrap input[type="date"] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+  z-index: 2;
+}
+.date-input-wrap input[type="date"]::-webkit-calendar-picker-indicator {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+.date-input-wrap input[type="date"]:focus + input.date-display,
+.date-input-wrap input[type="date"]:focus {
+  outline: none;
+}
+.date-input-wrap:has(input[type="date"]:focus) input.date-display {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
 }

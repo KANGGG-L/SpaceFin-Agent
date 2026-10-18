@@ -44,7 +44,7 @@ s.get("https://guangzhou.anjuke.com/sale/p1/", headers={"Referer": "https://guan
 
 先拿全局 Cookie 再带 Referer 请求列表页，才能绕过 `deny.do` 网关——基线的三种实现都是"冷启动直冲列表页"，所以必被拦。
 
-### 3.3 卡片级解析：lxml XPath + regex 兜底（`parser.py`）
+### 3.3 卡片级解析：lxml XPath + regex 兜底（`parse/numeric.py`；增强版见 `parse/advanced.py`）
 
 输出 17 字段数值化 schema（标题 / 小区 / 户型拆解 / 单价 / 坐标 / URL 等），可直接喂给 L3 AVM 估值。
 
@@ -56,7 +56,7 @@ s.get("https://guangzhou.anjuke.com/sale/p1/", headers={"Referer": "https://guan
 
 ### 4.1 突破网关，抓到真实数据（单页一次性成功）
 
-本机 IP 未被标记时，curl_cffi + Session 预热**成功抓回 1.29 MB 真实列表页**（广州在售房源），解析得 71 条独立房源。该页面已作为 fixture 收进包内（`tools/anjuke_crawler/tests/sample_listing.html`），离线可复现：
+本机 IP 未被标记时，curl_cffi + Session 预热**成功抓回真实列表页**，解析得 71 条独立房源。该页面已作为 fixture 收进包内（`tools/anjuke_crawler/tests/sample_listing.html`，实测为**上海浦东**二手房列表页，体积 1,634,637 字节 / 约 1.56 MB），离线可复现：
 
 ```
 $ python -m anjuke_crawler.main parse \
@@ -69,9 +69,9 @@ $ python -m anjuke_crawler.main parse \
 
 | 请求 | 结果 |
 |---|---|
-| 全新 session · 广州 `/sale/p1/` | ✅ 71 条（1.29 MB） |
-| 同一 session · 广州 `/sale/p2/` | ❌ 610 B deny 拦截页 |
-| 另一全新 session · 深圳 `/sale/p1/` | ❌ 610 B deny 拦截页 |
+| 全新 session · 列表页 `/sale/p1/` | ✅ 71 条（约 1.56 MB） |
+| 同一 session · 列表页 `/sale/p2/` | ❌ 610 B deny 拦截页 |
+| 另一全新 session · 另一城市 `/sale/p1/` | ❌ 610 B deny 拦截页 |
 
 即列表页闸门是 **IP 频次**：第 1 页放行，第 2 页起立刻封，跨 session 也封。curl_cffi + Session 预热扛不住——要可持续必须每请求换 IP（代理池）。
 
@@ -92,9 +92,9 @@ OFFLINE_COMMUNITY_DB = {
 
 `geocoder.geocode(community, full_text)` 单条 ~1.2 ms（dict O(1) 查找），规避在线 API 200ms/次延迟——为 L2 空间风控提供经纬度。
 
-### 4.5 代理池 + k8s 分布式（`proxy.py` + `k8s/`，接口已留）
+### 4.5 代理池 + k8s 分布式（`fetch/proxy.py` + `distributed/`，接口已留）
 
-`proxy.py` 封装代理池 REST 客户端（用坏即扔），`k8s/` 提供 Redis 队列 + asyncio 多 worker 的分布式骨架。这是把"每 IP 1 页"扩展为"可持续多页"的必经之路，但需常驻代理池 + k8s 集群方可运行，本 PoC 仅论证 + 留接口。
+`fetch/proxy.py` 封装代理池 REST 客户端（用坏即扔），`distributed/` 提供 Redis 队列 + asyncio 串行消费的分布式骨架（多副本靠 k8s 副本集横向扩展）。这是把"每 IP 1 页"扩展为"可持续多页"的必经之路，但需常驻代理池 + k8s 集群方可运行，本 PoC 仅论证 + 留接口。
 
 ## 5. 数据合规红线 与 生产化前提
 
@@ -110,7 +110,7 @@ OFFLINE_COMMUNITY_DB = {
 | 维度 | 决策 / 已知风险与缓解 |
 |---|---|
 | **合规** | **数据源锁定安居客**，采公开、非 PII 的房源数据。已知风险：安居客（58 系）TOS 限制批量抓取、绕过其反爬网关有法律风险——缓解：控制访问频次与规模、代理轮换、仅取公开展示信息、不碰个人数据，并在正式投产前做法律审查 |
-| **稳定性** | 每 IP 1 页 + 滑块验证码 → 可持续采集需代理池（`proxy.py`）+ k8s 分布式（`k8s/`），接口已留 |
+| **稳定性** | 每 IP 1 页 + 滑块验证码 → 可持续采集需代理池（`fetch/proxy.py`）+ k8s 分布式（`distributed/`），接口已留 |
 | **数据质量** | 挂牌价非成交价，含重复/虚假房源 → 入 AVM 前需去重、清洗、与成交样本校准 |
 
 **结论**：爬虫是本项目的公开数据获取通道，**安居客是锁定的房产数据源**，反爬攻克链路已验证可复现；生产化按上表落实代理轮换 + 分布式采集 + 清洗。本 PoC 留下的资产：
@@ -142,7 +142,10 @@ python -m anjuke_crawler.main crawl --city gz --pages 5 --out anjuke_crawler/out
 
 | 路径 | 用途 |
 |---|---|
-| `tools/anjuke_crawler/{fetcher,parser,geocoder,proxy,main}.py` | 采集包：抓取 / 解析 / 地理编码 / 代理 / CLI |
+| `tools/anjuke_crawler/fetch/{fetcher,proxy,stealth}.py` | 抓取层：curl_cffi / 代理客户端 / DrissionPage 隐身采集 |
+| `tools/anjuke_crawler/parse/{numeric,advanced,rent}.py` | 解析层：17/18 字段售卖 schema + 14 字段出租 schema |
+| `tools/anjuke_crawler/geocoder.py` | 地理编码：本地离线 O(1) 哈希 + DbGeocoder 库版 |
+| `tools/anjuke_crawler/main.py` | CLI：parse / parse-advanced / geocode / crawl / stealth |
 | `tools/anjuke_crawler/tests/sample_listing.html` | 随包真实列表页样本（离线解析 71 条） |
-| `tools/anjuke_crawler/k8s/` + `k8s_manifests/` | 分布式骨架（Redis 队列 + worker 副本集） |
+| `tools/anjuke_crawler/distributed/` + `k8s_manifests/` | 分布式骨架（Redis 队列 + worker 副本集） |
 | `docs/tech/components/anjuke-crawler.md` | 组件技术说明（为何引入 / 生产对应物 / 接入运行） |

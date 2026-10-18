@@ -31,13 +31,20 @@ DEFAULT_SNAPSHOT = os.path.join(
 
 @dataclass
 class Personas:
-    """一批合成画像：三特征数组 + 派生违约概率 + 生成元信息。"""
+    """一批合成画像：三特征数组 + 派生违约概率 + 生成元信息。
+
+    industry / city 是随基准行抽样带出的属性维度（非 KS 特征、不参与美化
+    变换与校准）：供逐客户明细表判读规则作用域是否命中（行业 / 城市 / 网格）。
+    旧快照没有这两列时为 None，下游按「无属性」处理。
+    """
 
     income_monthly: np.ndarray
     debt_ratio: np.ndarray
     credit_score: np.ndarray
     bias: str
     seed: int
+    industry: list = None
+    city: list = None
 
     @property
     def n(self):
@@ -78,6 +85,10 @@ def generate_personas(n=1000, bias="realistic", seed=DEFAULT_SEED, benchmark_dat
     income = bench.income_monthly[idx]
     debt = bench.debt_ratio[idx]
     score = bench.credit_score[idx]
+    # 属性维度跟着基准行走：同一行的画像在 naive/realistic/校准后都保持同一
+    # 行业与城市（它们不是被美化的特征），明细表才能按作用域分组判读影响。
+    industry = [bench.industry[i] for i in idx] if bench.industry is not None else None
+    city = [bench.city[i] for i in idx] if bench.city is not None else None
 
     if bias == "naive":
         income = income * NAIVE_INCOME_FACTOR
@@ -93,4 +104,6 @@ def generate_personas(n=1000, bias="realistic", seed=DEFAULT_SEED, benchmark_dat
         credit_score=score,
         bias=bias,
         seed=seed,
+        industry=industry,
+        city=city,
     )

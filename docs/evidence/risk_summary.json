@@ -1,0 +1,18 @@
+{
+  "generated_at": "2026-10-17T19:16:06+00:00",
+  "environment": {
+    "python": "3.14.4",
+    "platform": "Linux-6.18.54.1-microsoft-standard-WSL2-x86_64-with-glibc2.43"
+  },
+  "source": "output/risk/risk_report.json",
+  "reproducibility": "unavailable",
+  "metrics": {
+    "model_version": null,
+    "total_loans": null,
+    "alerts_count": null,
+    "low_confidence": null,
+    "over_red_line": null,
+    "abnormal_valuation": null
+  },
+  "note": "产物缺失：output/risk/risk_report.json 位于被 gitignore 的 output/ 目录、未随仓库分发；如需生成请本机跑 `python3 tools/risk/main.py --date <YYYY-MM-DD>`（需 MySQL + DWS 数据）。"
+}

@@ -19,7 +19,7 @@ CITY_MAP = config.CITY_MAP
 
 
 def enrich(loan, collateral, *, dwd=None, model=None):
-    """薄封装：固定 customer=None（当前风险口径不使用客户特征）。"""
+    """薄封装：固定 customer=None（行业规则等客户特征路径有独立用例覆盖）。"""
     return risk_engine.enrich_loan(loan, collateral, None, dwd or {}, CITY_MAP, avm_model=model)
 
 
@@ -361,6 +361,233 @@ def test_high_risk_zone_flag_passes_through(loan, collateral, patch_avm):
     collateral["is_high_risk_zone"] = 1
 
     assert enrich(loan, collateral, dwd={})["is_high_risk_zone"] == 1
+
+
+# ================================================================ P6 空间惩罚项（A1：城市粒度）
+#
+# 城市码由 collateral.property_addr 解析：默认 fixture 地址「广州市天河区…」→ 城市码 gz。
+# 与 p6_policy._impact 口径一致：A1 规则不带 ltv_cap，整城市有 LTV 的贷款全部命中并提级。
+
+
+def test_city_strict_policy_bumps_one_tier(loan, collateral):
+    r = risk_engine.enrich_loan(
+        loan,
+        collateral,
+        None,
+        {},
+        config.CITY_MAP,
+        policy_map={("city", "gz"): {"action": "strict"}},
+    )
+    assert r["risk_class"] == "关注"  # 正常 -> 关注
+
+
+def test_city_strict_policy_bumps_further_when_already_关注(loan, collateral):
+    loan2 = dict(loan, balance=8_000_000.0)  # LTV 0.8 -> 次级
+    r = risk_engine.enrich_loan(
+        loan2,
+        collateral,
+        None,
+        {},
+        config.CITY_MAP,
+        policy_map={("city", "gz"): {"action": "strict"}},
+    )
+    assert r["risk_class"] == "可疑"  # 次级 -> 可疑
+
+
+def test_city_notice_policy_floors_at_关注(loan, collateral):
+    r = risk_engine.enrich_loan(
+        loan,
+        collateral,
+        None,
+        {},
+        config.CITY_MAP,
+        policy_map={("city", "gz"): {"action": "notice"}},
+    )
+    assert r["risk_class"] == "关注"  # 正常 -> 关注（最轻）
+
+
+def test_city_notice_policy_does_not_lower_existing_次级(loan, collateral):
+    loan2 = dict(loan, balance=9_000_000.0)  # LTV 0.9 -> 可疑
+    r = risk_engine.enrich_loan(
+        loan2,
+        collateral,
+        None,
+        {},
+        config.CITY_MAP,
+        policy_map={("city", "gz"): {"action": "notice"}},
+    )
+    assert r["risk_class"] == "可疑"  # 不被 notice 下压
+
+
+def test_other_city_policy_does_not_affect_loan(loan, collateral):
+    r = risk_engine.enrich_loan(
+        loan,
+        collateral,
+        None,
+        {},
+        config.CITY_MAP,
+        policy_map={("city", "sh"): {"action": "strict"}},
+    )
+    assert r["risk_class"] == "正常"  # 非本城规则不生效
+
+
+def test_zone_policy_ignored_when_center_missing(loan, collateral):
+    # A2：zone 规则 center=None -> 无坐标可判，跳过（与 A1 行为一致：不动分类）
+    r = risk_engine.enrich_loan(
+        loan,
+        collateral,
+        None,
+        {},
+        config.CITY_MAP,
+        policy_map={("zone", "z1"): {"action": "strict", "ltv_cap": None, "center": None}},
+    )
+    assert r["risk_class"] == "正常"
+    assert r["is_rejected"] is False
+
+
+def test_no_policy_map_leaves_class_unchanged(loan, collateral):
+    r = risk_engine.enrich_loan(loan, collateral, None, {}, config.CITY_MAP)
+    assert r["risk_class"] == "正常"
+
+
+# ================================================================ P6 空间惩罚项（A2：zone + ltv_cap + reject）
+#
+# 抵押物 fixture 默认 lat=23.13 lng=113.32，地址「广州市…」→ 城市码 gz，LTV 0.5（正常档）。
+
+
+def test_zone_rule_applies_within_5km(loan, collateral):
+    # 同坐标 zone 中心 -> haversine=0 <= 5km 命中
+    pm = {("zone", "z9"): {"action": "strict", "ltv_cap": None, "center": (23.13, 113.32)}}
+    r = risk_engine.enrich_loan(loan, collateral, None, {}, config.CITY_MAP, policy_map=pm)
+    assert r["risk_class"] == "关注"  # 正常 -> 关注
+
+
+def test_zone_rule_ignored_beyond_5km(loan, collateral):
+    pm = {
+        ("zone", "z9"): {"action": "strict", "ltv_cap": None, "center": (40.0, 116.0)}
+    }  # 北京，远超 5km
+    r = risk_engine.enrich_loan(loan, collateral, None, {}, config.CITY_MAP, policy_map=pm)
+    assert r["risk_class"] == "正常"
+
+
+def test_ltv_cap_only_hits_over_cap(loan, collateral):
+    # 默认 LTV 0.5；cap=0.6 时不命中，cap=0.4 时命中
+    low = {("city", "gz"): {"action": "strict", "ltv_cap": 0.6, "center": None}}
+    high = {("city", "gz"): {"action": "strict", "ltv_cap": 0.4, "center": None}}
+    assert (
+        risk_engine.enrich_loan(loan, collateral, None, {}, config.CITY_MAP, policy_map=low)[
+            "risk_class"
+        ]
+        == "正常"
+    )
+    assert (
+        risk_engine.enrich_loan(loan, collateral, None, {}, config.CITY_MAP, policy_map=high)[
+            "risk_class"
+        ]
+        == "关注"
+    )
+
+
+def test_reject_sets_flag_not_class(loan, collateral):
+    pm = {("city", "gz"): {"action": "reject", "ltv_cap": 0.4, "center": None}}  # LTV0.5>0.4 命中
+    r = risk_engine.enrich_loan(loan, collateral, None, {}, config.CITY_MAP, policy_map=pm)
+    assert r["is_rejected"] is True
+    assert r["risk_class"] == "正常"  # 拒贷不改分类
+
+
+def test_reject_not_set_when_below_cap(loan, collateral):
+    pm = {
+        ("city", "gz"): {"action": "reject", "ltv_cap": 0.6, "center": None}
+    }  # LTV0.5<=0.6 不命中
+    r = risk_engine.enrich_loan(loan, collateral, None, {}, config.CITY_MAP, policy_map=pm)
+    assert r["is_rejected"] is False
+
+
+def test_zone_and_city_rules_can_stack(loan, collateral):
+    pm = {
+        ("city", "gz"): {"action": "notice", "ltv_cap": None, "center": None},
+        ("zone", "z9"): {"action": "strict", "ltv_cap": None, "center": (23.13, 113.32)},
+    }
+    r = risk_engine.enrich_loan(loan, collateral, None, {}, config.CITY_MAP, policy_map=pm)
+    assert r["risk_class"] == "次级"  # 正常->关注(notice) 再 ->次级(strict)
+
+
+# ================================================================ P6 空间惩罚项（行业粒度，US-01）
+#
+# 行业规则键 ("industry", 行业码)，贷款经 customer["industry"] 命中；
+# 默认 LTV 0.5（正常档），与 city/zone 规则同一套 _apply_policy_rule 语义。
+
+
+def test_industry_rule_promotes_matching_customer(loan, collateral):
+    pm = {("industry", "manufacturing"): {"action": "strict", "ltv_cap": None, "center": None}}
+    r = risk_engine.enrich_loan(
+        loan, collateral, {"industry": "manufacturing"}, {}, config.CITY_MAP, policy_map=pm
+    )
+    assert r["risk_class"] == "关注"  # 正常 -> 关注
+
+
+def test_industry_rule_skips_other_industry(loan, collateral):
+    pm = {("industry", "manufacturing"): {"action": "strict", "ltv_cap": None, "center": None}}
+    r = risk_engine.enrich_loan(
+        loan, collateral, {"industry": "education"}, {}, config.CITY_MAP, policy_map=pm
+    )
+    assert r["risk_class"] == "正常"  # 非目标行业不受影响
+
+
+def test_industry_rule_skips_when_customer_missing(loan, collateral):
+    # 无客户档（CDC 孤儿贷款）或行业为空 → 不命中任何行业规则
+    pm = {("industry", "manufacturing"): {"action": "strict", "ltv_cap": None, "center": None}}
+    assert (
+        risk_engine.enrich_loan(loan, collateral, None, {}, config.CITY_MAP, policy_map=pm)[
+            "risk_class"
+        ]
+        == "正常"
+    )
+    assert (
+        risk_engine.enrich_loan(
+            loan, collateral, {"industry": None}, {}, config.CITY_MAP, policy_map=pm
+        )["risk_class"]
+        == "正常"
+    )
+
+
+def test_industry_rule_respects_ltv_cap(loan, collateral):
+    # 默认 LTV 0.5：cap 0.6 不命中，cap 0.4 命中（严格大于才命中）
+    low = {("industry", "manufacturing"): {"action": "strict", "ltv_cap": 0.6, "center": None}}
+    high = {("industry", "manufacturing"): {"action": "strict", "ltv_cap": 0.4, "center": None}}
+    cust = {"industry": "manufacturing"}
+    assert (
+        risk_engine.enrich_loan(loan, collateral, cust, {}, config.CITY_MAP, policy_map=low)[
+            "risk_class"
+        ]
+        == "正常"
+    )
+    assert (
+        risk_engine.enrich_loan(loan, collateral, cust, {}, config.CITY_MAP, policy_map=high)[
+            "risk_class"
+        ]
+        == "关注"
+    )
+
+
+def test_industry_reject_sets_flag_not_class(loan, collateral):
+    pm = {("industry", "manufacturing"): {"action": "reject", "ltv_cap": 0.4, "center": None}}
+    r = risk_engine.enrich_loan(
+        loan, collateral, {"industry": "manufacturing"}, {}, config.CITY_MAP, policy_map=pm
+    )
+    assert r["is_rejected"] is True
+    assert r["risk_class"] == "正常"  # 拒贷不改分类，与 city/zone 口径一致
+
+
+def test_city_and_industry_rules_can_stack(loan, collateral):
+    pm = {
+        ("city", "gz"): {"action": "notice", "ltv_cap": None, "center": None},
+        ("industry", "manufacturing"): {"action": "strict", "ltv_cap": None, "center": None},
+    }
+    r = risk_engine.enrich_loan(
+        loan, collateral, {"industry": "manufacturing"}, {}, config.CITY_MAP, policy_map=pm
+    )
+    assert r["risk_class"] == "次级"  # 正常->关注(notice) 再 ->次级(strict)
 
 
 # ================================================================ R-UNW-03 异常估值

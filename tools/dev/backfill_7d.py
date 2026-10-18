@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SpaceFin-Agent · 7 天演示回填脚本（2026-08-01 ~ 2026-08-07，事件城市 = 广州）
 
-配合 docs/demo/script_7d.md 剧本执行，灌数统一走真实引擎：
+配合 7 天风险演进剧本执行，灌数统一走真实引擎：
     tools/risk/main.py --date <业务日> --write-db   每日风险重算
     tools/alerting/main.py --date <业务日>          每日 LTV 预警推送
 
@@ -20,7 +20,7 @@
     D7 08-07  非核心区挂牌价小幅回升(+4%) → 处置余量收口 → 跑引擎 08-07
               → 按 D7 重算结果标记「已解除」(disposition_status=recovered)
 
-诚实性说明（与 docs/demo/script_7d.md 第 2 节一致）：
+诚实性说明（与 7 天剧本第 2 节一致）：
     - 仅 customer / collateral / loan 三表为脚本合成；crawl_housing_sale 为真实爬取。
     - D4 起的广州挂牌价下探是对真实爬取行做单价乘子的**演示脚本扰动**，
       原值记录在 ads_demo_gz_perturb 表，可一键回滚；AVM 重训是真实引擎行为。
@@ -467,7 +467,7 @@ def step_dispose(day: str, n_dispose: int, dispose_pool_day: str):
     """对处置池（默认 D5 strong 预警中的广州贷款）实施处置并写记录。
 
     处置类型占比（剧本 6.2）：追加抵押 50% / 提前还款 30% / 观察·展期 20%。
-    引擎真实传导（AVM 估值不可改，见 docs/demo/script_7d.md 与代码注释）：
+    引擎真实传导（AVM 估值不可改，见 7 天剧本与代码注释）：
       - 追加抵押：上调 collateral.true_market_price(+20%) 留痕 + 余额 ×0.85 等效敞口收缩；
       - 提前还款：loan.balance ×0.75（-25%）；
       - 观察·展期：loan.risk_class 标记「关注」+ 审计留痕（引擎按 LTV 重算覆盖，主要靠记录体现）。

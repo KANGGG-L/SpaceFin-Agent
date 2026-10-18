@@ -7,6 +7,15 @@ exclude = ["docs/poc/"]
 select = ["E", "F", "I", "W", "UP", "B", "N"]
 ignore = ["E501"]
 
+[tool.ruff.lint.per-file-ignores]
+# 测试文件：中文标识符命名（断言语义直读）/ assert False 惯用法 / sys.path 注入后本地导入，
+# 都是有意为之，不按生产代码口径要求。
+"tools/**/tests/*.py" = ["N802", "N806", "B011", "E402"]
+# 脚本入口：先设 sys.path / 环境变量再导入同目录模块，属有意为之。
+"tools/frontend/app.py" = ["E402"]
+"tools/frontend/sandbox_agent.py" = ["E402"]
+"tools/risk/main.py" = ["E402"]
+
 [tool.ruff.format]
 quote-style = "double"
 

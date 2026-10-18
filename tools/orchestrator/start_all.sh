@@ -19,6 +19,8 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 REPO_ROOT="$(pwd)"
+# shellcheck source=tools/orchestrator/lib_host_repo_root.sh
+. "$(dirname "$0")/lib_host_repo_root.sh"
 VENV="${SPACEFIN_RENDER_VENV:-$REPO_ROOT/tools/orchestrator/.venv}"
 RENDER_PORT="${RENDER_PORT:-8899}"
 RENDER_LOG="output/guangdong/logs/host_render_service.log"
@@ -44,8 +46,13 @@ done
 export CRAWL_RUN_ID="${CRAWL_RUN_ID:-manual}"
 
 render_alive() {
+  # 同时探 127.0.0.1（宿主机直装 Airflow）与 host.docker.internal
+  # （容器化部署：渲染服务跑在宿主 WSL，容器经 host.docker.internal 访问，
+  # 其 127.0.0.1 回环上没有该服务）。二者任一可达即视为健康。
   if curl -s -o /dev/null --max-time 3 "http://127.0.0.1:$RENDER_PORT/health"; then return 0; fi
+  if curl -s -o /dev/null --max-time 3 "http://host.docker.internal:$RENDER_PORT/health"; then return 0; fi
   if curl -s -o /dev/null --max-time 3 "http://127.0.0.1:$RENDER_PORT/"; then return 0; fi
+  if curl -s -o /dev/null --max-time 3 "http://host.docker.internal:$RENDER_PORT/"; then return 0; fi
   return 1
 }
 
@@ -71,14 +78,33 @@ else
       launchctl kickstart "gui/$(id -u)/$LABEL" 2>/dev/null || true
       ;;
     Linux)
-      echo "[start_all] starting host render service via systemd ($SERVICE) ..."
-      if systemctl --user show-environment >/dev/null 2>&1; then
-        systemctl --user start "$SERVICE" 2>&1 || \
-          echo "[start_all] systemctl --user start $SERVICE failed" >&2
-      elif sudo -n systemctl start "$SERVICE" 2>&1; then
+      # 优先 systemd（unit 已装时）；unit 缺失 / systemd 不可用 → 直接后台拉
+      # host_render_service.py。⚠️ 回退必须真正落到直启分支：此前 user bus 可达但 unit
+      # 未安装时，`|| echo "fallback to direct launch"` 只打印不回退，导致渲染服务
+      # 根本没起（render_alive 30s 探测失败 → start_stack 失败 / 要人工 nohup）。
+      _direct_launch() {
+        if [ -x "$VENV/bin/python" ]; then
+          # 容器内 airflow 用户对仓库 output/ 无写权限，日志改写到可写的 /tmp。
+          _fallback_log="/tmp/spacefin-render/host_render_service.log"
+          mkdir -p "$(dirname "$_fallback_log")"
+          echo "[start_all] launching host_render_service.py directly in background"
+          nohup "$VENV/bin/python" "$REPO_ROOT/tools/orchestrator/host_render_service.py" "$RENDER_PORT" \
+            > "$_fallback_log" 2>&1 &
+          echo "[start_all] render service launched (pid $!) -> $_fallback_log"
+        else
+          echo "[start_all] venv missing ($VENV): cannot launch render service" >&2
+          return 1
+        fi
+      }
+      if systemctl --user show-environment >/dev/null 2>&1 \
+         && systemctl --user list-unit-files "$SERVICE" 2>/dev/null | grep -q "$SERVICE"; then
+        echo "[start_all] starting host render service via systemd --user ($SERVICE) ..."
+        systemctl --user start "$SERVICE" 2>&1 || _direct_launch
+      elif sudo -n systemctl start "$SERVICE" 2>/dev/null; then
+        echo "[start_all] starting host render service via sudo systemctl ($SERVICE) ..."
         :
       else
-        echo "[start_all] systemctl start $SERVICE failed (user bus unavailable, sudo -n denied?)" >&2
+        _direct_launch
       fi
       ;;
     *)
@@ -103,6 +129,9 @@ fi
 
 # 3) 容器栈（--render-only 时跳过）
 if [ "$RENDER_ONLY" -ne 1 ]; then
+  # bind 源必须是 dockerd 可见的绝对路径：本脚本常由 Airflow 在 airflow 容器内执行，
+  # 届时 $REPO_ROOT=/opt/spacefin，沿用相对路径会让 dockerd 另建一棵树、采集结果丢失。
+  spacefin_export_host_repo_root "$REPO_ROOT" || exit 1
   if [ "$DO_BUILD" -eq 1 ]; then
     echo "[start_all] docker compose build $BUILD_TARGETS ..."
     # shellcheck disable=SC2086

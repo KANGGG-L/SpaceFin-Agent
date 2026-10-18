@@ -35,9 +35,9 @@
 | **三+** | **被标记的陌生机器（带登录态抓取）** | **DrissionPage 持久化 profile 会话重放 + 代理自动切换** | `stealth.py` | ✅ 人工登录一次后带登录态持续抓（真正把数据抓下来的组件） |
 | 四 | IP 频次限制（多页被封） | 动态代理池（每请求换 IP） | `proxy.py` | ✅ 多页/可持续的唯一出路（接口已留） |
 | 五 | 在线地理编码太慢（200ms/次） | 本地离线 O(1) 哈希词典 | `geocoder.py` | ✅ 单条 ~1.2ms |
-| 六 | 单机吞吐不足 | k8s + Redis 队列 + asyncio 分布式 | `k8s/` + `k8s_manifests/` | ⏸ 架构完整，需 k8s 集群方可运行 |
+| 六 | 单机吞吐不足 | k8s + Redis 队列 + asyncio 分布式 | `distributed/` + `k8s_manifests/` | ⏸ 架构完整，需 k8s 集群方可运行 |
 
-解析层有两套 schema：`parse/numeric.py` 输出 **17 字段纯数值 schema**（户型拆解 / 房龄 / 车位 / 总价 / 单价 / 经纬度 / URL，喂给 L3 AVM 估值）；`parse/advanced.py` 输出 **18 字段增强 schema**（额外含户型串 Layout、是否含车位 Has_Parking、车位描述 Parking_Desc，供更细粒度分析）。
+解析层有三套 schema：`parse/numeric.py` 输出 **17 字段纯数值 schema**（户型拆解 / 房龄 / 车位 / 总价 / 单价 / 经纬度 / URL，喂给 L3 AVM 估值）；`parse/advanced.py` 输出 **18 字段增强 schema**（额外含户型串 Layout、是否含车位 Has_Parking、车位描述 Parking_Desc，供更细粒度分析）；`parse/rent.py` 输出 **14 字段出租 schema**（月租金、租期类型等，面向 `{city}.zu.anjuke.com` 出租页，需 DrissionPage 渲染），经纬度在 ETL 阶段补全。
 
 **外部组件**（阶段四/六的运行依赖，各自单独登记）：
 
@@ -51,9 +51,11 @@
 
 | 请求 | 结果 |
 |------|------|
-| 全新 session · 广州 `/sale/p1/` | ✅ 71 条真实房源（1.29 MB） |
-| 同一 session · 广州 `/sale/p2/` | ❌ 610 B deny 拦截页 |
-| 另一全新 session · 深圳 `/sale/p1/` | ❌ 610 B deny 拦截页 |
+| 全新 session · 列表页 `/sale/p1/` | ✅ 71 条真实房源（约 1.56 MB） |
+| 同一 session · 列表页 `/sale/p2/` | ❌ 610 B deny 拦截页 |
+| 另一全新 session · 另一城市 `/sale/p1/` | ❌ 610 B deny 拦截页 |
+
+> 注：随包归档的离线样本 `tests/sample_listing.html` 实测为**上海浦东**二手房列表页（`shanghai.anjuke.com/sale/pudong/`），体积 1,634,637 字节（约 1.56 MB），解析得 71 条；上表城市/页码为当次实测记录。
 
 由此得出三个判断，直接支撑"走商业 API"的决策：
 
@@ -63,7 +65,7 @@
 
 ## 5. 接入与运行
 
-依赖已在 conda env `spark`：`curl_cffi` / `lxml`（`redis` 仅分布式需要）。
+依赖已在 conda env `spark`：`curl_cffi` / `lxml` / `DrissionPage`（`redis` 仅分布式需要）；`requests` 为间接依赖，`fakeredis`、`pytest` 仅测试用。
 
 ```bash
 conda activate spark
@@ -87,8 +89,8 @@ python -m anjuke_crawler.main crawl --city gz --pages 5 --out anjuke_crawler/out
 # E. k8s 分布式（需可用 k8s 集群）
 kubectl apply -f anjuke_crawler/k8s_manifests/redis-deployment.yaml
 kubectl apply -f anjuke_crawler/k8s_manifests/worker-deployment.yaml   # hostPath 先改为本仓库路径
-python -m anjuke_crawler.k8s.producer --cities gz,sz --pages 3
-python -m anjuke_crawler.k8s.exporter
+python -m anjuke_crawler.distributed.producer --cities gz,sz --pages 3
+python -m anjuke_crawler.distributed.exporter
 ```
 
 抓取产物落 `tools/anjuke_crawler/output/`（已 gitignore，**不入库**）。
@@ -121,11 +123,12 @@ python -m anjuke_crawler.k8s.exporter
 | `tools/anjuke_crawler/fetch/proxy.py` | 代理层（阶段四）：proxy_pool REST 客户端（用坏即扔） |
 | `tools/anjuke_crawler/parse/numeric.py` | 解析层：17 字段纯数值 schema |
 | `tools/anjuke_crawler/parse/advanced.py` | 解析层（增强）：18 字段 schema（户型串/车位描述） |
+| `tools/anjuke_crawler/parse/rent.py` | 解析层（出租）：14 字段 schema（月租金/租期类型，`zu.anjuke.com`） |
 | `tools/anjuke_crawler/geocoder.py` | 地理编码：本地离线 O(1) 哈希（含 save/add 增量沉淀） |
 | `tools/anjuke_crawler/distributed/{producer,worker,exporter}.py` | 分布式层（阶段六）：Redis 任务生产 / asyncio 消费 / 汇总导出 |
 | `tools/anjuke_crawler/main.py` | CLI：parse / parse-advanced / geocode / crawl / stealth |
 | `tools/anjuke_crawler/setup.py` | 包定义（curl_cffi / lxml / redis / DrissionPage） |
-| `tools/anjuke_crawler/tests/sample_listing.html` | 随包附带的真实列表页样本（离线解析可复现，71 条） |
+| `tools/anjuke_crawler/tests/sample_listing.html` | 随包附带的真实列表页样本（上海浦东二手房页，离线解析可复现 71 条） |
 | `tools/anjuke_crawler/k8s_manifests/*.yaml` | Redis + Worker 副本集 k8s 清单 |
 | `tools/anjuke_crawler/scripts/demo_pipeline.py` | 端到端流水线演示（分布式队列 + 代理池对接 + 抓取解析，替身环境可复现） |
 | `tools/anjuke_crawler/experiments/` | 阶段一/二反爬绕过手段的实验脚本与结论归档 |

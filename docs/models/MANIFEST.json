@@ -1,0 +1,15 @@
+{
+  "kind": "model-artifact-lineage",
+  "generated_at": "2026-10-18",
+  "note": "AVM 训练/推理代码指纹。模型产物（约 22MB）不随仓库分发，故以代码指纹绑定「版本 ↔ 配置 ↔ 代码」血缘，便于离线核对。",
+  "files": [
+    {
+      "path": "tools/avm/train.py",
+      "sha256": "562b8eeb3f4aabe084fb2e0ae80a5cdac7fb6ad0a6ac007b8f9faede517a05c6"
+    },
+    {
+      "path": "tools/avm/predict.py",
+      "sha256": "c63c920bc1fa4596ead58b4fef4d1fcb58d081f844c332ca4825c90874946bec"
+    }
+  ]
+}

@@ -12,8 +12,8 @@
 
 ## 2. 生产对应物（诚实标注）
 
-| 本项目（可跑实现） | 生产对应物 |
-|--------------------|-----------|
+| 本项目（可跑实现）                | 生产对应物                                                             |
+| --------------------------------- | ---------------------------------------------------------------------- |
 | 单节点 MySQL 8.0 容器 + 合成 seed | 金融机构核心业务系统（MySQL / Oracle），承载真实客户、抵押物、贷款台账 |
 
 本组件用单机 MySQL + 合成数据**模拟**核心业务系统的角色与 schema 形态；真实生产环境为机构内网核心库，数据合规获取路径见 `docs/product/01/数据现状摸底.md`（D3 信贷业务数据）。
@@ -22,13 +22,14 @@
 
 见 `sql/init/01_schema.sql`，三张表：
 
-| 表 | 说明 | 关键字段 |
-|----|------|---------|
-| `customer` | 客户（借款人）主档 | credit_score / income_monthly / debt_ratio |
-| `collateral` | 抵押物（房产）主档 + 空间特征 | lat / lng / area / age / true_market_price / poi_density / commute_min / is_high_risk_zone / spatial_feat_missing_pct |
-| `loan` | 贷款台账 | loan_amount / balance / interest_rate / risk_class(五级分类) / origination_date |
+| 表           | 说明                                         | 关键字段                                                                                                                                                                                         |
+| ------------ | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `customer`   | 客户（借款人）主档                           | credit_score / income_monthly / debt_ratio / industry                                                                                                                                            |
+| `collateral` | 抵押物（房产）主档 + 空间特征 + AVM 推理特征 | lat / lng / area / age / true_market_price / poi_density / commute_min / is_high_risk_zone / spatial_feat_missing_pct / hall / bath / bedrooms / floor_level / floor_total / direction / parking |
+| `loan`       | 贷款台账                                     | loan_amount / balance / interest_rate / risk_class(五级分类) / origination_date                                                                                                                  |
 
 设计要点：
+
 - `loan` 通过外键关联 `customer` / `collateral`，并对 `risk_class` 设 `CHECK` 约束限定五级分类取值（正常 / 关注 / 次级 / 可疑 / 损失）。
 - 表 / 列均带中文 `COMMENT`，自描述业务含义。
 - 字符集 `utf8mb4`，存储引擎 `InnoDB`。
@@ -52,7 +53,7 @@ make destroy                # 停止并清空数据卷（下次 up 重新初始�
 
 ## 5. Seed 数据
 
-由 `seed/generate_seed.py` 生成 `sql/init/02_seed.sql`（确定性、可复现、全合成）。详见 [`seed/README.md`](../../seed/README.md)。重新生成：`make seed-gen`。
+由 `seed/generate_seed.py` 生成 `sql/init/02_seed.sql`（确定性、可复现、全合成）。详见 [`seed/README.md`](../../../seed/README.md)。重新生成：`make seed-gen`。
 
 ## 6. 合规
 
@@ -60,4 +61,4 @@ make destroy                # 停止并清空数据卷（下次 up 重新初始�
 
 ## 7. 后续演进（下一个组件何时引入）
 
-按 L0 能力规划，下一步的业务需要是"**把源数据沉淀为分层资产、统一口径**"——届时才引入 **Doris（热存 / OLAP）+ MinIO（冷湖 / Parquet）+ Multi-Catalog 联邦查询**，构建 ODS→DWD→DWS→ADS 分层。在该需要出现之前，不提前搭设。
+按 L0 能力规划，源数据沉淀为分层资产、统一口径的需求已落地——已接入 **Doris（热存 / OLAP）+ MinIO（冷湖 / Parquet）+ Multi-Catalog 联邦查询**，构建 ODS→DWD→DWS→ADS 分层，详见 [`doris-lake.md`](doris-lake.md) 与 [`cdc-downstream.md`](cdc-downstream.md)。

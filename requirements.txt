@@ -21,3 +21,7 @@ pytest
 # import，缺失会让 `pytest tools/` 直接收集失败；orchestrator 的 conftest 也用它在无
 # 真实 Redis 时降级。
 fakeredis
+# AVM 模型产物（output/avm/model.joblib）的加载依赖。缺失时 tools/avm/predict.load_model
+# 静默返回 None → 风险引擎整批回退、dws 偏差全 NULL、AVM 页面无数据（2026-09-01 事故）。
+scikit-learn==1.7.2
+joblib==1.6.0

@@ -13,7 +13,7 @@
 1. **估值（AC-02）**：抵押物当前市值 = 三级回退（AVM → DWD 行情 → 业务库 true_market_price）；
 2. **LTV（AC-02）**：贷款余额 / 抵押物估值，是贷后风险的核心标尺；
 3. **五级分类**：按 LTV 分 正常/关注/次级/可疑/损失，供 1104 G11 报送（见 reporting-1104.md）；
-4. **贷后预警（AC-03）**：LTV 超强预警线（0.85）且非低置信 → 写 `ads_ltv_alerts` 推贷后保全；
+4. **贷后预警（AC-03，两档）**：LTV 超警示线（0.75，warn）或强预警线（0.85，strong 覆盖 warn）且非低置信 → 写 `ads_ltv_alerts` 推贷后保全；
 5. **低置信（AC-04）**：空间特征严重缺失（缺失率 > 75，严格大于，恰好=75 不标记）→ 抑制自动预警、转人工核查；
 6. **异常估值（R-UNW-03）**：AVM 估值与参考基准偏差 >30% → 写人工核查告警；
 7. **血缘（R-UBQ-01）**：每行带 `model_version`，模型缺失/无版本号 → 「不可溯源」告警。
@@ -49,7 +49,8 @@
 
 ```
 LTV = loan.balance / 抵押物估值        （估值 ≤ 0 → LTV = None，保守归「次级」）
-alert = LTV > LTV_RED_LINE(0.85) 且 非 low_confidence
+alert_level = 'strong'（LTV > LTV_RED_LINE(0.85)）| 'warn'（LTV > LTV_WARN_LINE(0.75)）
+alert = alert_level 非空 且 非 low_confidence        （strong 覆盖 warn；恰好=阈值不触发）
 ```
 
 - **严格大于**：LTV 恰好 = 0.85 压线不触发（B-01 等号边界）。
@@ -58,16 +59,17 @@ alert = LTV > LTV_RED_LINE(0.85) 且 非 low_confidence
   `tools/risk/config.py` 中 `LTV_WARN_LINE=0.75`（warn）与 `LTV_RED_LINE=0.85`（strong）
   均已存在且可配置；`risk_engine.py` 含两分支逻辑（LTV > 警示线 → warn，LTV > 强预警线
   → strong 覆盖 warn），`alert` 布尔保持兼容下游。两份阈值均为严格大于（B-01/B-02 等号边界满足）。
+- **false-alert 控制手段**：强预警线 0.85 紧邻 AVM ~10% 误差带（LTV = 贷款余额 / AVM 估值，AVM 估值偏差会等比传导到 LTV），故阈值**可配置** + **低置信（空间特征缺失 >75%）降级转人工**，避免 AVM 估值误差误触发强预警。
 
 ### 3.2 五级分类（`config.CLASS_LTV_UPPER`）
 
-| 分类 | LTV 区间 | 环境变量（默认） |
-|---|---|---|
-| 正常 | ≤ 0.60 | RISK_LTV_NORMAL (0.60) |
-| 关注 | 0.60 < LTV ≤ 0.75 | RISK_LTV_ATTN (0.75) |
-| 次级 | 0.75 < LTV ≤ 0.85 | RISK_LTV_SUBSTD (0.85) |
-| 可疑 | 0.85 < LTV ≤ 1.00 | RISK_LTV_DOUBT (1.00) |
-| 损失 | > 1.00（或 LTV 为 None/负，保守） | — |
+| 分类 | LTV 区间                          | 环境变量（默认）       |
+| ---- | --------------------------------- | ---------------------- |
+| 正常 | ≤ 0.60                            | RISK_LTV_NORMAL (0.60) |
+| 关注 | 0.60 < LTV ≤ 0.75                 | RISK_LTV_ATTN (0.75)   |
+| 次级 | 0.75 < LTV ≤ 0.85                 | RISK_LTV_SUBSTD (0.85) |
+| 可疑 | 0.85 < LTV ≤ 1.00                 | RISK_LTV_DOUBT (1.00)  |
+| 损失 | > 1.00（或 LTV 为 None/负，保守） | —                      |
 
 分类上界**含边界**（`≤` 进本级），与预警/异常估值的「严格大于」是两个不同的比较语义。
 
@@ -96,15 +98,20 @@ is_high_risk_zone = 1 且 risk_class ∈ {正常, 关注} → risk_class = 关�
 ### 3.5 异常估值（R-UNW-03）
 
 ```
-仅 AVM 命中行可判：
-deviation_pct = |AVM估值 − true_market_price| / true_market_price
+仅 AVM 命中且为「小区级」估值时可判（口径约束，全链路验证发现）：
+deviation_pct = |AVM估值 − true_market_price| / true_market_price   （仅当 AVM 匹配到 (城市,小区) 目标编码）
 abnormal_valuation = deviation_pct > VALUATION_DEVIATION_THRESHOLD(0.30)
 ```
 
 - **严格大于**：偏差恰好 = 30% 不标（B-04 边界）。
-- AVM 未命中时 `deviation_pct` 置 **None**（不是 0）：回退链（DWD/true_market_price）
-  与基准同源，偏差恒为 0，算了只会把异常噪声化。
+- AVM 未命中、或 AVM 仅回退到城市/全局中位兜底时 `deviation_pct` 置 **None**（不是 0）：
+  `true_market_price` 按「小区(DWD 键)」层级合成（与 AVM 训练同源 `crawl_housing_sale`
+  价格量级），而 AVM 城市/全局兜底估值粒度更粗，与小区级基准不同粒度，直接比会系统性偏离
+  （实测城市兜底 58%、全局兜底 97% 触发 >30%），属口径不可比而非真实误估，算了只会产生
+  告警风暴。只有 AVM 真正匹配到 (城市,小区) 目标编码、估值粒度与基准一致时，偏差才有意义。
 - 触发后写 `ads_risk_valuation_alerts`（alert_code='R-UNW-03'），走人工核查。
+
+- **旧口径向后兼容（`avm_model is None`）**：历史无模型回退路径（`avm_model is None`）下，估值偏差仍按旧口径全程可判（向后兼容），并非只在有模型时生效。
 
 ### 3.6 血缘（R-UBQ-01）
 
@@ -132,15 +139,17 @@ abnormal_valuation = deviation_pct > VALUATION_DEVIATION_THRESHOLD(0.30)
 ### dws_risk_class（每笔打宽明细，PK=loan_id，UPSERT 幂等）
 
 `loan_id / customer_id / collateral_id / balance / interest_rate / market_valuation /
-ltv / risk_class / low_confidence / is_high_risk_zone / alert /
-valuation_deviation_pct / abnormal_valuation / model_version / etl_ts`
+ltv / risk_class / low_confidence / is_high_risk_zone / alert / alert_level /
+valuation_deviation_pct / abnormal_valuation / model_version / is_rejected / etl_ts`
 
-存量表补的偏差/异常/版本列全部允许 NULL——老数据无偏差列保持诚实，不强制填默认值。
+存量表补的偏差/异常/版本列全部允许 NULL——老数据无偏差列保持诚实，不强制填默认值；
+`is_rejected` 存量补列另设 `DEFAULT 0`（老数据视为未拒绝）。
 
 ### ads_ltv_alerts（LTV 预警，每日每笔一条）
 
 `id(AI) / loan_id / customer_id / collateral_id / loan_balance / market_valuation /
-ltv / risk_class / is_high_risk_zone / alert_date / etl_ts`，idx_loan / idx_date。
+ltv / risk_class / is_high_risk_zone / alert_level / alert_date / etl_ts`，
+idx_loan / idx_date。
 只写 `alert=1` 且非低置信的笔；替换语义「先删本批 loan_id+当日，再插」。
 
 ### ads_risk_valuation_alerts（人工核查告警）
@@ -160,13 +169,13 @@ valuation_deviation_pct / detail / alert_date / etl_ts`，idx_date / idx_loan。
 `tools/risk/main.py`（全量）与 `tools/cdc/consumer.py`（增量）**只调用 store.py 的函数**，
 不各自写 SQL：
 
-| 环节 | 共用函数 | 语义 |
-|---|---|---|
-| 计算 | `store.compute_rows` | 打宽（估值→LTV→五级→预警），增量/全量同一函数 |
-| 明细 | `store.upsert_dws` | 按 loan_id ON DUPLICATE KEY UPDATE 幂等覆盖 |
-| 预警 | `store.replace_alerts` | 只删**本批 loan_id + 当日**再插，不清全表 |
-| 删除 | `store.delete_loans` | 贷款被删 → DWS 明细 + 两张告警表三表同清（防幽灵敞口/幽灵告警） |
-| 汇总 | `store.refresh_ads_risk_class` | 从 DWS 现状聚合，增量改一笔也要刷新占比分母 |
+| 环节 | 共用函数                       | 语义                                                            |
+| ---- | ------------------------------ | --------------------------------------------------------------- |
+| 计算 | `store.compute_rows`           | 打宽（估值→LTV→五级→预警），增量/全量同一函数                   |
+| 明细 | `store.upsert_dws`             | 按 loan_id ON DUPLICATE KEY UPDATE 幂等覆盖                     |
+| 预警 | `store.replace_alerts`         | 只删**本批 loan_id + 当日**再插，不清全表                       |
+| 删除 | `store.delete_loans`           | 贷款被删 → DWS 明细 + 两张告警表三表同清（防幽灵敞口/幽灵告警） |
+| 汇总 | `store.refresh_ads_risk_class` | 从 DWS 现状聚合，增量改一笔也要刷新占比分母                     |
 
 拆出 store 的动机：两套 SQL 各写一遍必然漂移（字段顺序、五级口径、预警去重规则），
 一旦漂移，增量结果与全量结果对不上，验收时无法互证。
@@ -196,6 +205,7 @@ $PY tools/cdc/consumer.py --once --from-offset 0 # 从头重放对账
 ```
 
 **输出**：
+
 - 文件：`{out_dir}/dws_risk_class.csv`、`ads_ltv_alerts.csv`、`risk_report.json`
   （含 valuation_src 命中分布 / ltv_distribution / by_class / alerts_count /
   valuation_deviation / model_version / lineage_alerts）；
@@ -203,16 +213,15 @@ $PY tools/cdc/consumer.py --once --from-offset 0 # 从头重放对账
 
 `--write-db` 全量路径还会清掉业务库已不存在的贷款（增量 DELETE 漏消费时的兜底对账）。
 
-## 8. 输出样例与验收记录（2026-08-05）
+## 8. 输出样例与验收记录（2026-09-01）
 
-| 项 | 结果 |
-|---|---|
-| 全量重算 | 200 笔落 dws_risk_class；五级汇总与 reporting-1104 三出口一致 |
-| 五级分类汇总 | 正常 127 / 关注 47 / 次级 10 / 可疑 10 / 损失 6，合计 200 笔 / 81,849,436.14 |
-| DWD 行情命中 | 22/200（11%），真区级键 6 个；命中行 DWD估值/true_market_price 中位 0.95 |
-| 估值回退构成 | 合成地址（上海）无广东城市码 → AVM 大量 miss，主要由 true_market_price 兜底 |
-| 低置信 | 合成种子坐标多为上海随机撒点、空间特征先天不足，低置信比例高（AC-04 预期行为） |
-| 幂等重跑 | dws 按 loan_id upsert、ads_risk_class 按 (stat_date, risk_class) 覆盖，结果稳定 |
+| 项           | 结果                                                                                                |
+| ------------ | --------------------------------------------------------------------------------------------------- |
+| 全量重算     | 5000 笔落 dws_risk_class；五级汇总与 reporting-1104 三出口一致                                      |
+| 五级分类汇总 | 正常 3777 / 关注 947 / 次级 128 / 可疑 81 / 损失 67，合计 5000 笔 / 2,207,522,908.05                |
+| 估值命中构成 | avm_hits=5000/5000、dwd_hits=0、fallback_true_market=0（广东 21 城地址对齐后 AVM 全覆盖，无需回退） |
+| 预警(AC-03)  | 超红线(0.85) 146 笔、low_confidence 167 笔、alerts_count 267（risk_report 2026-09-01）              |
+| 幂等重跑     | dws 按 loan_id upsert、ads_risk_class 按 (stat_date, risk_class) 覆盖，结果稳定                     |
 
 ## 9. 已知局限
 
@@ -223,9 +232,17 @@ $PY tools/cdc/consumer.py --once --from-offset 0 # 从头重放对账
 - **低置信边界是「严格大于 75」**：`missing_pct > config.LOW_CONF_MISSING_PCT(75.0)`，
   缺失率恰好 = 75 不标记，与 AC-04/B-04 边界一致。
 - **docstring 已更新**：risk_engine.py 模块 docstring 已说明「缺失率严格大于 75（恰好=75 不低置信）」，与 config 默认 75 一致。
-- **估值基准自指**：参考基准 `true_market_price` 本身由模型版本自产（08-04 版），
-  R-UNW-03 的偏差本质是「版本漂移」信号而非绝对市场误差，**勿据此做估值校正层**。
-- **合成地址下估值链退化**：200 笔地址均为上海合成值、无广东城市码，AVM/DWD 大量 miss，
-  LTV 主要由合成兜底价驱动；换真实广东抵押物数据后命中分布才有判别力。
-- **异常估值不可判时置 None 而非 0**：AVM 未命中 → deviation_pct=NULL，统计口径随之
-  收窄为「仅 AVM 命中行」，risk_report 的 computed 数会小于总笔数，是刻意为之。
+- **估值基准自指（部分成立）**：无键城市（zs/yf/zh/dg 等）的 `true_market_price` 取自
+  旧版 AVM（08-04）隐含单价，与该部分 AVM 估值确属「新旧快照对比」，R-UNW-03 偏差本质含
+  「版本漂移」信号而非纯市场误差，**勿据此做估值校正层**。有键城市的 `true_market_price`
+  则取 DWD 中位单价，与 AVM 训练同源。
+- **告警风暴根因 = 比较粒度错配（已修复）**：全链路验证前 R-UNW-03 在 5000 笔上 52.8%
+  触发，根因并非「AVM 估挂牌价、基准另一口径」那种量级差异——二者同源 `crawl_housing_sale`，
+  而是 AVM 回退到城市/全局中位兜底时，估值粒度（城市/全局）与小区级 `true_market_price`
+  不可比（城市兜底 58%、全局兜底 97% 触发 >30%）。修复：仅当 AVM 命中 (城市,小区) 目标编码
+  （小区级）才计算偏差，粗粒度兜底与未命中同置 None。修复后实测偏差>30% 占比降至 **19.7%（987/5000）**（见 `output/risk/risk_report.json`，2026-09-01；此前文档误记 7.5%）。
+- **合成地址下估值链退化（旧描述已过时）**：早期 200 笔为上海合成值、无广东城市码导致
+  AVM/DWD 大量 miss；当前 seed 已改为广东 21 城合成地址，AVM/DWD 可正常命中，告警风暴的
+  主因是上面的粒度错配而非城市码缺失。
+- **异常估值不可判时置 None 而非 0**：AVM 未命中 / 粗粒度兜底 → deviation_pct=NULL，
+  统计口径随之收窄为「仅小区级 AVM 命中行」，risk_report 的 computed 数会小于总笔数，是刻意为之。

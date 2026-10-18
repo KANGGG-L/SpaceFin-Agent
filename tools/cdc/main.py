@@ -433,23 +433,42 @@ def main():
     print(f"[cdc] done, {count} events", flush=True)
 
 
-def _insert_log(conn, table, event_type, before, after):
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            f"INSERT INTO {LOG_TABLE} (table_name, event_type, before_json, after_json) VALUES (%s,%s,%s,%s)",
-            (
-                table,
-                event_type,
-                json.dumps(before, ensure_ascii=False, default=str) if before else None,
-                json.dumps(after, ensure_ascii=False, default=str) if after else None,
-            ),
-        )
-        conn.commit()
-    except Exception as e:  # noqa: BLE001
-        print(f"[cdc] log insert error: {e}", flush=True)
-    finally:
-        cur.close()
+def _insert_log(conn, table, event_type, before, after, max_retries=3):
+    """落 ods_cdc_log（可 SQL 查询、1 分钟内可见）。
+
+    健壮性约束（C 类）：INSERT 失败**禁止吞错**——因为 main() 在「_write_ods_lake +
+    _insert_log 全部成功之后」才 write_position 推进 binlog 位点。一旦日志表未落库却吞掉
+    异常，位点仍会推进，重启后该事件不会被重放 → 静默丢事件。
+
+    这里改为 fail-fast：先有界重试（应对瞬时抖动），重试耗尽仍失败则上抛；上抛后 main()
+    的 for 循环自然中断，write_position 不会再为本事件推进位点，重启从上一持久化位点重放
+    （ODS 湖按事件幂等，重放安全）。
+    """
+    last_err = None
+    for _ in range(1, max_retries + 1):
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                f"INSERT INTO {LOG_TABLE} (table_name, event_type, before_json, after_json) VALUES (%s,%s,%s,%s)",
+                (
+                    table,
+                    event_type,
+                    json.dumps(before, ensure_ascii=False, default=str) if before else None,
+                    json.dumps(after, ensure_ascii=False, default=str) if after else None,
+                ),
+            )
+            conn.commit()
+            return
+        except Exception as e:  # noqa: BLE001 - 有界重试后上抛，由调用方决定是否推进位点
+            last_err = e
+            if hasattr(conn, "rollback"):
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+        finally:
+            cur.close()
+    raise RuntimeError(f"[cdc] ods_cdc_log insert failed after {max_retries} attempts: {last_err}")
 
 
 if __name__ == "__main__":
